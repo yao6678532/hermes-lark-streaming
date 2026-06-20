@@ -292,18 +292,31 @@ def _build_footer_elements(
     data = footer_data or {}
     en_lines: list[str] = []
     zh_lines: list[str] = []
+    # GPT quota is more useful than context in the footer. Keep context for
+    # non-GPT models (e.g. DeepSeek) where gpt_quota is empty/hidden.
+    hide_context = bool(data.get("gpt_quota"))
     for row in fields:
         en_parts: list[str] = []
         zh_parts: list[str] = []
         for field in row:
+            if hide_context and field == "context":
+                continue
             en, zh = _render_footer_field(field, data, is_error, is_aborted, show_label)
             if en:
                 en_parts.append(en)
                 if zh:
                     zh_parts.append(zh)
         if en_parts:
-            en_lines.append(" · ".join(en_parts))
-            zh_lines.append(" · ".join(zh_parts))
+            # Keep completed footer compact: "✅ 26.5s · model ..." instead of
+            # "✅ · 26.5s · model ...". Error/stopped statuses keep separators.
+            if en_parts[0] == "✅" and len(en_parts) > 1:
+                en_lines.append(en_parts[0] + " " + " · ".join(en_parts[1:]))
+            else:
+                en_lines.append(" · ".join(en_parts))
+            if zh_parts and zh_parts[0] == "✅" and len(zh_parts) > 1:
+                zh_lines.append(zh_parts[0] + " " + " · ".join(zh_parts[1:]))
+            else:
+                zh_lines.append(" · ".join(zh_parts))
 
     if not en_lines:
         return []
@@ -337,7 +350,9 @@ def _render_footer_field(
             return _T["status_error"]
         if is_aborted:
             return _T["status_stopped"]
-        return _T["status_completed"]
+        # Footer is space-constrained; keep completed status icon-only.
+        # Header still uses the localized "Completed/已完成" label.
+        return "✅", "✅"
 
     if name == "elapsed":
         duration = data.get("duration", 0)
@@ -370,6 +385,14 @@ def _render_footer_field(
                 return _T["context"][0].format(val), _T["context"][1].format(val)
             return val, val
         return None, None
+
+    if name == "balance":
+        v = data.get("balance") or None
+        return v, v
+
+    if name == "gpt_quota":
+        v = data.get("gpt_quota") or None
+        return v, v
 
     return None, None
 

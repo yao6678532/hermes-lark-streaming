@@ -24,6 +24,101 @@ _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
 
 
+def _fetch_gpt_quota_footer(model: str) -> str:
+    """Return a compact Codex/GPT quota string for the footer.
+
+    Uses Hermes' credential pool rather than the singleton Codex auth store, so
+    it works for profiles/accounts that only have pooled credentials. Fail-open:
+    any auth/API/parsing error returns an empty string and the footer field is
+    hidden by the card builder.
+    """
+    normalized_model = (model or "").lower()
+    if not any(marker in normalized_model for marker in ("gpt", "codex", "openai")):
+        return ""
+
+    try:
+        from datetime import datetime, timezone
+
+        import httpx
+        from agent.credential_pool import load_pool
+
+        def _format_reset(value: object) -> str:
+            if value in (None, ""):
+                return ""
+            try:
+                if isinstance(value, (int, float)):
+                    reset_at = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                else:
+                    text = str(value).strip()
+                    if text.endswith("Z"):
+                        text = text[:-1] + "+00:00"
+                    reset_at = datetime.fromisoformat(text)
+                    if reset_at.tzinfo is None:
+                        reset_at = reset_at.replace(tzinfo=timezone.utc)
+                seconds = max(0, int((reset_at - datetime.now(timezone.utc)).total_seconds()))
+                minutes = seconds // 60
+                if minutes < 60:
+                    return f"{minutes}m"
+                hours, minutes = divmod(minutes, 60)
+                if hours < 24:
+                    return f"{hours}h{minutes:02d}m"
+                days, hours = divmod(hours, 24)
+                return f"{days}d{hours}h"
+            except Exception:
+                return ""
+
+        def _quota_color(remaining: int) -> str:
+            if remaining >= 50:
+                return "green"
+            if remaining >= 20:
+                return "orange"
+            return "red"
+
+        pool = load_pool("openai-codex")
+        cred = pool.select()
+        token = str(getattr(cred, "access_token", "") or "").strip() if cred else ""
+        if not token:
+            return ""
+
+        base_url = str(getattr(cred, "base_url", "") or "https://chatgpt.com/backend-api/codex").strip().rstrip("/")
+        if base_url.endswith("/codex"):
+            base_url = base_url[: -len("/codex")]
+        usage_url = base_url + ("/wham/usage" if "/backend-api" in base_url else "/api/codex/usage")
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": "codex-cli",
+        }
+        account_id = (getattr(cred, "extra", None) or {}).get("account_id")
+        if account_id:
+            headers["ChatGPT-Account-Id"] = str(account_id)
+
+        response = httpx.get(usage_url, headers=headers, timeout=5.0)
+        response.raise_for_status()
+        payload = response.json() or {}
+        rate_limit = payload.get("rate_limit") or {}
+        if rate_limit.get("limit_reached") is True or rate_limit.get("allowed") is False:
+            return "GPT limited"
+
+        parts: list[str] = []
+        for key, label in (("primary_window", "5h"), ("secondary_window", "W")):
+            window = rate_limit.get(key) or {}
+            used = window.get("used_percent")
+            if used is None:
+                continue
+            remaining = max(0, min(100, round(100 - float(used))))
+            colored_quota = f"<font color='{_quota_color(remaining)}'>{label} {remaining}%</font>"
+            reset = _format_reset(window.get("reset_at"))
+            if label == "5h" and reset:
+                parts.append(f"{colored_quota} ↻{reset}")
+            else:
+                parts.append(colored_quota)
+        return " · ".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
 class StreamCardController(StreamingController):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
 
@@ -493,6 +588,26 @@ class StreamCardController(StreamingController):
             if final_answer:
                 session.segment_state.on_answer_delta(final_answer)
 
+        # 仅在 DeepSeek 模型下查询余额
+        balance = ""
+        if model and "deepseek" in model.lower():
+            try:
+                import subprocess
+                from pathlib import Path
+
+                result = subprocess.run(
+                    ["bash", str(Path.home() / ".hermes/scripts/deepseek-balance.sh")],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    balance = f"¥{result.stdout.strip()}"
+            except Exception:
+                pass
+
+        gpt_quota = _fetch_gpt_quota_footer(model)
+
         session.footer = {
             "duration": duration,
             "model": model,
@@ -500,6 +615,8 @@ class StreamCardController(StreamingController):
             **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
             **({"context_used": context.get("used_tokens")} if context else {}),
             **({"context_max": context.get("max_tokens")} if context else {}),
+            "balance": balance,
+            "gpt_quota": gpt_quota,
         }
 
     def _complete_session(self, session: CardSession) -> None:
