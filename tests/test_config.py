@@ -6,6 +6,8 @@ import os
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from hermes_lark_streaming.config import Config
 
 
@@ -25,12 +27,9 @@ class TestEnabled:
         cfg = _make_config({"streaming": {"enabled": False}})
         assert cfg.enabled is False
 
-    def test_enabled_missing(self) -> None:
-        cfg = _make_config({"streaming": {}})
-        assert cfg.enabled is False
-
-    def test_no_streaming_section(self) -> None:
-        cfg = _make_config({})
+    @pytest.mark.parametrize("raw", [{"streaming": {}}, {}], ids=["missing-key", "missing-section"])
+    def test_enabled_defaults_false_when_missing(self, raw: dict[str, Any]) -> None:
+        cfg = _make_config(raw)
         assert cfg.enabled is False
 
     def test_streaming_section_not_dict(self) -> None:
@@ -47,12 +46,13 @@ class TestFooterFields:
         cfg = _make_config({"streaming": {"footer": {"fields": ["status", "elapsed"]}}})
         assert cfg.footer_fields == [["status", "elapsed"]]
 
-    def test_empty_fields_returns_default(self) -> None:
-        cfg = _make_config({"streaming": {"footer": {"fields": []}}})
-        assert cfg.footer_fields == [["status", "elapsed", "context", "model"]]
-
-    def test_no_footer_returns_default(self) -> None:
-        cfg = _make_config({"streaming": {}})
+    @pytest.mark.parametrize(
+        "raw",
+        [{"streaming": {"footer": {"fields": []}}}, {"streaming": {}}],
+        ids=["empty-fields", "missing-footer"],
+    )
+    def test_empty_footer_configuration_returns_default(self, raw: dict[str, Any]) -> None:
+        cfg = _make_config(raw)
         assert cfg.footer_fields == [["status", "elapsed", "context", "model"]]
 
     def test_footer_not_dict_returns_default(self) -> None:
@@ -73,12 +73,13 @@ class TestHeaderEnabled:
         cfg = _make_config({"streaming": {"header": {"enabled": False}}})
         assert cfg.header_enabled is False
 
-    def test_missing_enabled_key_defaults_false(self) -> None:
-        cfg = _make_config({"streaming": {"header": {}}})
-        assert cfg.header_enabled is False
-
-    def test_missing_header_section_defaults_false(self) -> None:
-        cfg = _make_config({"streaming": {}})
+    @pytest.mark.parametrize(
+        "raw",
+        [{"streaming": {"header": {}}}, {"streaming": {}}],
+        ids=["missing-key", "missing-section"],
+    )
+    def test_header_enabled_defaults_false_when_missing(self, raw: dict[str, Any]) -> None:
+        cfg = _make_config(raw)
         assert cfg.header_enabled is False
 
     def test_header_not_dict_defaults_false(self) -> None:
@@ -95,12 +96,13 @@ class TestFooterEnabled:
         cfg = _make_config({"streaming": {"footer": {"enabled": False}}})
         assert cfg.footer_enabled is False
 
-    def test_missing_enabled_key_defaults_true(self) -> None:
-        cfg = _make_config({"streaming": {"footer": {}}})
-        assert cfg.footer_enabled is True
-
-    def test_no_footer_section_defaults_true(self) -> None:
-        cfg = _make_config({"streaming": {}})
+    @pytest.mark.parametrize(
+        "raw",
+        [{"streaming": {"footer": {}}}, {"streaming": {}}],
+        ids=["missing-key", "missing-section"],
+    )
+    def test_footer_enabled_defaults_true_when_missing(self, raw: dict[str, Any]) -> None:
+        cfg = _make_config(raw)
         assert cfg.footer_enabled is True
 
     def test_footer_not_dict_defaults_true(self) -> None:
@@ -109,13 +111,10 @@ class TestFooterEnabled:
 
 
 class TestFooterShowLabel:
-    def test_true(self) -> None:
-        cfg = _make_config({"streaming": {"footer": {"show_label": True}}})
-        assert cfg.footer_show_label is True
-
-    def test_false(self) -> None:
-        cfg = _make_config({"streaming": {"footer": {"show_label": False}}})
-        assert cfg.footer_show_label is False
+    @pytest.mark.parametrize("value", [True, False])
+    def test_reads_boolean_value(self, value: bool) -> None:
+        cfg = _make_config({"streaming": {"footer": {"show_label": value}}})
+        assert cfg.footer_show_label is value
 
     def test_missing_defaults_false(self) -> None:
         cfg = _make_config({"streaming": {"footer": {}}})
@@ -130,6 +129,24 @@ class TestCardDurationSec:
     def test_default(self) -> None:
         cfg = _make_config({"streaming": {}})
         assert cfg.card_duration_sec == 600
+
+
+class TestWidthMode:
+    def test_default_when_missing(self) -> None:
+        cfg = _make_config({"streaming": {}})
+        assert cfg.width_mode == "default"
+
+    def test_reads_valid_value(self) -> None:
+        cfg = _make_config({"streaming": {"width_mode": "compact"}})
+        assert cfg.width_mode == "compact"
+
+    def test_reads_case_insensitive(self) -> None:
+        cfg = _make_config({"streaming": {"width_mode": "FILL"}})
+        assert cfg.width_mode == "fill"
+
+    def test_invalid_falls_back_to_default(self) -> None:
+        cfg = _make_config({"streaming": {"width_mode": "wide"}})
+        assert cfg.width_mode == "default"
 
 
 class TestFeishuAppId:
@@ -221,6 +238,55 @@ class TestShowReasoning:
         assert cfg.show_reasoning is False
 
 
+class TestShowToolUse:
+    def _make_config(self, raw: dict[str, Any]) -> Config:
+        cfg = Config()
+        cfg._reload = lambda: raw  # type: ignore[assignment]
+        return cfg
+
+    def test_platform_level_true(self) -> None:
+        cfg = self._make_config({"display": {"platforms": {"feishu": {"show_tool_use": True}}}})
+        assert cfg.show_tool_use is True
+
+    def test_platform_level_false(self) -> None:
+        cfg = self._make_config({"display": {"platforms": {"feishu": {"show_tool_use": False}}}})
+        assert cfg.show_tool_use is False
+
+    def test_global_fallback_true(self) -> None:
+        cfg = self._make_config({"display": {"show_tool_use": True}})
+        assert cfg.show_tool_use is True
+
+    def test_global_fallback_false(self) -> None:
+        cfg = self._make_config({"display": {"show_tool_use": False}})
+        assert cfg.show_tool_use is False
+
+    def test_default_true(self) -> None:
+        """Missing config → default True (backward compatible)."""
+        cfg = self._make_config({})
+        assert cfg.show_tool_use is True
+
+    def test_display_not_dict(self) -> None:
+        cfg = self._make_config({"display": "invalid"})
+        assert cfg.show_tool_use is True
+
+    def test_platforms_not_dict(self) -> None:
+        cfg = self._make_config({"display": {"platforms": "invalid"}})
+        assert cfg.show_tool_use is True
+
+    def test_feishu_section_missing_key(self) -> None:
+        cfg = self._make_config({"display": {"platforms": {"feishu": {"other": True}}}})
+        assert cfg.show_tool_use is True
+
+    def test_platform_takes_priority_over_global(self) -> None:
+        cfg = self._make_config({
+            "display": {
+                "platforms": {"feishu": {"show_tool_use": False}},
+                "show_tool_use": True,
+            }
+        })
+        assert cfg.show_tool_use is False
+
+
 class TestPlatformCfg:
     def test_env_takes_priority(self) -> None:
         cfg = _make_config({"feishu": {"app_id": "config_id", "app_secret": "config_secret"}})
@@ -249,3 +315,51 @@ class TestPlatformCfg:
         cfg = _make_config({})
         with patch.dict(os.environ, {}, clear=True):
             assert cfg._platform_cfg() == {}
+
+
+def test_bound_profile_homes_resolve_distinct_gateway_platform_credentials(tmp_path) -> None:
+    home_a = tmp_path / "profile-a"
+    home_b = tmp_path / "profile-b"
+    home_a.mkdir()
+    home_b.mkdir()
+    (home_a / "config.yaml").write_text(
+        (
+            "streaming:\n  enabled: true\ngateway:\n  platforms:\n    feishu:\n"
+            "      extra:\n        app_id: app-a\n        app_secret: secret-a\n"
+        ),
+        encoding="utf-8",
+    )
+    (home_b / "config.yaml").write_text(
+        (
+            "streaming:\n  enabled: true\ngateway:\n  platforms:\n    feishu:\n"
+            "      extra:\n        app_id: app-b\n        app_secret: secret-b\n"
+        ),
+        encoding="utf-8",
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        cfg_a = Config(home_a)
+        cfg_b = Config(home_b)
+        assert (cfg_a.enabled, cfg_a.feishu_app_id, cfg_a.feishu_app_secret) == (True, "app-a", "secret-a")
+        assert (cfg_b.enabled, cfg_b.feishu_app_id, cfg_b.feishu_app_secret) == (True, "app-b", "secret-b")
+
+
+def test_nested_lark_domain_uses_larksuite_url() -> None:
+    cfg = _make_config(
+        {
+            "gateway": {
+                "platforms": {
+                    "lark": {
+                        "extra": {
+                            "app_id": "lark-id",
+                            "app_secret": "lark-secret",
+                            "domain": "lark",
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    with patch.dict(os.environ, {}, clear=True):
+        assert cfg.feishu_base_url == "https://open.larksuite.com"

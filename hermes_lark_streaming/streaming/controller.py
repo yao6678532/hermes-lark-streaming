@@ -69,6 +69,7 @@ class StreamingController:
     _cfg: Config
     _ensure_init: Callable[..., Coroutine[Any, Any, None]]
     _cleanup: Callable[[str], None]
+    _cleanup_session: Callable[[CardSession], None]
     _flush_deferred_background_reviews: Callable[[CardSession], None]
 
     def _schedule_flush(self, session: CardSession) -> None:
@@ -114,12 +115,28 @@ class StreamingController:
                 show_streaming_element=False,
                 header_enabled=self._cfg.header_enabled,
                 text_size=self._cfg.body_text_size,
+                width_mode=self._cfg.width_mode,
             )
             card_id = await self._client.cardkit_create(card)
-            card_msg_id = await self._client.reply_card_by_id(
-                reply_to_message_id,
-                card_id,
-            )
+            try:
+                card_msg_id = await self._client.reply_card_by_id(
+                    reply_to_message_id,
+                    card_id,
+                )
+            except FeishuAPIError as error:
+                if error.code != CARDKIT_CONTENT_FAILED:
+                    raise
+                card_id = await self._client.cardkit_create(card)
+                try:
+                    card_msg_id = await self._client.reply_card_by_id(
+                        reply_to_message_id,
+                        card_id,
+                    )
+                except FeishuAPIError:
+                    card_msg_id = await self._client.send_card_to_chat(
+                        chat_id=session.chat_id,
+                        card={"type": "card", "data": {"card_id": card_id}},
+                    )
             session.set_card(card_id=card_id, card_msg_id=card_msg_id)
             session.element_count = 1  # loading element
             session.flush.set_throttle(CARDKIT_MS)
@@ -170,6 +187,14 @@ class StreamingController:
 
         for i, seg in enumerate(segments):
             if i < session.split_index:
+                continue
+
+            # show_tool_use=False: 流式态跳过所有 TOOL segment 处理
+            # （新建与 dirty 更新两条路径），只保留 reasoning/answer
+            if seg.type == SegmentType.TOOL and not self._cfg.show_tool_use:
+                if not seg.created:
+                    seg.created = True  # 防止 next flush 再次进入 not created 分支
+                seg.dirty = False
                 continue
 
             if not seg.created:
@@ -515,6 +540,8 @@ class StreamingController:
             panel_expanded=self._cfg.panel_expanded,
             header_enabled=False,
             body_text_size=self._cfg.body_text_size,
+            show_tool_use=self._cfg.show_tool_use,
+            width_mode=self._cfg.width_mode,
         )
 
         try:
@@ -524,6 +551,7 @@ class StreamingController:
                 show_streaming_element=False,
                 header_enabled=self._cfg.header_enabled,
                 text_size=self._cfg.body_text_size,
+                width_mode=self._cfg.width_mode,
             )
             new_card_id = await self._client.cardkit_create(card)
             new_msg_id = await self._client.reply_card_by_id(session.anchor_id or session.message_id, new_card_id)
@@ -581,7 +609,7 @@ class StreamingController:
             return await self._do_complete_card_inner(session)
         finally:
             self._flush_deferred_background_reviews(session)
-            self._cleanup(session.message_id)
+            self._cleanup_session(session)
 
     async def _do_complete_card_inner(self, session: CardSession) -> bool:
         if session.guard.should_skip("_do_complete_card"):
@@ -620,6 +648,8 @@ class StreamingController:
             panel_expanded=self._cfg.panel_expanded,
             header_enabled=self._cfg.header_enabled,
             body_text_size=self._cfg.body_text_size,
+            show_tool_use=self._cfg.show_tool_use,
+            width_mode=self._cfg.width_mode,
         )
 
         streaming_closed = False

@@ -6,11 +6,13 @@ import asyncio
 import logging
 import threading
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future as ConcurrentFuture
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
-from .config import Config
+from .config import Config, hermes_home
 from .feishu import (
     FeishuClient,
     FeishuClientConfig,
@@ -122,39 +124,80 @@ def _fetch_gpt_quota_footer(model: str) -> str:
 class StreamCardController(StreamingController):
     """流式卡片控制器 — 管理多条消息的卡片生命周期."""
 
-    def __init__(self) -> None:
-        self._cfg = Config()
+    def __init__(self, profile_home: Path | None = None) -> None:
+        self._profile_home = (profile_home or hermes_home()).resolve()
+        self._cfg = Config(self._profile_home)
         self._client: FeishuClient | None = None
         self._sessions: dict[str, CardSession] = {}
+        self._session_keys: dict[str, CardSession] = {}
         self._interrupt_map: dict[str, str] = {}
         self._initialized = False
-        self._init_lock = asyncio.Lock()
+        self._init_lock = threading.Lock()
         self._session_ttl = self._cfg.card_duration_sec
         self._loop: asyncio.AbstractEventLoop | None = None
         self._text_fallback_needed: set[str] = set()
         self._text_fallback_aliases: dict[str, set[str]] = {}
+        self._unscoped_enabled: bool | None = None
 
     @property
     def enabled(self) -> bool:
-        return self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+        unscoped = self._needs_fallback_scope()
+        if unscoped and self._unscoped_enabled is not None:
+            return self._unscoped_enabled
+        with self._credential_scope():
+            enabled = self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+        if unscoped and enabled:
+            self._unscoped_enabled = True
+        return enabled
+
+    @staticmethod
+    def _needs_fallback_scope() -> bool:
+        try:
+            from agent.secret_scope import current_secret_scope, is_multiplex_active  # type: ignore[import-not-found]
+        except ImportError:
+            return False
+        return is_multiplex_active() and current_secret_scope() is None
+
+    @contextmanager
+    def _credential_scope(self) -> Iterator[None]:
+        try:
+            from agent.secret_scope import (  # type: ignore[import-not-found]
+                build_profile_secret_scope,
+                current_secret_scope,
+                is_multiplex_active,
+                reset_secret_scope,
+                set_secret_scope,
+            )
+        except ImportError:
+            yield
+            return
+        if not is_multiplex_active() or current_secret_scope() is not None:
+            yield
+            return
+        token = set_secret_scope(build_profile_secret_scope(self._profile_home))
+        try:
+            yield
+        finally:
+            reset_secret_scope(token)
 
     async def _ensure_init(self) -> None:
         if self._initialized:
             return
-        async with self._init_lock:
+        with self._init_lock:
             if self._initialized:
                 return
-            app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
-            app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
-            if not app_id or not app_secret:
-                raise RuntimeError("feishu credentials not configured")
-            self._client = FeishuClient(
-                FeishuClientConfig(
-                    app_id=app_id,
-                    app_secret=app_secret,
-                    base_url=self._cfg.feishu_base_url,
+            with self._credential_scope():
+                app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
+                app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
+                if not app_id or not app_secret:
+                    raise RuntimeError("feishu credentials not configured")
+                self._client = FeishuClient(
+                    FeishuClientConfig(
+                        app_id=app_id,
+                        app_secret=app_secret,
+                        base_url=self._cfg.feishu_base_url,
+                    )
                 )
-            )
             self._initialized = True
 
     def _get_loop(self) -> asyncio.AbstractEventLoop | None:
@@ -200,6 +243,7 @@ class StreamCardController(StreamingController):
         message_id: str | None,
         chat_id: str,
         anchor_id: str | None = None,
+        session_key: str | None = None,
     ) -> None:
         """消息处理开始 — 创建会话 + 发占位卡片."""
         if not self.enabled:
@@ -217,7 +261,10 @@ class StreamCardController(StreamingController):
             _logger.warning("no event loop available, skipping: msg=%s", message_id[:12])
             return
         session = CardSession(message_id, chat_id, loop)
+        session.session_key = session_key
         self._sessions[message_id] = session
+        if session_key:
+            self._session_keys[session_key] = session
         if anchor_id and anchor_id != message_id:
             session.anchor_id = anchor_id
             self._sessions[anchor_id] = session
@@ -335,6 +382,20 @@ class StreamCardController(StreamingController):
 
         self._complete_session(session)
 
+    async def on_session_aborted(self, *, session_key: str) -> bool:
+        """Terminate the active card bound to a Hermes session key."""
+        if not self.enabled or not session_key:
+            return False
+        session = self._session_keys.pop(session_key, None)
+        if session is None or session.state.is_terminal:
+            return False
+
+        session.state = SessionState.ABORTED
+        session.flush.mark_completed()
+        _logger.info("on_session_aborted: msg=%s state=ABORTED", session.message_id[:12])
+
+        return await self._complete_session_after_creation(session)
+
     def on_interrupted(
         self,
         *,
@@ -342,12 +403,14 @@ class StreamCardController(StreamingController):
         new_message_id: str,
         chat_id: str,
         anchor_id: str | None = None,
+        session_key: str | None = None,
     ) -> None:
         """用户发送新消息导致前一条消息被中断 — abort A + create B."""
         if not self.enabled:
             return
 
         old_session = self._get_active_session(old_message_id)
+        session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
@@ -357,13 +420,17 @@ class StreamCardController(StreamingController):
             )
             self._complete_session(old_session)
 
-        if new_message_id not in self._sessions:
+        existing = self._sessions.get(new_message_id)
+        if existing is None or existing.state.is_terminal:
             loop = self._get_loop()
             if loop is not None:
                 reply_anchor_id = anchor_id if anchor_id and anchor_id != new_message_id else None
                 session = CardSession(new_message_id, chat_id, loop)
                 session.anchor_id = reply_anchor_id
+                session.session_key = session_key
                 self._sessions[new_message_id] = session
+                if session_key:
+                    self._session_keys[session_key] = session
                 if reply_anchor_id:
                     self._sessions[reply_anchor_id] = session
                 _logger.info(
@@ -384,6 +451,7 @@ class StreamCardController(StreamingController):
         *,
         message_id: str,
         answer: str = "",
+        is_error: bool = False,
         duration: float = 0.0,
         model: str = "",
         tokens: dict | None = None,
@@ -398,21 +466,27 @@ class StreamCardController(StreamingController):
         message_id = session.message_id
 
         if not await self._wait_for_card_creation(session):
-            _logger.info("on_completed_wait: msg=%s card creation not ready, yielding to gateway", message_id[:12])
-            self._mark_text_fallback_needed(session)
-            self._cleanup(message_id)
+            if session.has_card:
+                _logger.info("on_completed_wait: msg=%s card creation not ready but card exists", message_id[:12])
+            else:
+                _logger.info("on_completed_wait: msg=%s card creation not ready, yielding to gateway", message_id[:12])
+                self._mark_text_fallback_needed(session)
+            self._cleanup_session(session)
             return False
 
         if session.state == SessionState.FAILED:
-            _logger.info("on_completed_wait: msg=%s state=FAILED, yielding to gateway", message_id[:12])
-            self._mark_text_fallback_needed(session)
-            self._cleanup(message_id)
+            if session.has_card:
+                _logger.info("on_completed_wait: msg=%s state=FAILED but card exists", message_id[:12])
+            else:
+                _logger.info("on_completed_wait: msg=%s state=FAILED, yielding to gateway", message_id[:12])
+                self._mark_text_fallback_needed(session)
+            self._cleanup_session(session)
             return False
 
         if not session.has_card:
             _logger.info("on_completed_wait: msg=%s has no card, yielding to gateway", message_id[:12])
             self._mark_text_fallback_needed(session)
-            self._cleanup(message_id)
+            self._cleanup_session(session)
             return False
 
         _logger.info(
@@ -430,6 +504,8 @@ class StreamCardController(StreamingController):
             tokens=tokens,
             context=context,
         )
+        if is_error:
+            session.mark_failed()
 
         return await self._complete_session_wait(session)
 
@@ -438,18 +514,26 @@ class StreamCardController(StreamingController):
         *,
         chat_id: str,
         content: str,
-        loop: asyncio.AbstractEventLoop,
+        loop: asyncio.AbstractEventLoop | None,
         task_name: str = "",
         run_time: str = "",
     ) -> bool:
         """Cron 推送 — 包装为静态卡片发送，成功返回 True."""
         if not self.enabled or not content or not chat_id:
             return False
-        future = asyncio.run_coroutine_threadsafe(
-            self._do_cron_deliver(chat_id, content, task_name=task_name, run_time=run_time), loop
+        coroutine = self._do_cron_deliver(
+            chat_id, content, task_name=task_name, run_time=run_time
         )
         try:
-            future.result(timeout=30)
+            if loop is not None and loop.is_running() and not loop.is_closed():
+                try:
+                    future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+                except Exception:
+                    coroutine.close()
+                    raise
+                future.result(timeout=30)
+            else:
+                asyncio.run(coroutine)
             _logger.info("cron card delivered: chat=%s len=%d", chat_id[:12], len(content))
             return True
         except Exception:
@@ -521,9 +605,28 @@ class StreamCardController(StreamingController):
         anchor = getattr(session, "anchor_id", None)
         if anchor and self._sessions.get(anchor) is session:
             del self._sessions[anchor]
+        session_key = getattr(session, "session_key", None)
+        if session_key and self._session_keys.get(session_key) is session:
+            del self._session_keys[session_key]
         stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
         for k in stale_keys:
             del self._interrupt_map[k]
+        session.flush.mark_completed()
+        if session.image_resolver:
+            session.image_resolver.cancel_pending()
+
+    def _cleanup_session(self, session: CardSession) -> None:
+        if self._sessions.get(session.message_id) is session:
+            self._sessions.pop(session.message_id, None)
+        anchor = session.anchor_id
+        if anchor and self._sessions.get(anchor) is session:
+            del self._sessions[anchor]
+        session_key = session.session_key
+        if session_key and self._session_keys.get(session_key) is session:
+            del self._session_keys[session_key]
+        stale_keys = [key for key, value in self._interrupt_map.items() if value == session.message_id]
+        for key in stale_keys:
+            del self._interrupt_map[key]
         session.flush.mark_completed()
         if session.image_resolver:
             session.image_resolver.cancel_pending()
@@ -622,7 +725,13 @@ class StreamCardController(StreamingController):
     def _complete_session(self, session: CardSession) -> None:
         """异步完成当前流式卡片."""
         session.flush.mark_completed()
-        self._fire_and_forget(self._do_complete_card(session), session._loop)
+        self._fire_and_forget(self._complete_session_after_creation(session), session._loop)
+
+    async def _complete_session_after_creation(self, session: CardSession) -> bool:
+        if not await self._wait_for_card_creation(session):
+            self._cleanup_session(session)
+            return False
+        return await self._complete_session_wait(session)
 
     async def _complete_session_wait(self, session: CardSession) -> bool:
         """完成当前流式卡片，并等待最终 API 结果."""
@@ -646,13 +755,16 @@ class StreamCardController(StreamingController):
             _logger.warning("background task failed", exc_info=True)
 
 
-_controller: StreamCardController | None = None
+_controllers: dict[str, StreamCardController] = {}
 _controller_lock = threading.Lock()
 
 
 def get_controller() -> StreamCardController:
-    global _controller
+    profile_home = hermes_home().resolve()
+    key = str(profile_home)
     with _controller_lock:
-        if _controller is None:
-            _controller = StreamCardController()
-        return _controller
+        controller = _controllers.get(key)
+        if controller is None:
+            controller = StreamCardController(profile_home)
+            _controllers[key] = controller
+        return controller
