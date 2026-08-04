@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from .tooluse import ToolDisplayStep
 
 _logger = logging.getLogger("hermes_lark_streaming")
+_ACTIVITY_REASONING_API_MODES = frozenset({"codex_responses", "codex_app_server"})
 
 
 async def _resolve_answer_images(
@@ -88,25 +89,36 @@ class StreamingController:
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
 
-    def _record_reasoning(self, session: CardSession, text: str, *, snapshot: bool) -> None:
+    def _record_reasoning(self, session: CardSession, text: str, *, activity: bool) -> None:
         """Preserve chronology while applying the source's presentation semantics."""
         segment_state = session.segment_state
         if segment_state is None:
             return
         segment_state.on_reasoning_delta(text)
         if self._cfg.reasoning_mode == "merged":
-            if snapshot:
-                session.merged_reasoning.replace_snapshot(text)
+            if activity:
+                session.merged_reasoning.replace_activity(text)
             else:
                 session.merged_reasoning.append_delta(text)
 
     def _append_reasoning(self, session: CardSession, text: str) -> None:
         """Ingest thinking-tag reasoning, whose callback supplies true deltas."""
-        self._record_reasoning(session, text, snapshot=False)
+        self._record_reasoning(session, text, activity=False)
 
-    def _replace_reasoning_snapshot(self, session: CardSession, text: str) -> None:
-        """Ingest native reasoning callbacks, whose payload is the latest state."""
-        self._record_reasoning(session, text, snapshot=True)
+    @staticmethod
+    def _is_activity_reasoning_api_mode(api_mode: str | None) -> bool:
+        """Whether this Hermes runtime emits activity-style reasoning updates."""
+        return str(api_mode or "").strip().lower() in _ACTIVITY_REASONING_API_MODES
+
+    def _record_native_reasoning(
+        self, session: CardSession, text: str, *, api_mode: str,
+    ) -> None:
+        """Route native reasoning by the Hermes transport contract, not model name."""
+        self._record_reasoning(
+            session,
+            text,
+            activity=self._is_activity_reasoning_api_mode(api_mode),
+        )
 
     def _pause_merged_reasoning(self, session: CardSession) -> None:
         if self._cfg.reasoning_mode == "merged":

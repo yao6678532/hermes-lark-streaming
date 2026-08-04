@@ -302,8 +302,8 @@ class StreamCardController(StreamingController):
             return False
         return self._on_thinking_segment(session, text)
 
-    def on_reasoning(self, *, message_id: str, text: str) -> bool:
-        """Native reasoning update; merged presentation treats it as a snapshot."""
+    def on_reasoning(self, *, message_id: str, text: str, api_mode: str = "") -> bool:
+        """Route native reasoning presentation by its Hermes API-mode semantics."""
         if not self.enabled:
             return False
         if not self._cfg.show_reasoning:
@@ -315,7 +315,7 @@ class StreamCardController(StreamingController):
         if session.segment_state is None:
             return False
 
-        self._replace_reasoning_snapshot(session, text)
+        self._record_native_reasoning(session, text, api_mode=api_mode)
         self._schedule_flush(session)
         return True
 

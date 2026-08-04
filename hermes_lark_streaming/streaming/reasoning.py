@@ -6,7 +6,7 @@ import time
 
 
 class MergedReasoningState:
-    """Presentation state for incremental and snapshot-style reasoning sources."""
+    """Presentation state for delta and activity-style reasoning sources."""
 
     __slots__ = (
         "active_since",
@@ -35,8 +35,8 @@ class MergedReasoningState:
         self.text += text
         self.dirty = True
 
-    def replace_snapshot(self, text: str) -> None:
-        """Replace the displayed state from a latest-snapshot reasoning callback."""
+    def replace_activity(self, text: str) -> None:
+        """Replace the displayed state from an activity-style reasoning runtime."""
         if not text:
             return
         self._begin_active_interval()

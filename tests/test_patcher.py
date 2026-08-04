@@ -578,7 +578,8 @@ class TestApplyRemove:
         assert "_lark_run_current = ctx._run_still_current" in content
         assert "on_answer_delta(message_id=_lark_message_id" in content
         assert "on_thinking_delta(message_id=_lark_message_id" in content
-        assert "on_reasoning_delta(message_id=_lark_message_id" in content
+        assert "on_reasoning_delta(" in content
+        assert "api_mode=getattr(agent, 'api_mode', '')" in content
         assert "on_background_deliver(" in content
         assert "_bg_preview = prompt[:60] + ('...' if len(prompt) > 60 else '')" in content
         assert "content=text_content" in content

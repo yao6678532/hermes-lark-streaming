@@ -53,12 +53,12 @@ class TestMergedReasoningState:
         assert state.created is False
         assert state.dirty is True
 
-    def test_replace_snapshot_keeps_only_the_latest_content(self) -> None:
+    def test_replace_activity_keeps_only_the_latest_content(self) -> None:
         state = MergedReasoningState()
 
-        state.replace_snapshot("Planning")
-        state.replace_snapshot("Checking")
-        state.replace_snapshot("Confirming")
+        state.replace_activity("Planning")
+        state.replace_activity("Checking")
+        state.replace_activity("Confirming")
 
         assert state.text == "Confirming"
         assert state.dirty is True
