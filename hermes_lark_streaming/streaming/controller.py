@@ -56,10 +56,6 @@ _logger = logging.getLogger("hermes_lark_streaming")
 _ACTIVITY_REASONING_API_MODES = frozenset({"codex_responses", "codex_app_server"})
 _NATIVE_REASONING_SOURCE = "native_reasoning"
 _INTERIM_COMMENTARY_SOURCE = "interim_commentary"
-_ACTIVITY_REASONING_SOURCES = frozenset({
-    _NATIVE_REASONING_SOURCE,
-    _INTERIM_COMMENTARY_SOURCE,
-})
 
 
 async def _resolve_answer_images(
@@ -130,7 +126,7 @@ class StreamingController:
         """
         normalized_source = str(source or "").strip().lower()
         return (
-            normalized_source in _ACTIVITY_REASONING_SOURCES
+            normalized_source == _NATIVE_REASONING_SOURCE
             and cls._is_activity_reasoning_api_mode(api_mode)
         )
 
@@ -232,22 +228,26 @@ class StreamingController:
             return False
 
         normalized_source = str(source or "").strip().lower()
+        if normalized_source == _INTERIM_COMMENTARY_SOURCE:
+            # Hermes has already classified this as a complete, user-visible
+            # assistant message.  Keep commentary in body chronology; only
+            # reasoning_callback data is eligible for merged reasoning UI.
+            if not text:
+                return False
+            self._pause_merged_reasoning(session)
+            segment_state.on_answer_delta(text)
+            self._schedule_flush(session)
+            return True
+
         activity = self._uses_activity_reasoning_presentation(
             api_mode=api_mode,
             source=normalized_source,
         )
         reasoning: str | None
         answer: str | None
-        if normalized_source == _INTERIM_COMMENTARY_SOURCE:
-            # Hermes has already classified this completed interim message as
-            # mid-turn commentary.  Keep it out of answer chronology; it is
-            # presentation reasoning even when no <thinking> tag is present.
-            reasoning = text
-            answer = ""
-        else:
-            split = split_reasoning_text(text)
-            reasoning = split.get("reasoning_text")
-            answer = split.get("answer_text")
+        split = split_reasoning_text(text)
+        reasoning = split.get("reasoning_text")
+        answer = split.get("answer_text")
 
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)

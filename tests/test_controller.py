@@ -25,6 +25,11 @@ from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elem
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
 
+_COMMENTARY_STAGE_1 = "第 1 阶段\uFF1A读取项目配置\uFF0C确认项目版本。"
+_COMMENTARY_CONFIRMED_1 = "已确认第 1 项\uFF1Ahermes-lark-streaming 项目版本是 0.12.0。"
+_COMMENTARY_STAGE_2 = "第 2 阶段\uFF1A继续读取 AGENTS.md\uFF0C确认最低 Hermes 版本。"
+_FINAL_ANSWER = "第 3 阶段\uFF1A比较与总结\n项目版本……\n最低 Hermes 版本……\n最终结论……"
+
 
 def _enable(ctrl: StreamCardController) -> None:
     ctrl._cfg._raw = {
@@ -1458,7 +1463,7 @@ class TestMergedReasoning:
         [
             ("chat_completions", "native_reasoning", False),
             ("codex_responses", "native_reasoning", True),
-            ("codex_app_server", "interim_commentary", True),
+            ("codex_app_server", "interim_commentary", False),
             ("chat_completions", "interim_commentary", False),
             ("codex_responses", "", False),
             ("", "interim_commentary", False),
@@ -1475,57 +1480,120 @@ class TestMergedReasoning:
             source=source,
         ) is expected
 
-    @pytest.mark.asyncio
-    async def test_codex_interim_commentary_replaces_one_lane_across_tools_and_final_card(self) -> None:
+    def test_interim_commentary_goes_to_body_without_touching_merged_reasoning(self) -> None:
         ctrl = _setup_ctrl()
-        _configure_merged(ctrl, show_tool_use=False)
-        session = CardSession("msg_codex_commentary", "chat", asyncio.get_running_loop())
-        session.state = SessionState.STREAMING
-        session.card_id = "card_codex_commentary"
-        session.card_msg_id = "card_msg_codex_commentary"
-        session.element_count = 1
+        _configure_merged(ctrl, show_reasoning=False)
+        session = _make_session("msg_codex_commentary")
         ctrl._sessions[session.message_id] = session
 
         with patch.object(ctrl, "_schedule_flush"):
             assert ctrl.on_thinking(
                 message_id=session.message_id,
-                text="Planning",
+                text="第 1 阶段\uFF1A读取项目配置",
                 api_mode="codex_responses",
                 source="interim_commentary",
             ) is True
-            assert session.merged_reasoning.active_since is not None
+        assert session.merged_reasoning.text == ""
+        assert [seg.type for seg in session.segment_state.segments] == ["answer"]
+        assert session.segment_state.segments[0].text == "第 1 阶段\uFF1A读取项目配置"
+
+    def test_native_reasoning_without_runtime_metadata_appends_safely(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = _make_session("msg_native_fallback")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            for text in ("A", "B", "C"):
+                assert ctrl.on_reasoning(
+                    message_id=session.message_id,
+                    text=text,
+                    api_mode="",
+                ) is True
+
+        assert session.merged_reasoning.text == "ABC"
+
+    @pytest.mark.asyncio
+    async def test_native_reasoning_and_commentary_keep_separate_lanes_in_final_card(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_tool_use=False)
+        session = CardSession("msg_mixed_channels", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_mixed_channels"
+        session.card_msg_id = "card_msg_mixed_channels"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(
+                message_id=session.message_id,
+                text="Planning staged skill loading and reading",
+                api_mode="codex_responses",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text=_COMMENTARY_STAGE_1,
+                api_mode="codex_responses",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text=_COMMENTARY_CONFIRMED_1,
+                api_mode="codex_responses",
+                source="interim_commentary",
+            ) is True
             assert ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="read",
                 status="started",
             ) is True
-            assert session.merged_reasoning.active_since is None
-            assert ctrl.on_thinking(
-                message_id=session.message_id,
-                text="Reading",
-                api_mode="codex_responses",
-                source="interim_commentary",
-            ) is True
-            assert session.merged_reasoning.active_since is not None
             assert ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="read",
                 status="completed",
             ) is True
+            assert ctrl.on_reasoning(
+                message_id=session.message_id,
+                text="Planning explicit AGENTS file reading",
+                api_mode="codex_responses",
+            ) is True
             assert ctrl.on_thinking(
                 message_id=session.message_id,
-                text="Confirming",
+                text=_COMMENTARY_STAGE_2,
                 api_mode="codex_responses",
                 source="interim_commentary",
             ) is True
-            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="completed",
+            ) is True
+            assert ctrl.on_reasoning(
+                message_id=session.message_id,
+                text="Comparing plugin and Hermes version requirements",
+                api_mode="codex_responses",
+            ) is True
+            assert ctrl.on_answer(
+                message_id=session.message_id,
+                text=_FINAL_ANSWER,
+            ) is True
 
+        assert session.merged_reasoning.text == "Comparing plugin and Hermes version requirements"
+        answer_segments = [
+            seg.text for seg in session.segment_state.segments if seg.type == "answer"
+        ]
+        assert answer_segments == [
+            f"{_COMMENTARY_STAGE_1}{_COMMENTARY_CONFIRMED_1}",
+            _COMMENTARY_STAGE_2,
+            _FINAL_ANSWER,
+        ]
+        assert len(session.tool_use.build_display_steps()) == 2
         assert session.merged_reasoning.active_since is None
-        assert session.merged_reasoning.text == "Confirming"
-        assert [
-            seg.text for seg in session.segment_state.segments if seg.type == "reasoning"
-        ] == ["Planning", "Reading", "Confirming"]
-        assert len(session.tool_use.build_display_steps()) == 1
 
         await ctrl._do_flush(session)
         added_elements = [
@@ -1545,7 +1613,9 @@ class TestMergedReasoning:
             for call in ctrl._client.cardkit_stream_element.await_args_list
             if call.args[1] == REASONING_TEXT_ELEMENT_ID
         ]
-        assert [call.args[2] for call in reasoning_streams] == ["Confirming"]
+        assert [call.args[2] for call in reasoning_streams] == [
+            "Comparing plugin and Hermes version requirements"
+        ]
 
         session.footer = {
             "duration": 26.5,
@@ -1566,30 +1636,24 @@ class TestMergedReasoning:
             and "💭" in element.get("header", {}).get("title", {}).get("content", "")
         ]
         assert len(panels) == 1
-        assert panels[0]["elements"][0]["content"] == "Confirming"
-        footer_contents = [
-            element["content"]
+        assert panels[0]["elements"][0]["content"] == (
+            "Comparing plugin and Hermes version requirements"
+        )
+        body_text = "\n".join(
+            element.get("content", "")
             for element in complete_card["body"]["elements"]
             if element.get("tag") == "markdown"
-        ]
-        assert "✅ 26.5s · 5h 80% · gpt-5" in footer_contents
-        assert not any("50.0K" in content for content in footer_contents)
-
-    def test_interim_commentary_without_runtime_metadata_appends_safely(self) -> None:
-        ctrl = _setup_ctrl()
-        _configure_merged(ctrl)
-        session = _make_session("msg_commentary_fallback")
-        ctrl._sessions[session.message_id] = session
-
-        with patch.object(ctrl, "_schedule_flush"):
-            for text in ("A", "B", "C"):
-                assert ctrl.on_thinking(
-                    message_id=session.message_id,
-                    text=text,
-                    source="interim_commentary",
-                ) is True
-
-        assert session.merged_reasoning.text == "ABC"
+        )
+        for text in (
+            _COMMENTARY_STAGE_1,
+            _COMMENTARY_CONFIRMED_1,
+            _COMMENTARY_STAGE_2,
+            "第 3 阶段\uFF1A比较与总结",
+            "最终结论……",
+        ):
+            assert text in body_text
+        assert "✅ 26.5s · 5h 80% · gpt-5" in body_text
+        assert "50.0K" not in body_text
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
