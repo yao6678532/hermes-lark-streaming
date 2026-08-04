@@ -303,7 +303,7 @@ class StreamCardController(StreamingController):
         return self._on_thinking_segment(session, text)
 
     def on_reasoning(self, *, message_id: str, text: str) -> bool:
-        """Native model reasoning delta (incremental append)."""
+        """Native reasoning update; merged presentation treats it as a snapshot."""
         if not self.enabled:
             return False
         if not self._cfg.show_reasoning:
@@ -315,7 +315,7 @@ class StreamCardController(StreamingController):
         if session.segment_state is None:
             return False
 
-        self._append_reasoning(session, text)
+        self._replace_reasoning_snapshot(session, text)
         self._schedule_flush(session)
         return True
 

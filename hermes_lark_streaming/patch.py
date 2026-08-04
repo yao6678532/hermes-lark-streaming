@@ -235,7 +235,7 @@ def on_thinking_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
 
 @_safe_hook(default_return=False, log_level="debug")
 def on_reasoning_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
-    """[注入点 6] reasoning_callback — native model reasoning delta."""
+    """[注入点 6] reasoning_callback — native model reasoning update."""
     return bool(ctrl.on_reasoning(message_id=message_id, text=text))
 
 

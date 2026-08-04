@@ -13,7 +13,7 @@ class TestMergedReasoningState:
     def test_ignores_empty_input(self) -> None:
         state = MergedReasoningState()
 
-        state.append("")
+        state.append_delta("")
 
         assert state.text == ""
         assert state.active_since is None
@@ -26,9 +26,9 @@ class TestMergedReasoningState:
             "hermes_lark_streaming.streaming.reasoning.time.time",
             side_effect=[100.0, 103.0, 123.0, 127.0],
         ):
-            state.append("A")
+            state.append_delta("A")
             state.pause()
-            state.append("B")
+            state.append_delta("B")
             state.finalize()
 
         assert state.text == "AB"
@@ -41,7 +41,7 @@ class TestMergedReasoningState:
             "hermes_lark_streaming.streaming.reasoning.time.time",
             side_effect=[10.0, 12.0],
         ):
-            state.append("reasoning")
+            state.append_delta("reasoning")
             state.pause()
         state.created = True
         state.dirty = False
@@ -52,3 +52,22 @@ class TestMergedReasoningState:
         assert state.elapsed_ms == pytest.approx(2000.0)
         assert state.created is False
         assert state.dirty is True
+
+    def test_replace_snapshot_keeps_only_the_latest_content(self) -> None:
+        state = MergedReasoningState()
+
+        state.replace_snapshot("Planning")
+        state.replace_snapshot("Checking")
+        state.replace_snapshot("Confirming")
+
+        assert state.text == "Confirming"
+        assert state.dirty is True
+
+    def test_append_delta_accumulates_incremental_content(self) -> None:
+        state = MergedReasoningState()
+
+        state.append_delta("A")
+        state.append_delta("B")
+        state.append_delta("C")
+
+        assert state.text == "ABC"

@@ -88,14 +88,25 @@ class StreamingController:
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
 
-    def _append_reasoning(self, session: CardSession, text: str) -> None:
-        """Record chronology and, when enabled, update merged presentation state."""
+    def _record_reasoning(self, session: CardSession, text: str, *, snapshot: bool) -> None:
+        """Preserve chronology while applying the source's presentation semantics."""
         segment_state = session.segment_state
         if segment_state is None:
             return
         segment_state.on_reasoning_delta(text)
         if self._cfg.reasoning_mode == "merged":
-            session.merged_reasoning.append(text)
+            if snapshot:
+                session.merged_reasoning.replace_snapshot(text)
+            else:
+                session.merged_reasoning.append_delta(text)
+
+    def _append_reasoning(self, session: CardSession, text: str) -> None:
+        """Ingest thinking-tag reasoning, whose callback supplies true deltas."""
+        self._record_reasoning(session, text, snapshot=False)
+
+    def _replace_reasoning_snapshot(self, session: CardSession, text: str) -> None:
+        """Ingest native reasoning callbacks, whose payload is the latest state."""
+        self._record_reasoning(session, text, snapshot=True)
 
     def _pause_merged_reasoning(self, session: CardSession) -> None:
         if self._cfg.reasoning_mode == "merged":

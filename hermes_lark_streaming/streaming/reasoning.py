@@ -6,7 +6,7 @@ import time
 
 
 class MergedReasoningState:
-    """Accumulate reasoning text while measuring only active reasoning intervals."""
+    """Presentation state for incremental and snapshot-style reasoning sources."""
 
     __slots__ = (
         "active_since",
@@ -23,14 +23,30 @@ class MergedReasoningState:
         self.created = False
         self.dirty = False
 
-    def append(self, text: str) -> None:
-        """Append a reasoning delta and start a new active interval if needed."""
-        if not text:
-            return
+    def _begin_active_interval(self) -> None:
         if self.active_since is None:
             self.active_since = time.time()
+
+    def append_delta(self, text: str) -> None:
+        """Append a true reasoning delta while preserving active timing."""
+        if not text:
+            return
+        self._begin_active_interval()
         self.text += text
         self.dirty = True
+
+    def replace_snapshot(self, text: str) -> None:
+        """Replace the displayed state from a latest-snapshot reasoning callback."""
+        if not text:
+            return
+        self._begin_active_interval()
+        if self.text != text:
+            self.text = text
+            self.dirty = True
+
+    def append(self, text: str) -> None:
+        """Backward-compatible alias for callers that emit true deltas."""
+        self.append_delta(text)
 
     def pause(self) -> None:
         """Pause timing without clearing accumulated reasoning content."""
