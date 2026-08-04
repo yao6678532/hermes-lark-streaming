@@ -290,8 +290,15 @@ class StreamCardController(StreamingController):
             self._text_fallback_aliases.pop(key, None)
         return True
 
-    def on_thinking(self, *, message_id: str, text: str) -> bool:
-        """思考内容增量."""
+    def on_thinking(
+        self,
+        *,
+        message_id: str,
+        text: str,
+        api_mode: str = "",
+        source: str = "",
+    ) -> bool:
+        """Handle tagged thinking deltas and classified interim commentary."""
         if not self.enabled:
             return False
         session = self._get_active_session(message_id)
@@ -300,7 +307,12 @@ class StreamCardController(StreamingController):
 
         if session.segment_state is None:
             return False
-        return self._on_thinking_segment(session, text)
+        return self._on_thinking_segment(
+            session,
+            text,
+            api_mode=api_mode,
+            source=source,
+        )
 
     def on_reasoning(self, *, message_id: str, text: str, api_mode: str = "") -> bool:
         """Route native reasoning presentation by its Hermes API-mode semantics."""

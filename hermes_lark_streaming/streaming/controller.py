@@ -54,6 +54,12 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger("hermes_lark_streaming")
 _ACTIVITY_REASONING_API_MODES = frozenset({"codex_responses", "codex_app_server"})
+_NATIVE_REASONING_SOURCE = "native_reasoning"
+_INTERIM_COMMENTARY_SOURCE = "interim_commentary"
+_ACTIVITY_REASONING_SOURCES = frozenset({
+    _NATIVE_REASONING_SOURCE,
+    _INTERIM_COMMENTARY_SOURCE,
+})
 
 
 async def _resolve_answer_images(
@@ -110,6 +116,24 @@ class StreamingController:
         """Whether this Hermes runtime emits activity-style reasoning updates."""
         return str(api_mode or "").strip().lower() in _ACTIVITY_REASONING_API_MODES
 
+    @classmethod
+    def _uses_activity_reasoning_presentation(
+        cls,
+        *,
+        api_mode: str | None,
+        source: str | None,
+    ) -> bool:
+        """Select replace-only activity UI from an explicit runtime/source contract.
+
+        Missing or unknown metadata deliberately falls back to delta append: an
+        overly verbose panel is safer than losing provider-supplied reasoning.
+        """
+        normalized_source = str(source or "").strip().lower()
+        return (
+            normalized_source in _ACTIVITY_REASONING_SOURCES
+            and cls._is_activity_reasoning_api_mode(api_mode)
+        )
+
     def _record_native_reasoning(
         self, session: CardSession, text: str, *, api_mode: str,
     ) -> None:
@@ -117,7 +141,10 @@ class StreamingController:
         self._record_reasoning(
             session,
             text,
-            activity=self._is_activity_reasoning_api_mode(api_mode),
+            activity=self._uses_activity_reasoning_presentation(
+                api_mode=api_mode,
+                source=_NATIVE_REASONING_SOURCE,
+            ),
         )
 
     def _pause_merged_reasoning(self, session: CardSession) -> None:
@@ -192,16 +219,38 @@ class StreamingController:
 
         self._consume_merged_reasoning_segments(session)
 
-    def _on_thinking_segment(self, session: CardSession, text: str) -> bool:
+    def _on_thinking_segment(
+        self,
+        session: CardSession,
+        text: str,
+        *,
+        api_mode: str = "",
+        source: str = "",
+    ) -> bool:
         segment_state = session.segment_state
         if segment_state is None:
             return False
-        split = split_reasoning_text(text)
-        reasoning = split.get("reasoning_text")
-        answer = split.get("answer_text")
+
+        normalized_source = str(source or "").strip().lower()
+        activity = self._uses_activity_reasoning_presentation(
+            api_mode=api_mode,
+            source=normalized_source,
+        )
+        reasoning: str | None
+        answer: str | None
+        if normalized_source == _INTERIM_COMMENTARY_SOURCE:
+            # Hermes has already classified this completed interim message as
+            # mid-turn commentary.  Keep it out of answer chronology; it is
+            # presentation reasoning even when no <thinking> tag is present.
+            reasoning = text
+            answer = ""
+        else:
+            split = split_reasoning_text(text)
+            reasoning = split.get("reasoning_text")
+            answer = split.get("answer_text")
 
         if reasoning and self._cfg.show_reasoning:
-            self._append_reasoning(session, reasoning)
+            self._record_reasoning(session, reasoning, activity=activity)
         if answer:
             self._pause_merged_reasoning(session)
             segment_state.on_answer_delta(answer)

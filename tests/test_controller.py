@@ -1453,6 +1453,144 @@ class TestMergedReasoning:
     def test_native_reasoning_policy_uses_api_mode(self, api_mode: str, expected: bool) -> None:
         assert StreamCardController._is_activity_reasoning_api_mode(api_mode) is expected
 
+    @pytest.mark.parametrize(
+        ("api_mode", "source", "expected"),
+        [
+            ("chat_completions", "native_reasoning", False),
+            ("codex_responses", "native_reasoning", True),
+            ("codex_app_server", "interim_commentary", True),
+            ("chat_completions", "interim_commentary", False),
+            ("codex_responses", "", False),
+            ("", "interim_commentary", False),
+        ],
+    )
+    def test_reasoning_presentation_requires_known_source_and_runtime(
+        self,
+        api_mode: str,
+        source: str,
+        expected: bool,
+    ) -> None:
+        assert StreamCardController._uses_activity_reasoning_presentation(
+            api_mode=api_mode,
+            source=source,
+        ) is expected
+
+    @pytest.mark.asyncio
+    async def test_codex_interim_commentary_replaces_one_lane_across_tools_and_final_card(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_tool_use=False)
+        session = CardSession("msg_codex_commentary", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_codex_commentary"
+        session.card_msg_id = "card_msg_codex_commentary"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Planning",
+                api_mode="codex_responses",
+                source="interim_commentary",
+            ) is True
+            assert session.merged_reasoning.active_since is not None
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+            assert session.merged_reasoning.active_since is None
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Reading",
+                api_mode="codex_responses",
+                source="interim_commentary",
+            ) is True
+            assert session.merged_reasoning.active_since is not None
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="completed",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Confirming",
+                api_mode="codex_responses",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+
+        assert session.merged_reasoning.active_since is None
+        assert session.merged_reasoning.text == "Confirming"
+        assert [
+            seg.text for seg in session.segment_state.segments if seg.type == "reasoning"
+        ] == ["Planning", "Reading", "Confirming"]
+        assert len(session.tool_use.build_display_steps()) == 1
+
+        await ctrl._do_flush(session)
+        added_elements = [
+            element
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            for element in action.get("params", {}).get("elements", [])
+        ]
+        assert [
+            element["element_id"]
+            for element in added_elements
+            if element.get("element_id") == REASONING_ELEMENT_ID
+        ] == [REASONING_ELEMENT_ID]
+        assert not any(str(element.get("element_id", "")).startswith("tools_") for element in added_elements)
+        reasoning_streams = [
+            call
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == REASONING_TEXT_ELEMENT_ID
+        ]
+        assert [call.args[2] for call in reasoning_streams] == ["Confirming"]
+
+        session.footer = {
+            "duration": 26.5,
+            "model": "gpt-5",
+            "context_used": 50_000,
+            "context_max": 200_000,
+            "gpt_quota": "5h 80%",
+        }
+        ctrl._cfg._raw["streaming"]["footer"] = {
+            "fields": [["status", "elapsed", "context", "gpt_quota", "model"]]
+        }
+        assert await ctrl._do_complete_card(session) is True
+        complete_card = ctrl._client.cardkit_update.await_args.args[1]
+        panels = [
+            element
+            for element in complete_card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        ]
+        assert len(panels) == 1
+        assert panels[0]["elements"][0]["content"] == "Confirming"
+        footer_contents = [
+            element["content"]
+            for element in complete_card["body"]["elements"]
+            if element.get("tag") == "markdown"
+        ]
+        assert "✅ 26.5s · 5h 80% · gpt-5" in footer_contents
+        assert not any("50.0K" in content for content in footer_contents)
+
+    def test_interim_commentary_without_runtime_metadata_appends_safely(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = _make_session("msg_commentary_fallback")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            for text in ("A", "B", "C"):
+                assert ctrl.on_thinking(
+                    message_id=session.message_id,
+                    text=text,
+                    source="interim_commentary",
+                ) is True
+
+        assert session.merged_reasoning.text == "ABC"
+
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
         ctrl = _setup_ctrl()
