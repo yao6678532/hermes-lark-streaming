@@ -35,6 +35,8 @@ _HOOK_NAMES = [
     "STOP",
     "INTERRUPT",
     "BG_DELIVER",
+    "CLARIFY_SEND",
+    "CLARIFY_ACTION",
 ]
 MARKERS: list[tuple[str, str]] = [(f"# {PREFIX}_{n}_BEGIN", f"# {PREFIX}_{n}_END") for n in _HOOK_NAMES]
 
@@ -52,6 +54,8 @@ MK_ABORT, MK_ABORT_END = MARKERS[10]
 MK_STOP, MK_STOP_END = MARKERS[11]
 MK_INTERRUPT, MK_INTERRUPT_END = MARKERS[12]
 MK_BG_DELIVER, MK_BG_DELIVER_END = MARKERS[13]
+MK_CLARIFY_SEND, MK_CLARIFY_SEND_END = MARKERS[14]
+MK_CLARIFY_ACTION, MK_CLARIFY_ACTION_END = MARKERS[15]
 
 _BACKUP_SUFFIX = ".hermes_lark.bak"
 
@@ -613,6 +617,42 @@ def _bg_deliver_hook(indent: str) -> str:
     )
 
 
+def _clarify_send_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_CLARIFY_SEND,
+        MK_CLARIFY_SEND_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_clarify_adapter",
+            "    _status_adapter = on_clarify_adapter(adapter=_status_adapter, source=source)",
+            *_hook_exception_lines("clarify_send"),
+        ],
+    )
+
+
+def _clarify_action_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_CLARIFY_ACTION,
+        MK_CLARIFY_ACTION_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_feishu_interaction_action",
+            "    _lark_clarify_action_consumed = await on_feishu_interaction_action(",
+            "        message_id=event.message_id,",
+            "        source=source,",
+            "        event=event,",
+            "        session_key=_quick_key,",
+            "        gateway=self,",
+            "    )",
+            "    if _lark_clarify_action_consumed:",
+            "        return ''",
+            *_hook_exception_lines("clarify_action"),
+        ],
+    )
+
+
 def _remove_block(content: str, begin: str, end: str) -> str:
     lines = content.splitlines(keepends=True)
     result: list[str] = []
@@ -743,6 +783,15 @@ class Patcher:
             raise PatcherError(
                 "Cannot find _handle_message source anchor in run.py — Hermes version may be incompatible"
             )
+        lines = content.splitlines(keepends=True)
+        if _find_clarify_send_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find clarify send anchor in run.py — Hermes version may be incompatible"
+            )
+        if _find_clarify_action_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find clarify action anchor in run.py — Hermes version may be incompatible"
+            )
 
     def apply(self) -> None:
         if self.is_fully_patched():
@@ -795,6 +844,8 @@ class Patcher:
             ("reasoning", "reasoning", _find_reasoning_site(tree, lines)),
             ("background_review", "background_review", _find_background_review_site(tree, lines)),
             ("bg_deliver", "bg_deliver", _find_bg_deliver_site(tree, lines)),
+            ("clarify_send", "clarify_send", _find_clarify_send_site(tree, lines)),
+            ("clarify_action", "clarify_action", _find_clarify_action_site(tree, lines)),
         ]
         hook_defs.extend(
             ("answer", f"answer callback {index}", loc)
@@ -826,6 +877,8 @@ class Patcher:
             "reasoning": _reasoning_hook,
             "background_review": _background_review_hook,
             "bg_deliver": _bg_deliver_hook,
+            "clarify_send": _clarify_send_hook,
+            "clarify_action": _clarify_action_hook,
         }
         for idx, indent, fn_name in sites:
             hook = _HOOK_FNS[fn_name](indent)
@@ -975,6 +1028,43 @@ def _find_bg_deliver_site(tree: ast.Module, lines: list[str]) -> tuple[int, str]
     for i, line in enumerate(lines):
         if line.strip() == "images, text_content = adapter.extract_images(response)":
             return i + 1, _safe_indent(lines, i)
+    return None
+
+
+def _find_clarify_send_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    """Locate the official nested clarify callback definition semantically."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "_clarify_callback_sync":
+            continue
+        has_official_send = any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Attribute)
+            and child.func.attr == "send_clarify"
+            for child in ast.walk(node)
+        )
+        if has_official_send:
+            lineno = node.lineno - 1
+            return lineno, _safe_indent(lines, lineno)
+    return None
+
+
+def _find_clarify_action_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    """Locate the post-auth session-key assignment in _handle_message."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_handle_message":
+            continue
+        for stmt in node.body:
+            if (
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
+                and stmt.targets[0].id == "_quick_key"
+                and isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Attribute)
+                and stmt.value.func.attr == "_session_key_for_source"
+            ):
+                lineno = stmt.end_lineno or stmt.lineno
+                return lineno, _safe_indent(lines, stmt.lineno - 1)
     return None
 
 

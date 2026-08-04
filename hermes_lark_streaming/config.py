@@ -96,6 +96,26 @@ class Config:
         return bool(display.get("show_tool_use", True))
 
     @property
+    def clarify_style(self) -> str:
+        """Feishu clarify presentation; invalid values preserve text fallback.
+
+        This is reloaded for every prompt so operators can switch the style
+        without restarting the gateway, matching the other Feishu display
+        settings.
+        """
+        display = self._reload().get("display")
+        if not isinstance(display, dict):
+            return "text"
+        platforms = display.get("platforms")
+        if not isinstance(platforms, dict):
+            return "text"
+        feishu = platforms.get("feishu")
+        if not isinstance(feishu, dict):
+            return "text"
+        value = str(feishu.get("clarify_style", "text") or "text").strip().lower()
+        return value if value in {"text", "card"} else "text"
+
+    @property
     def feishu_app_id(self) -> str:
         return str(self._platform_cfg().get("app_id", ""))
 

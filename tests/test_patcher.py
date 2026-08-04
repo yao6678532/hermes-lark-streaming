@@ -298,6 +298,28 @@ class TestVerify:
         with pytest.raises(PatcherError, match="abort anchor"):
             _patcher(p).verify_target()
 
+    def test_verify_fails_when_clarify_send_callback_moves(self, run_copy: Path) -> None:
+        content = run_copy.read_text(encoding="utf-8").replace(
+            "def _clarify_callback_sync(question: str, choices) -> str:",
+            "def _clarify_callback_moved(question: str, choices) -> str:",
+            1,
+        )
+        run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify send anchor"):
+            _patcher(run_copy).verify_target()
+
+    def test_verify_fails_when_clarify_action_anchor_moves(self, run_copy: Path) -> None:
+        content = run_copy.read_text(encoding="utf-8").replace(
+            "_quick_key = self._session_key_for_source(source)",
+            "_quick_key = self._new_session_key_for_source(source)",
+            1,
+        )
+        run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify action anchor"):
+            _patcher(run_copy).verify_target()
+
 
 class TestGeneratedAnswerHook:
     def test_patch_hook_requires_message_id(self) -> None:
@@ -657,6 +679,20 @@ class TestApplyRemove:
         assert "content=text_content" in content
         assert "reply_to_message_id=event_message_id" in content
         assert "if not images and not media_files:" in content
+        assert "# HERMES_LARK_CLARIFY_SEND_BEGIN" in content
+        assert "on_clarify_adapter(adapter=_status_adapter, source=source)" in content
+        assert "# HERMES_LARK_CLARIFY_ACTION_BEGIN" in content
+        assert "await on_feishu_interaction_action(" in content
+        assert "gateway=self" in content
+
+        clarify_send_hook = content.index("# HERMES_LARK_CLARIFY_SEND_BEGIN")
+        official_clarify_callback = content.index("def _clarify_callback_sync(question: str, choices) -> str:")
+        assert clarify_send_hook < official_clarify_callback
+
+        quick_key = content.index("_quick_key = self._session_key_for_source(source)")
+        clarify_action_hook = content.index("# HERMES_LARK_CLARIFY_ACTION_BEGIN", quick_key)
+        pending_clarify = content.index("# Intercept messages that are responses to a pending clarify", quick_key)
+        assert quick_key < clarify_action_hook < pending_clarify
 
         stop_call = content.index('invalidation_reason="stop_command"')
         stop_hook = content.index("# HERMES_LARK_STOP_BEGIN", stop_call)

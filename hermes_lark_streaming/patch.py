@@ -13,6 +13,7 @@ from inspect import iscoroutinefunction
 from typing import Any
 
 from .controller import get_controller
+from .interactions.clarify import ClarifyAdapterProxy, parse_card_action
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -110,6 +111,63 @@ def on_feishu_normalize(
             event.source = source
     except Exception as exc:
         _logger.warning("on_feishu_normalize error: %s", exc, exc_info=True)
+
+
+def on_clarify_adapter(*, adapter: Any, source: Any) -> Any:
+    """Wrap Feishu clarify delivery while leaving every other adapter API intact."""
+    try:
+        ctrl = get_controller()
+        platform = getattr(getattr(source, "platform", None), "value", "")
+        if not ctrl.clarify_card_enabled or platform not in {"feishu", "lark"}:
+            return adapter
+        if adapter is None or isinstance(adapter, ClarifyAdapterProxy):
+            return adapter
+        owner_ids = frozenset(
+            str(value).strip()
+            for value in (
+                getattr(source, "user_id", None),
+                getattr(source, "user_id_alt", None),
+            )
+            if value and str(value).strip()
+        )
+        if not owner_ids:
+            return adapter
+        return ClarifyAdapterProxy(adapter, ctrl, owner_ids)
+    except Exception:
+        _logger.exception("on_clarify_adapter error")
+        return adapter
+
+
+async def on_feishu_interaction_action(
+    *,
+    message_id: str,
+    source: Any,
+    event: Any,
+    session_key: str,
+    gateway: Any = None,
+) -> bool:
+    """Consume genuine plugin card callbacks before normal command dispatch."""
+    del message_id
+    platform = getattr(getattr(source, "platform", None), "value", "")
+    if platform not in {"feishu", "lark"}:
+        return False
+    raw_message = getattr(event, "raw_message", None)
+    action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
+    if action_value is None:
+        return False
+    try:
+        profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+        ctrl = get_controller(profile_home)
+        return bool(
+            await ctrl.on_clarify_action(
+                raw_message=raw_message,
+                source_chat_id=str(getattr(source, "chat_id", "") or ""),
+                session_key=session_key,
+            )
+        )
+    except Exception:
+        _logger.exception("on_feishu_interaction_action error")
+        return True
 
 
 @_safe_hook()

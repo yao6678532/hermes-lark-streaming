@@ -17,6 +17,12 @@ from .feishu import (
     FeishuClient,
     FeishuClientConfig,
 )
+from .interactions.clarify import (
+    ClarifySendResult,
+    handle_clarify_action,
+    send_clarify_card,
+)
+from .interactions.registry import ClarifyCardRegistry
 from .streaming.controller import StreamingController
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
@@ -138,6 +144,7 @@ class StreamCardController(StreamingController):
         self._text_fallback_needed: set[str] = set()
         self._text_fallback_aliases: dict[str, set[str]] = {}
         self._unscoped_enabled: bool | None = None
+        self._clarify_registry = ClarifyCardRegistry()
 
     @property
     def enabled(self) -> bool:
@@ -149,6 +156,10 @@ class StreamCardController(StreamingController):
         if unscoped and enabled:
             self._unscoped_enabled = True
         return enabled
+
+    @property
+    def clarify_card_enabled(self) -> bool:
+        return self.enabled and self._cfg.clarify_style == "card"
 
     @staticmethod
     def _needs_fallback_scope() -> bool:
@@ -199,6 +210,51 @@ class StreamCardController(StreamingController):
                     )
                 )
             self._initialized = True
+
+    async def send_clarify_card(
+        self,
+        *,
+        chat_id: str,
+        question: str,
+        choices: list[str],
+        clarify_id: str,
+        session_key: str,
+        owner_user_ids: frozenset[str],
+        metadata: dict[str, Any] | None = None,
+    ) -> ClarifySendResult:
+        """Deliver a Feishu clarify card without replacing Hermes state."""
+        if self._cfg.clarify_style != "card" or not choices:
+            return ClarifySendResult(False, error="clarify card disabled or unsupported")
+        await self._ensure_init()
+        if self._client is None:
+            return ClarifySendResult(False, error="Feishu client unavailable")
+        return await send_clarify_card(
+            client=self._client,
+            registry=self._clarify_registry,
+            chat_id=chat_id,
+            question=question,
+            choices=choices,
+            clarify_id=clarify_id,
+            session_key=session_key,
+            owner_user_ids=owner_user_ids,
+            metadata=metadata,
+        )
+
+    async def on_clarify_action(
+        self,
+        *,
+        raw_message: Any,
+        source_chat_id: str,
+        session_key: str,
+    ) -> bool:
+        """Bridge a genuine Feishu action into Hermes' pending registry."""
+        return await handle_clarify_action(
+            client=self._client,
+            registry=self._clarify_registry,
+            raw_message=raw_message,
+            source_chat_id=source_chat_id,
+            session_key=session_key,
+        )
 
     def _get_loop(self) -> asyncio.AbstractEventLoop | None:
         """获取事件循环，缓存以便跨线程复用."""
@@ -774,12 +830,12 @@ _controllers: dict[str, StreamCardController] = {}
 _controller_lock = threading.Lock()
 
 
-def get_controller() -> StreamCardController:
-    profile_home = hermes_home().resolve()
-    key = str(profile_home)
+def get_controller(profile_home: Path | None = None) -> StreamCardController:
+    resolved_home = (profile_home or hermes_home()).resolve()
+    key = str(resolved_home)
     with _controller_lock:
         controller = _controllers.get(key)
         if controller is None:
-            controller = StreamCardController(profile_home)
+            controller = StreamCardController(resolved_home)
             _controllers[key] = controller
         return controller

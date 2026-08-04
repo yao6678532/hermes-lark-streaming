@@ -19,6 +19,7 @@ from hermes_lark_streaming.cardkit.builder import (
     build_complete_card,
     build_streaming_card_v2,
 )
+from hermes_lark_streaming.cardkit.interaction_builder import build_clarify_card
 from hermes_lark_streaming.cardkit.markdown import (
     _downgrade_tables,
     _find_tables_outside_code_blocks,
@@ -74,6 +75,45 @@ class TestOptimizeMarkdownStyle:
         result = optimize_markdown_style(text)
         assert "#### Title" in result
         assert "# Code heading" in result
+
+
+class TestBuildClarifyCard:
+    def test_pending_single_select_buttons_use_plugin_namespace(self) -> None:
+        card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=["A", "B", "C"],
+        )
+
+        assert card["schema"] == "2.0"
+        assert card["header"]["template"] == "blue"
+        assert card["header"]["text_tag_list"][0]["color"] == "blue"
+        actions = card["body"]["elements"][1:]
+        assert len(actions) == 4
+        assert all(action["tag"] == "button" for action in actions)
+        assert actions[0]["value"] == {
+            "hermes_lark_action": "clarify_select",
+            "clarify_id": "clarify-1",
+            "response": "A",
+        }
+        assert "hermes_action" not in actions[0]["value"]
+        assert actions[-1]["value"] == {
+            "hermes_lark_action": "clarify_other",
+            "clarify_id": "clarify-1",
+        }
+
+    def test_answered_card_removes_actions(self) -> None:
+        card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=["A", "B"],
+            status="answered",
+            answer="B",
+        )
+
+        assert card["header"]["template"] == "green"
+        assert all(element["tag"] != "action" for element in card["body"]["elements"])
+        assert "B" in card["body"]["elements"][-1]["content"]
 
 
 class TestStripInvalidImageKeys:
