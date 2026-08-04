@@ -686,7 +686,19 @@ class TestApplyRemove:
         assert "gateway=self" in content
 
         clarify_send_hook = content.index("# HERMES_LARK_CLARIFY_SEND_BEGIN")
+        status_adapter_init = min(
+            index
+            for index in (
+                content.find("_status_adapter = self._adapter_for_source(source)"),
+                content.find("_status_adapter = self.adapters.get(source.platform)"),
+            )
+            if index >= 0
+        )
         official_clarify_callback = content.index("def _clarify_callback_sync(question: str, choices) -> str:")
+        assert status_adapter_init < clarify_send_hook
+        enclosing_run_sync = content.rfind("def run_sync():", 0, official_clarify_callback)
+        assert enclosing_run_sync >= 0
+        assert clarify_send_hook < enclosing_run_sync
         assert clarify_send_hook < official_clarify_callback
 
         quick_key = content.index("_quick_key = self._session_key_for_source(source)")

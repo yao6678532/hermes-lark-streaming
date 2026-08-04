@@ -1032,7 +1032,16 @@ def _find_bg_deliver_site(tree: ast.Module, lines: list[str]) -> tuple[int, str]
 
 
 def _find_clarify_send_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
-    """Locate the official nested clarify callback definition semantically."""
+    """Wrap the adapter after Hermes initializes it for this agent turn.
+
+    The official clarify callback closes over ``_status_adapter``.  Injecting
+    an assignment inside that nested callback's enclosing ``run_sync`` makes
+    Python treat the name as a local for the whole function, so earlier
+    background-review references raise ``UnboundLocalError``.  Keep the
+    callback check as the compatibility guard, but install the wrapper at the
+    outer adapter initialization site instead.
+    """
+    has_official_send = False
     for node in ast.walk(tree):
         if not isinstance(node, ast.FunctionDef) or node.name != "_clarify_callback_sync":
             continue
@@ -1043,8 +1052,17 @@ def _find_clarify_send_site(tree: ast.Module, lines: list[str]) -> tuple[int, st
             for child in ast.walk(node)
         )
         if has_official_send:
-            lineno = node.lineno - 1
-            return lineno, _safe_indent(lines, lineno)
+            break
+    if not has_official_send:
+        return None
+
+    adapter_assignments = {
+        "_status_adapter = self._adapter_for_source(source)",
+        "_status_adapter = self.adapters.get(source.platform)",
+    }
+    for i, line in enumerate(lines):
+        if line.strip() in adapter_assignments:
+            return i + 1, _safe_indent(lines, i)
     return None
 
 
