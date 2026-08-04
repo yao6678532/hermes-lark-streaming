@@ -14,6 +14,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import hermes_lark_streaming.controller as controller_module
+from hermes_lark_streaming.cardkit.builder import (
+    REASONING_ELEMENT_ID,
+    REASONING_TEXT_ELEMENT_ID,
+)
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
 from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elements
@@ -79,6 +83,11 @@ def test_enabled_retries_unsuccessful_unscoped_fallback() -> None:
         assert ctrl.enabled is True
 
     assert credential_scope.call_count == 2
+
+
+def test_gpt_quota_lookup_failure_is_fail_open() -> None:
+    with patch.dict(sys.modules, {"agent.credential_pool": None}):
+        assert controller_module._fetch_gpt_quota_footer("gpt-5-codex") == ""
 
 
 def test_enabled_uses_and_restores_profile_secret_scope(tmp_path, monkeypatch) -> None:
@@ -451,6 +460,25 @@ def _setup_ctrl() -> StreamCardController:
     ctrl._initialized = True
     ctrl._client = _mock_client()
     return ctrl
+
+
+def _configure_merged(
+    ctrl: StreamCardController,
+    *,
+    show_reasoning: bool = True,
+    show_tool_use: bool = True,
+) -> None:
+    ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
+    ctrl._cfg._reload = lambda: {  # type: ignore[assignment]
+        "display": {
+            "platforms": {
+                "feishu": {
+                    "show_reasoning": show_reasoning,
+                    "show_tool_use": show_tool_use,
+                }
+            }
+        }
+    }
 
 
 class TestAwaitedCompletion:
@@ -1389,6 +1417,265 @@ class TestDoFlush:
         ctrl._client.cardkit_stream_element.assert_not_called()
 
 
+# ── merged reasoning 集成测试 ──
+
+
+class TestMergedReasoning:
+    @pytest.mark.asyncio
+    async def test_single_live_lane_preserves_rtrtra_chronology_with_hidden_tools(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_tool_use=False)
+        session = CardSession("msg_merged", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged"
+        session.card_msg_id = "card_msg_merged"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="R1") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+            assert ctrl.on_reasoning(message_id=session.message_id, text="R2") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="search",
+                status="started",
+            ) is True
+            assert ctrl.on_reasoning(message_id=session.message_id, text="R3") is True
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+
+        await ctrl._do_flush(session)
+
+        assert [seg.type for seg in session.segment_state.segments] == [
+            "reasoning",
+            "tool",
+            "reasoning",
+            "tool",
+            "reasoning",
+            "answer",
+        ]
+        assert session.merged_reasoning.text == "R1R2R3"
+        assert len(session.tool_use.build_display_steps()) == 2
+
+        added_elements = [
+            element
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            for element in action.get("params", {}).get("elements", [])
+        ]
+        fixed_panels = [
+            element
+            for element in added_elements
+            if element.get("element_id") == REASONING_ELEMENT_ID
+        ]
+        assert len(fixed_panels) == 1
+        assert fixed_panels[0]["elements"][0]["element_id"] == REASONING_TEXT_ELEMENT_ID
+        assert not any(
+            (
+                str(element.get("element_id", "")).startswith("reasoning_")
+                and element.get("element_id") != REASONING_ELEMENT_ID
+            )
+            or str(element.get("element_id", "")).startswith("tools_")
+            for element in added_elements
+        )
+
+        reasoning_streams = [
+            call
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == REASONING_TEXT_ELEMENT_ID
+        ]
+        assert len(reasoning_streams) == 1
+        assert reasoning_streams[0].args[2] == "R1R2R3"
+
+    @pytest.mark.asyncio
+    async def test_show_reasoning_false_keeps_answer_and_creates_no_reasoning_ui(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_reasoning=False)
+        session = CardSession("msg_hidden_reasoning", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_hidden_reasoning"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="secret") is False
+            assert ctrl.on_answer(message_id=session.message_id, text="visible") is True
+
+        await ctrl._do_flush(session)
+
+        assert session.merged_reasoning.text == ""
+        assert [seg.type for seg in session.segment_state.segments] == ["answer"]
+        assert all(
+            call.args[1] != REASONING_TEXT_ELEMENT_ID
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_create_failure_is_recoverable_and_answer_continues(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = CardSession("msg_merged_failure", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged_failure"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_reasoning(message_id=session.message_id, text="reasoning")
+            ctrl.on_answer(message_id=session.message_id, text="answer")
+
+        failed_once = False
+        batch_calls: list[list[dict]] = []
+
+        async def fail_first_reasoning_add(
+            _card_id: str,
+            actions: list[dict],
+            **_kwargs: object,
+        ) -> None:
+            nonlocal failed_once
+            batch_calls.append(actions)
+            adds_fixed_reasoning = any(
+                element.get("element_id") == REASONING_ELEMENT_ID
+                for action in actions
+                for element in action.get("params", {}).get("elements", [])
+            )
+            if adds_fixed_reasoning and not failed_once:
+                failed_once = True
+                raise FeishuAPIError("rate limited", code=230020)
+
+        ctrl._client.cardkit_batch_update = fail_first_reasoning_add
+
+        await ctrl._do_flush(session)
+
+        answer_seg = session.segment_state.segments[-1]
+        assert answer_seg.type == "answer"
+        assert answer_seg.created is True
+        assert answer_seg.dirty is False
+        assert session.merged_reasoning.created is False
+        assert session.merged_reasoning.dirty is True
+
+        await ctrl._do_flush(session)
+
+        assert session.merged_reasoning.created is True
+        assert session.merged_reasoning.dirty is False
+        assert len(batch_calls) == 3
+
+    @pytest.mark.asyncio
+    async def test_reasoning_delta_during_stream_remains_dirty_until_next_flush(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = CardSession("msg_merged_race", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged_race"
+        session.element_count = 1
+        ctrl._append_reasoning(session, "A")
+
+        streamed: list[str] = []
+
+        async def append_during_first_stream(
+            _card_id: str,
+            _element_id: str,
+            content: str,
+            **_kwargs: object,
+        ) -> None:
+            streamed.append(content)
+            if len(streamed) == 1:
+                ctrl._append_reasoning(session, "B")
+
+        ctrl._client.cardkit_stream_element = append_during_first_stream
+
+        await ctrl._do_flush(session)
+
+        assert session.merged_reasoning.text == "AB"
+        assert session.merged_reasoning.dirty is True
+
+        await ctrl._do_flush(session)
+
+        assert streamed == ["A", "AB"]
+        assert session.merged_reasoning.dirty is False
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_missing_fixed_text_element_recreates_lane_on_next_flush(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = CardSession("msg_merged_missing", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged_missing"
+        session.element_count = 5
+        ctrl._append_reasoning(session, "reasoning")
+        session.merged_reasoning.created = True
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=[
+                FeishuAPIError(
+                    "cardkit_stream_element: code=300313, "
+                    f"msg=ErrMsg: not find elementID : {REASONING_TEXT_ELEMENT_ID};",
+                    300313,
+                ),
+                None,
+            ]
+        )
+
+        await ctrl._do_flush(session)
+
+        assert session.merged_reasoning.created is False
+        assert session.merged_reasoning.dirty is True
+        assert session.element_count == 1
+
+        await ctrl._do_flush(session)
+
+        assert session.merged_reasoning.created is True
+        assert session.merged_reasoning.dirty is False
+        assert session.element_count == 5
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_split_rebuilds_fixed_lane_without_losing_accumulated_text(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = CardSession("msg_merged_split", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged_old"
+        session.card_msg_id = "card_msg_merged_old"
+        session.element_count = 5
+        ctrl._append_reasoning(session, "R1")
+        ctrl._pause_merged_reasoning(session)
+        session.segment_state.on_answer_delta("old answer")
+        for seg in session.segment_state.segments:
+            seg.created = True
+            seg.dirty = False
+        session.merged_reasoning.created = True
+        session.merged_reasoning.dirty = False
+
+        assert await ctrl._do_split_card(session, 2, [], set(), {}, []) is True
+
+        sealed_card = ctrl._client.cardkit_update.await_args.args[1]
+        sealed_reasoning = [
+            element
+            for element in sealed_card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        ]
+        assert len(sealed_reasoning) == 1
+        assert sealed_reasoning[0]["elements"][0]["content"] == "R1"
+        assert session.merged_reasoning.text == "R1"
+        assert session.merged_reasoning.created is True
+        fixed_adds = [
+            element
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            for element in action.get("params", {}).get("elements", [])
+            if element.get("element_id") == REASONING_ELEMENT_ID
+        ]
+        assert len(fixed_adds) == 1
+        assert ctrl._client.cardkit_stream_element.await_args.args[1] == REASONING_TEXT_ELEMENT_ID
+        assert ctrl._client.cardkit_stream_element.await_args.args[2] == "R1"
+
+
 # ── _do_complete_card 集成测试 ──
 
 
@@ -1520,6 +1807,19 @@ class TestOnThinking:
 
         types = [s.type for s in session.segment_state.segments]
         assert types == ["reasoning", "answer"]
+
+    def test_merged_mode_uses_shared_reasoning_ingestion(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl)
+        session = _make_session("msg_think_merged")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl._on_thinking_segment(session, "<thinking>reasoning</thinking>\nanswer")
+
+        assert [seg.type for seg in session.segment_state.segments] == ["reasoning", "answer"]
+        assert session.merged_reasoning.text == "reasoning"
+        assert session.merged_reasoning.active_since is None
 
     def test_empty_text_no_flush(self) -> None:
         ctrl = _setup_ctrl()

@@ -11,6 +11,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from .flush import CARDKIT_MS, FlushController
+from .reasoning import MergedReasoningState
 from .segments import Segment, SegmentState
 from .tooluse import ToolUseTracker
 from .unavailable_guard import UnavailableGuard
@@ -55,6 +56,7 @@ class CardSession:
         "footer",
         "guard",
         "image_resolver",
+        "merged_reasoning",
         "message_id",
         "segment_state",
         "sequence",
@@ -97,6 +99,7 @@ class CardSession:
 
         self.image_resolver: ImageResolver | None = None
         self.segment_state: SegmentState | None = SegmentState()
+        self.merged_reasoning = MergedReasoningState()
         self.element_count: int = 0
         self.split_disabled = False
         self.split_index: int = 0

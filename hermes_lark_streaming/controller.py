@@ -39,25 +39,25 @@ def _fetch_gpt_quota_footer(model: str) -> str:
         return ""
 
     try:
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
 
         import httpx
-        from agent.credential_pool import load_pool
+        from agent.credential_pool import load_pool  # type: ignore[import-not-found]
 
         def _format_reset(value: object) -> str:
             if value in (None, ""):
                 return ""
             try:
                 if isinstance(value, (int, float)):
-                    reset_at = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                    reset_at = datetime.fromtimestamp(float(value), tz=UTC)
                 else:
                     text = str(value).strip()
                     if text.endswith("Z"):
                         text = text[:-1] + "+00:00"
                     reset_at = datetime.fromisoformat(text)
                     if reset_at.tzinfo is None:
-                        reset_at = reset_at.replace(tzinfo=timezone.utc)
-                seconds = max(0, int((reset_at - datetime.now(timezone.utc)).total_seconds()))
+                        reset_at = reset_at.replace(tzinfo=UTC)
+                seconds = max(0, int((reset_at - datetime.now(UTC)).total_seconds()))
                 minutes = seconds // 60
                 if minutes < 60:
                     return f"{minutes}m"
@@ -315,7 +315,7 @@ class StreamCardController(StreamingController):
         if session.segment_state is None:
             return False
 
-        session.segment_state.on_reasoning_delta(text)
+        self._append_reasoning(session, text)
         self._schedule_flush(session)
         return True
 
@@ -337,6 +337,7 @@ class StreamCardController(StreamingController):
             return False
 
         if status in ("running", "started", "tool.started"):
+            self._pause_merged_reasoning(session)
             session.tool_use.record_start(tool_name, detail)
         else:
             is_error = status in ("error", "failed")
@@ -364,6 +365,7 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
+        self._pause_merged_reasoning(session)
         session.segment_state.on_answer_delta(answer_text)
         self._schedule_flush(session)
         return True
@@ -689,6 +691,7 @@ class StreamCardController(StreamingController):
         ):
             final_answer = strip_reasoning_tags(answer)
             if final_answer:
+                self._pause_merged_reasoning(session)
                 session.segment_state.on_answer_delta(final_answer)
 
         # 仅在 DeepSeek 模型下查询余额

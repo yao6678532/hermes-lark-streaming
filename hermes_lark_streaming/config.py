@@ -54,6 +54,15 @@ class Config:
         return bool(sec.get("panel_expanded", False))
 
     @property
+    def reasoning_mode(self) -> str:
+        """推理展示模式；非法值回退到旧版 segmented 行为."""
+        value = str(self._streaming_sec().get("reasoning_mode", "segmented") or "segmented")
+        value = value.strip().lower()
+        if value in {"segmented", "merged"}:
+            return value
+        return "segmented"
+
+    @property
     def show_reasoning(self) -> bool:
         """是否展示推理过程（display.platforms.feishu.show_reasoning → display.show_reasoning）.
 

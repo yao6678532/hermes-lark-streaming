@@ -7,7 +7,14 @@ import logging
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
-from ..cardkit.builder import build_background_card, build_complete_card, build_cron_card, build_streaming_card_v2
+from ..cardkit.builder import (
+    REASONING_ELEMENT_ID,
+    REASONING_TEXT_ELEMENT_ID,
+    build_background_card,
+    build_complete_card,
+    build_cron_card,
+    build_streaming_card_v2,
+)
 from ..cardkit.markdown import (
     _downgrade_tables,
     optimize_markdown_style,
@@ -25,6 +32,8 @@ from .image import ImageResolver
 from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
+    MERGED_REASONING_ELEMENT_ESTIMATE,
+    build_add_merged_reasoning_action,
     build_add_segment_action,
     build_reasoning_finalized_action,
     build_tool_update_action,
@@ -79,6 +88,87 @@ class StreamingController:
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
 
+    def _append_reasoning(self, session: CardSession, text: str) -> None:
+        """Record chronology and, when enabled, update merged presentation state."""
+        segment_state = session.segment_state
+        if segment_state is None:
+            return
+        segment_state.on_reasoning_delta(text)
+        if self._cfg.reasoning_mode == "merged":
+            session.merged_reasoning.append(text)
+
+    def _pause_merged_reasoning(self, session: CardSession) -> None:
+        if self._cfg.reasoning_mode == "merged":
+            session.merged_reasoning.pause()
+
+    @staticmethod
+    def _consume_merged_reasoning_segments(session: CardSession) -> None:
+        """Mark chronology segments consumed only after the fixed UI is current."""
+        if not session.merged_reasoning.created or session.merged_reasoning.dirty:
+            return
+        if session.segment_state is None:
+            return
+        for seg in session.segment_state.segments:
+            if seg.type == SegmentType.REASONING:
+                seg.created = True
+                seg.dirty = False
+
+    async def _flush_merged_reasoning(self, session: CardSession) -> None:
+        """Create/update the fixed reasoning lane without affecting other segments."""
+        assert self._client is not None
+        assert session.card_id is not None
+        state = session.merged_reasoning
+        if not state.text:
+            return
+
+        if not state.created:
+            session.sequence += 1
+            try:
+                await self._client.cardkit_batch_update(
+                    session.card_id,
+                    [build_add_merged_reasoning_action()],
+                    sequence=session.sequence,
+                )
+            except FeishuAPIError as error:
+                _logger.debug("CardKit merged reasoning create failed: %s", error, exc_info=True)
+                self._handle_flush_error(error)
+                return
+            except Exception:
+                _logger.debug("CardKit merged reasoning create failed", exc_info=True)
+                return
+            state.created = True
+            session.element_count += MERGED_REASONING_ELEMENT_ESTIMATE
+
+        if state.dirty:
+            rendered_text = state.text
+            content = optimize_markdown_style(rendered_text) or " "
+            session.sequence += 1
+            try:
+                await self._client.cardkit_stream_element(
+                    session.card_id,
+                    REASONING_TEXT_ELEMENT_ID,
+                    content,
+                    sequence=session.sequence,
+                )
+            except FeishuAPIError as error:
+                missing_el_id = extract_missing_element_id(error)
+                if missing_el_id in {REASONING_ELEMENT_ID, REASONING_TEXT_ELEMENT_ID}:
+                    state.created = False
+                    session.element_count = max(
+                        0,
+                        session.element_count - MERGED_REASONING_ELEMENT_ESTIMATE,
+                    )
+                _logger.debug("CardKit merged reasoning stream failed: %s", error, exc_info=True)
+                self._handle_flush_error(error)
+                return
+            except Exception:
+                _logger.debug("CardKit merged reasoning stream failed", exc_info=True)
+                return
+            if state.text == rendered_text:
+                state.dirty = False
+
+        self._consume_merged_reasoning_segments(session)
+
     def _on_thinking_segment(self, session: CardSession, text: str) -> bool:
         segment_state = session.segment_state
         if segment_state is None:
@@ -88,8 +178,9 @@ class StreamingController:
         answer = split.get("answer_text")
 
         if reasoning and self._cfg.show_reasoning:
-            segment_state.on_reasoning_delta(reasoning)
+            self._append_reasoning(session, reasoning)
         if answer:
+            self._pause_merged_reasoning(session)
             segment_state.on_answer_delta(answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
@@ -177,6 +268,12 @@ class StreamingController:
         assert self._client is not None
         segments = segment_state.segments
         all_steps = session.tool_use.build_display_steps()
+        merged_mode = self._cfg.reasoning_mode == "merged"
+
+        if merged_mode:
+            # This lane is presentation state. Numbered reasoning segments remain
+            # intact for chronology, splitting, and diagnostics.
+            await self._flush_merged_reasoning(session)
 
         # ── 步骤 1: batch_update — 按 segment 顺序处理结构性变更 ──
         actions: list[dict[str, Any]] = []
@@ -187,6 +284,9 @@ class StreamingController:
 
         for i, seg in enumerate(segments):
             if i < session.split_index:
+                continue
+
+            if merged_mode and seg.type == SegmentType.REASONING:
                 continue
 
             # show_tool_use=False: 流式态跳过所有 TOOL segment 处理
@@ -305,6 +405,8 @@ class StreamingController:
                 continue
             try:
                 if seg.type == SegmentType.REASONING:
+                    if merged_mode:
+                        continue
                     content = optimize_markdown_style(seg.text) or " "
                     session.sequence += 1
                     _logger.info(
@@ -393,6 +495,8 @@ class StreamingController:
             if new_el_ids:
                 for seg in segments:
                     if seg.el_id in new_el_ids or not seg.created:
+                        continue
+                    if self._cfg.reasoning_mode == "merged" and seg.type == SegmentType.REASONING:
                         continue
                     if seg.type in (SegmentType.REASONING, SegmentType.ANSWER) and seg.text:
                         seg.dirty = True
@@ -531,6 +635,17 @@ class StreamingController:
                 log_prefix="CardKit seal",
             )
 
+        merged_mode = self._cfg.reasoning_mode == "merged"
+        seal_merged_text = None
+        seal_merged_elapsed_ms = 0.0
+        if merged_mode:
+            seal_merged_text = "".join(
+                seg.text for seg in seal_segments if seg.type == SegmentType.REASONING
+            )
+            seal_merged_elapsed_ms = sum(
+                seg.elapsed_ms for seg in seal_segments if seg.type == SegmentType.REASONING
+            )
+
         seal_card = build_complete_card(
             segments=seal_segments,
             all_tool_steps=all_steps,
@@ -542,6 +657,8 @@ class StreamingController:
             body_text_size=self._cfg.body_text_size,
             show_tool_use=self._cfg.show_tool_use,
             width_mode=self._cfg.width_mode,
+            merged_reasoning_text=seal_merged_text,
+            merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
         )
 
         try:
@@ -583,6 +700,11 @@ class StreamingController:
         session.split_index = split_idx
         for seg in segments[split_idx:]:
             seg.created = False
+        if merged_mode:
+            # The new card replays the accumulated lane. Older sealed cards keep
+            # only the merged reasoning that belongs to their chronology slice.
+            session.merged_reasoning.reset_render_state()
+            await self._flush_merged_reasoning(session)
         _logger.info(
             "CardKit split: msg=%s old_card=%s sealed=%d split_idx=%d new_card=%s",
             session.message_id[:12],
@@ -625,6 +747,8 @@ class StreamingController:
 
         if segment_state is not None:
             segment_state.finalize_segments(len(all_tool_steps))
+        if self._cfg.reasoning_mode == "merged":
+            session.merged_reasoning.finalize()
 
         active_segments = session.active_segments()
 
@@ -650,6 +774,12 @@ class StreamingController:
             body_text_size=self._cfg.body_text_size,
             show_tool_use=self._cfg.show_tool_use,
             width_mode=self._cfg.width_mode,
+            merged_reasoning_text=(
+                session.merged_reasoning.text
+                if self._cfg.reasoning_mode == "merged"
+                else None
+            ),
+            merged_reasoning_elapsed_ms=session.merged_reasoning.elapsed_ms,
         )
 
         streaming_closed = False
