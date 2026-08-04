@@ -39,25 +39,25 @@ def _fetch_gpt_quota_footer(model: str) -> str:
         return ""
 
     try:
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
 
         import httpx
-        from agent.credential_pool import load_pool
+        from agent.credential_pool import load_pool  # type: ignore[import-not-found]
 
         def _format_reset(value: object) -> str:
             if value in (None, ""):
                 return ""
             try:
                 if isinstance(value, (int, float)):
-                    reset_at = datetime.fromtimestamp(float(value), tz=timezone.utc)
+                    reset_at = datetime.fromtimestamp(float(value), tz=UTC)
                 else:
                     text = str(value).strip()
                     if text.endswith("Z"):
                         text = text[:-1] + "+00:00"
                     reset_at = datetime.fromisoformat(text)
                     if reset_at.tzinfo is None:
-                        reset_at = reset_at.replace(tzinfo=timezone.utc)
-                seconds = max(0, int((reset_at - datetime.now(timezone.utc)).total_seconds()))
+                        reset_at = reset_at.replace(tzinfo=UTC)
+                seconds = max(0, int((reset_at - datetime.now(UTC)).total_seconds()))
                 minutes = seconds // 60
                 if minutes < 60:
                     return f"{minutes}m"
@@ -290,8 +290,15 @@ class StreamCardController(StreamingController):
             self._text_fallback_aliases.pop(key, None)
         return True
 
-    def on_thinking(self, *, message_id: str, text: str) -> bool:
-        """思考内容增量."""
+    def on_thinking(
+        self,
+        *,
+        message_id: str,
+        text: str,
+        api_mode: str = "",
+        source: str = "",
+    ) -> bool:
+        """Handle tagged thinking deltas and classified interim commentary."""
         if not self.enabled:
             return False
         session = self._get_active_session(message_id)
@@ -300,10 +307,15 @@ class StreamCardController(StreamingController):
 
         if session.segment_state is None:
             return False
-        return self._on_thinking_segment(session, text)
+        return self._on_thinking_segment(
+            session,
+            text,
+            api_mode=api_mode,
+            source=source,
+        )
 
-    def on_reasoning(self, *, message_id: str, text: str) -> bool:
-        """Native model reasoning delta (incremental append)."""
+    def on_reasoning(self, *, message_id: str, text: str, api_mode: str = "") -> bool:
+        """Route native reasoning presentation by its Hermes API-mode semantics."""
         if not self.enabled:
             return False
         if not self._cfg.show_reasoning:
@@ -315,7 +327,7 @@ class StreamCardController(StreamingController):
         if session.segment_state is None:
             return False
 
-        session.segment_state.on_reasoning_delta(text)
+        self._record_native_reasoning(session, text, api_mode=api_mode)
         self._schedule_flush(session)
         return True
 
@@ -337,6 +349,7 @@ class StreamCardController(StreamingController):
             return False
 
         if status in ("running", "started", "tool.started"):
+            self._pause_merged_reasoning(session)
             session.tool_use.record_start(tool_name, detail)
         else:
             is_error = status in ("error", "failed")
@@ -364,6 +377,7 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
+        self._pause_merged_reasoning(session)
         session.segment_state.on_answer_delta(answer_text)
         self._schedule_flush(session)
         return True
@@ -689,6 +703,7 @@ class StreamCardController(StreamingController):
         ):
             final_answer = strip_reasoning_tags(answer)
             if final_answer:
+                self._pause_merged_reasoning(session)
                 session.segment_state.on_answer_delta(final_answer)
 
         # 仅在 DeepSeek 模型下查询余额

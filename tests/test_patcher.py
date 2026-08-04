@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import ast
+import asyncio
 import logging
 import shutil
 import textwrap
@@ -17,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from hermes_lark_streaming.controller import StreamCardController
 from hermes_lark_streaming.patcher import (
     MARKERS,
     MK_CRON_DELIVER,
@@ -30,8 +32,10 @@ from hermes_lark_streaming.patcher import (
     _followup_complete_hook,
     _remove_block,
     _stop_hook,
+    _thinking_hook,
     _tool_hook,
 )
+from hermes_lark_streaming.streaming.session import CardSession
 
 RUN_SRC = Path.home() / ".hermes" / "hermes-agent" / "gateway" / "run.py"
 RUN_BAK = RUN_SRC.with_suffix(RUN_SRC.suffix + ".hermes_lark.bak")
@@ -129,6 +133,17 @@ def _build_answer_hook_runner(*, use_turn_context: bool):
         "    return 'native'\n"
     )
     exec(compile(source, "<answer-hook-test>", "exec"), namespace)
+    return namespace["callback"]
+
+
+def _build_thinking_hook_runner():
+    namespace: dict = {}
+    source = (
+        "def callback(text, ctx, agent, *, already_streamed=False):\n"
+        f"{_thinking_hook('    ')}"
+        "    return 'native'\n"
+    )
+    exec(compile(source, "<thinking-hook-test>", "exec"), namespace)
     return namespace["callback"]
 
 
@@ -347,6 +362,62 @@ class TestGeneratedAnswerHook:
             result = callback("delta", ctx)
 
         assert result == "native"
+
+
+class TestGeneratedThinkingHook:
+    def test_hook_forwards_classified_interim_commentary_metadata(self) -> None:
+        callback = _build_thinking_hook_runner()
+        ctx = MagicMock()
+        ctx.event_message_id = "modern-message"
+        ctx._run_still_current.return_value = True
+        agent = SimpleNamespace(api_mode="codex_responses")
+
+        with patch(
+            "hermes_lark_streaming.patch.on_thinking_delta",
+            return_value=True,
+        ) as on_thinking_delta:
+            result = callback("Planning", ctx, agent)
+
+        assert result is None
+        on_thinking_delta.assert_called_once_with(
+            message_id="modern-message",
+            text="Planning",
+            api_mode="codex_responses",
+            source="interim_commentary",
+        )
+
+    def test_gateway_style_interim_chain_preserves_body_text(self) -> None:
+        callback = _build_thinking_hook_runner()
+        ctrl = StreamCardController()
+        ctrl._cfg = MagicMock()
+        ctrl._cfg.enabled = True
+        ctrl._cfg.feishu_app_id = "app"
+        ctrl._cfg.env_app_id = ""
+        ctrl._cfg.reasoning_mode = "merged"
+        ctrl._cfg.show_reasoning = True
+        loop = asyncio.new_event_loop()
+        session = CardSession("modern-message", "chat", loop)
+        ctrl._sessions[session.message_id] = session
+        ctx = MagicMock()
+        ctx.event_message_id = session.message_id
+        ctx._run_still_current.return_value = True
+        agent = SimpleNamespace(api_mode="codex_responses")
+
+        with (
+            patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+            patch.object(ctrl, "_schedule_flush"),
+        ):
+            for text in ("Planning", "Reading", "Confirming"):
+                assert callback(text, ctx, agent) is None
+
+        # SegmentState retains its normal same-type coalescing chronology;
+        # commentary is body text and never enters merged reasoning state.
+        assert [seg.text for seg in session.segment_state.segments] == [
+            "PlanningReadingConfirming",
+        ]
+        assert session.segment_state.segments[0].type == "answer"
+        assert session.merged_reasoning.text == ""
+        loop.close()
 
 
 class TestGeneratedToolHook:
@@ -577,8 +648,10 @@ class TestApplyRemove:
         assert "_lark_message_id = ctx.event_message_id" in content
         assert "_lark_run_current = ctx._run_still_current" in content
         assert "on_answer_delta(message_id=_lark_message_id" in content
-        assert "on_thinking_delta(message_id=_lark_message_id" in content
-        assert "on_reasoning_delta(message_id=_lark_message_id" in content
+        assert "on_thinking_delta(" in content
+        assert "source='interim_commentary'" in content
+        assert "on_reasoning_delta(" in content
+        assert "api_mode=getattr(agent, 'api_mode', '')" in content
         assert "on_background_deliver(" in content
         assert "_bg_preview = prompt[:60] + ('...' if len(prompt) > 60 else '')" in content
         assert "content=text_content" in content

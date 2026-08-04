@@ -6,6 +6,8 @@ from typing import Any
 
 from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
+    REASONING_ELEMENT_ID,
+    REASONING_TEXT_ELEMENT_ID,
     _build_reasoning_panel,
     _build_tool_panel,
     _format_elapsed,
@@ -17,6 +19,7 @@ from .tooluse import ToolDisplayStep
 
 ELEMENT_THRESHOLD = 180  # 飞书硬上限 200，预留 20 给 footer + 波动
 FOOTER_RESERVE = 2  # footer 元素预留（hr + markdown）
+MERGED_REASONING_ELEMENT_ESTIMATE = 4
 
 
 def estimate_segment_elements(seg: Segment, all_steps: list[ToolDisplayStep]) -> int:
@@ -96,6 +99,25 @@ def build_add_segment_action(
             "type": "insert_before",
             "target_element_id": _LOADING_ELEMENT_ID,
             "elements": [element],
+        },
+    }
+
+
+def build_add_merged_reasoning_action() -> dict[str, Any]:
+    """Create the one fixed reasoning panel used by merged presentation mode."""
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": _LOADING_ELEMENT_ID,
+            "elements": [
+                _build_reasoning_panel(
+                    " ",
+                    expanded=True,
+                    element_id=REASONING_ELEMENT_ID,
+                    text_element_id=REASONING_TEXT_ELEMENT_ID,
+                )
+            ],
         },
     }
 

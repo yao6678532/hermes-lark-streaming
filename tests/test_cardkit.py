@@ -188,7 +188,26 @@ class TestBuildFooterElements:
         # 默认字段包含 "status"，总是会渲染
         result = _build_footer_elements({})
         assert len(result) >= 2
-        assert "Completed" in result[1]["content"]
+        assert result[1]["content"] == "✅"
+
+    def test_completed_status_uses_compact_spacing(self) -> None:
+        result = _build_footer_elements(
+            {"duration": 26.5, "model": "gpt-5"},
+            fields=[["status", "elapsed", "model"]],
+        )
+        assert result[1]["content"] == "✅ 26.5s · gpt-5"
+
+    def test_gpt_quota_hides_context(self) -> None:
+        result = _build_footer_elements(
+            {
+                "context_used": 50000,
+                "context_max": 200000,
+                "gpt_quota": "5h 80%",
+            },
+            fields=[["status", "context", "gpt_quota"]],
+        )
+        assert result[1]["content"] == "✅ 5h 80%"
+        assert "50.0K" not in result[1]["content"]
 
     def test_status_error(self) -> None:
         result = _build_footer_elements({}, is_error=True)
@@ -426,6 +445,51 @@ class TestBuildSegmentCompleteCard:
         r_idx = next(i for i, c in enumerate(contents) if "think" in c)
         a_idx = next(i for i, c in enumerate(contents) if "reply" in c)
         assert r_idx < a_idx
+
+    def test_merged_reasoning_renders_one_final_panel(self) -> None:
+        card = build_complete_card(
+            segments=[
+                _seg("reasoning", "R1"),
+                _seg("tool", tool_offset=0, tool_end_offset=1),
+                _seg("reasoning", "R2"),
+                _seg("tool", tool_offset=1, tool_end_offset=2),
+                _seg("reasoning", "R3"),
+                _seg("answer", "answer"),
+            ],
+            all_tool_steps=[_STEP_SUCCESS, _STEP_RUNNING],
+            merged_reasoning_text="R1R2R3",
+            merged_reasoning_elapsed_ms=6000,
+            show_tool_use=False,
+        )
+
+        reasoning_panels = [
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        ]
+        assert len(reasoning_panels) == 1
+        assert reasoning_panels[0]["elements"][0]["content"] == "R1R2R3"
+        assert "6.0s" in reasoning_panels[0]["header"]["title"]["content"]
+        assert reasoning_panels[0]["expanded"] is False
+
+    def test_segmented_reasoning_still_renders_each_panel(self) -> None:
+        card = build_complete_card(
+            segments=[
+                _seg("reasoning", "R1"),
+                _seg("tool", tool_offset=0, tool_end_offset=1),
+                _seg("reasoning", "R2"),
+                _seg("answer", "answer"),
+            ],
+            all_tool_steps=[_STEP_SUCCESS],
+        )
+        reasoning_panels = [
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        ]
+        assert len(reasoning_panels) == 2
 
     def test_tool_segment_uses_steps_slice(self) -> None:
         steps = [_STEP_RUNNING, _STEP_SUCCESS, _STEP_RUNNING]

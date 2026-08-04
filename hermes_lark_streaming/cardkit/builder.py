@@ -493,13 +493,29 @@ def build_complete_card(
     body_text_size: str = "normal_v2",
     show_tool_use: bool = True,
     width_mode: str = "default",
+    merged_reasoning_text: str | None = None,
+    merged_reasoning_elapsed_ms: float = 0,
 ) -> dict[str, Any]:
     """完成态流式卡片 — 按 segments 顺序渲染."""
     elements: list[dict] = []
     has_answer = False
+    merged_mode = merged_reasoning_text is not None
+
+    if merged_reasoning_text:
+        elements.append(
+            _build_reasoning_panel(
+                merged_reasoning_text,
+                merged_reasoning_elapsed_ms,
+                expanded=panel_expanded,
+                element_id=None,
+                text_element_id=None,
+            )
+        )
 
     for seg in segments:
         if seg.type == SegmentType.REASONING:
+            if merged_mode:
+                continue
             if seg.text:
                 elements.append(_build_reasoning_panel(
                     seg.text, seg.elapsed_ms, expanded=panel_expanded,

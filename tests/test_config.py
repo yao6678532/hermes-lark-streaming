@@ -37,6 +37,30 @@ class TestEnabled:
         assert cfg.enabled is False
 
 
+class TestReasoningMode:
+    @pytest.mark.parametrize("value", ["segmented", "merged"])
+    def test_reads_supported_values(self, value: str) -> None:
+        cfg = _make_config({"streaming": {"reasoning_mode": value}})
+        assert cfg.reasoning_mode == value
+
+    def test_is_case_insensitive(self) -> None:
+        cfg = _make_config({"streaming": {"reasoning_mode": " MERGED "}})
+        assert cfg.reasoning_mode == "merged"
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {},
+            {"streaming": {}},
+            {"streaming": {"reasoning_mode": "invalid"}},
+            {"streaming": {"reasoning_mode": None}},
+            {"streaming": "invalid"},
+        ],
+    )
+    def test_invalid_or_missing_defaults_to_segmented(self, raw: dict[str, Any]) -> None:
+        cfg = _make_config(raw)
+        assert cfg.reasoning_mode == "segmented"
+
 class TestFooterFields:
     def test_normal_2d_fields(self) -> None:
         cfg = _make_config({"streaming": {"footer": {"fields": [["a", "b"], ["c"]]}}})
