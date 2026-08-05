@@ -164,7 +164,8 @@ class TestBuildApprovalCard:
         assert card["header"]["template"] == "orange"
         assert len(rows) == 1
         row = rows[0]
-        assert row["flex_mode"] == "flow"
+        assert row["flex_mode"] == "stretch"
+        assert row["flex_mode"] != "flow"
         assert len(row["columns"]) == 4
         assert all(column["width"] == "weighted" and column["weight"] == 1 for column in row["columns"])
         assert [item["value"] for item in _official_buttons(card)] == [item["value"] for item in buttons]
@@ -175,6 +176,8 @@ class TestBuildApprovalCard:
             "deny",
         ]
         assert all(item["tag"] == "button" for column in row["columns"] for item in column["elements"])
+        assert all(item["width"] == "fill" for item in _official_buttons(card))
+        assert all(column["horizontal_align"] == "center" for column in row["columns"])
         assert row["columns"][-1]["elements"][0]["value"]["hermes_action"] == "deny"
 
     def test_conditional_and_unknown_choices_are_not_invented_or_dropped(self) -> None:
@@ -192,9 +195,11 @@ class TestBuildApprovalCard:
         rows = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
         assert len(rows) == 1
         assert len(rows[0]["columns"]) == len(buttons)
+        assert rows[0]["flex_mode"] == "stretch"
         assert [column["elements"][0]["value"] for column in rows[0]["columns"]] == [
             item["value"] for item in buttons
         ]
+        assert all(column["elements"][0]["width"] == "fill" for column in rows[0]["columns"])
 
     @pytest.mark.parametrize(
         ("status", "decision", "template", "needle"),

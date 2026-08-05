@@ -260,26 +260,30 @@ def _style_approval_button(button: dict[str, Any]) -> dict[str, Any]:
             "i18n_content": _i18n(label, zh_label),
         }
     result["type"] = "primary" if action == "approve_once" else "danger" if action == "deny" else "default"
+    # CardKit's supported fill width keeps actions visually equal in the
+    # stacked stretch layout; the callback payload remains untouched.
+    result["width"] = "fill"
     return result
 
 
 def _build_responsive_action_row(buttons: list[dict[str, Any]]) -> dict[str, Any]:
-    """Place every official approval action in one responsive CardKit row."""
+    """Place every official approval action in one responsive CardKit group."""
     columns = [
         {
             "tag": "column",
             "width": "weighted",
             "weight": 1,
             "vertical_align": "center",
+            "horizontal_align": "center",
             "elements": [_style_approval_button(button)],
         }
         for button in buttons
     ]
     return {
         "tag": "column_set",
-        "flex_mode": "flow",
+        "flex_mode": "stretch",
         "horizontal_spacing": "medium",
-        "horizontal_align": "left",
+        "horizontal_align": "center",
         "columns": columns,
     }
 
