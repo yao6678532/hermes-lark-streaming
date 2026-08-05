@@ -162,6 +162,44 @@ class ApprovalCardRegistry:
         with self._lock:
             return self._states.get(self._key(adapter_key, approval_id))
 
+    def reconcile_native(
+        self,
+        adapter_key: int,
+        session_key: str,
+        native_states: Any,
+    ) -> tuple[Any, ...]:
+        """Expire presentation entries absent from Hermes' native state.
+
+        ``transform_approval_card`` runs before Hermes records a successful
+        send in ``adapter._approval_state``.  A failed send can therefore
+        leave a presentation-only entry behind.  Native adapter state is the
+        authority for whether a card was actually sent; stale entries must
+        not participate in presentation FIFO ordering.
+        """
+        if not isinstance(native_states, dict):
+            native_states = {}
+        expired: list[Any] = []
+        with self._lock:
+            for state in self._states.values():
+                if (
+                    state.adapter_key != adapter_key
+                    or state.session_key != session_key
+                    or state.status != "pending"
+                ):
+                    continue
+                native = native_states.get(state.approval_id)
+                if not isinstance(native, dict):
+                    state.status = "expired"
+                    expired.append(state.approval_id)
+                    continue
+                if (
+                    str(native.get("session_key") or "") != state.session_key
+                    or str(native.get("chat_id") or "") != state.chat_id
+                ):
+                    state.status = "expired"
+                    expired.append(state.approval_id)
+        return tuple(expired)
+
     def claim(self, adapter_key: int, approval_id: Any) -> ApprovalCardState | None:
         """Claim only the oldest pending plugin card for the Hermes session."""
         with self._lock:

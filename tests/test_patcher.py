@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import hashlib
 import logging
 import shutil
 import textwrap
@@ -49,13 +50,13 @@ _CRON_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/cr
 
 CRON_SRC = Path.home() / ".hermes" / "hermes-agent" / "cron" / "scheduler.py"
 CRON_BAK = CRON_SRC.with_suffix(CRON_SRC.suffix + ".hermes_lark.bak")
-FEISHU_ADAPTER_SRC = Path.home() / ".hermes" / "hermes-agent" / "plugins" / "platforms" / "feishu" / "adapter.py"
-FEISHU_ADAPTER_BAK = FEISHU_ADAPTER_SRC.with_suffix(FEISHU_ADAPTER_SRC.suffix + ".hermes_lark.bak")
 SAMPLE_CRON = SAMPLES_DIR / "scheduler.py"
 V020_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "hermes-v0.20.0"
 V020_RUN = V020_FIXTURE_DIR / "gateway" / "run.py"
 V020_CRON = V020_FIXTURE_DIR / "cron" / "scheduler.py"
+V020_FEISHU_ADAPTER = V020_FIXTURE_DIR / "plugins" / "platforms" / "feishu" / "adapter.py"
 V020_RELEASE_COMMIT = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
+V020_FEISHU_ADAPTER_SHA256 = "55cbb66fa60abdd3710a3476c197b31d46dc3ff13ec401c23557ee6465f96029"
 
 def _ensure_sample() -> Path:
     src = RUN_BAK if RUN_BAK.exists() else RUN_SRC
@@ -122,10 +123,10 @@ def v020_scheduler_copy(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def v020_feishu_adapter_copy(tmp_path: Path) -> Path:
-    src = FEISHU_ADAPTER_BAK if FEISHU_ADAPTER_BAK.exists() else FEISHU_ADAPTER_SRC
-    assert src.exists(), f"missing Hermes v0.20.0 Feishu adapter: {src}"
+    assert V020_FEISHU_ADAPTER.exists(), f"missing pinned Hermes v0.20.0 Feishu adapter: {V020_FEISHU_ADAPTER}"
+    assert hashlib.sha256(V020_FEISHU_ADAPTER.read_bytes()).hexdigest() == V020_FEISHU_ADAPTER_SHA256
     dst = tmp_path / "adapter.py"
-    shutil.copy2(src, dst)
+    shutil.copy2(V020_FEISHU_ADAPTER, dst)
     return dst
 
 
@@ -432,6 +433,16 @@ class TestHermesV020Compatibility:
         )
         v020_feishu_adapter_copy.write_text(content, encoding="utf-8")
         with pytest.raises(PatcherError, match="approval callback anchor"):
+            _feishu_patcher(v020_feishu_adapter_copy).verify_target()
+
+    def test_feishu_missing_ui_anchor_fails(self, v020_feishu_adapter_copy: Path) -> None:
+        content = v020_feishu_adapter_copy.read_text(encoding="utf-8").replace(
+            "async def send_exec_approval(",
+            "async def send_exec_approval_moved(",
+            1,
+        )
+        v020_feishu_adapter_copy.write_text(content, encoding="utf-8")
+        with pytest.raises(PatcherError, match="approval card anchor"):
             _feishu_patcher(v020_feishu_adapter_copy).verify_target()
 
 

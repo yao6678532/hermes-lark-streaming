@@ -197,6 +197,69 @@ def test_expired_pending_is_not_approved() -> None:
     assert registry.get(id(adapter), 9).status == "expired"  # type: ignore[union-attr]
 
 
+def test_failed_send_ghost_does_not_block_later_real_approval() -> None:
+    registry = ApprovalCardRegistry()
+    adapter = SimpleNamespace()
+    adapter._approval_state = {}
+    adapter._is_interactive_operator_authorized = lambda open_id: open_id == "owner"
+
+    transform_approval_card(
+        registry=registry,
+        adapter=adapter,
+        card=_official_card(1),
+        chat_id="chat",
+        command="ghost-a",
+        session_key="session",
+        description="failed send",
+    )
+    adapter._approval_state[2] = {"session_key": "session", "message_id": "om-2", "chat_id": "chat"}
+    transform_approval_card(
+        registry=registry,
+        adapter=adapter,
+        card=_official_card(2),
+        chat_id="chat",
+        command="real-b",
+        session_key="session",
+        description="successful send",
+    )
+
+    with (
+        patch("tools.approval.has_blocking_approval", return_value=True),
+        patch("tools.approval.resolve_gateway_approval", return_value=1) as resolve,
+    ):
+        result = handle_approval_action(
+            registry=registry,
+            adapter=adapter,
+            approval_id=2,
+            action_value={"hermes_action": "approve_once", "approval_id": 2},
+            choice="once",
+            open_id="owner",
+            callback_chat_id="chat",
+        )
+
+    resolve.assert_called_once_with("session", "once")
+    assert result is not None and registry.get(id(adapter), 1).status == "expired"  # type: ignore[union-attr]
+    assert registry.get(id(adapter), 2).status == "approved"  # type: ignore[union-attr]
+
+
+def test_native_state_mismatch_is_expired_before_fifo_claim() -> None:
+    registry, adapter, _card = _registered()
+    adapter._approval_state[9] = {"session_key": "other-session", "message_id": "om-1", "chat_id": "chat"}
+    with patch("tools.approval.resolve_gateway_approval") as resolve:
+        result = handle_approval_action(
+            registry=registry,
+            adapter=adapter,
+            approval_id=9,
+            action_value={"hermes_action": "approve_once", "approval_id": 9},
+            choice="once",
+            open_id="owner",
+            callback_chat_id="chat",
+        )
+    resolve.assert_not_called()
+    assert result is not None and result.card is not None
+    assert registry.get(id(adapter), 9).status == "expired"  # type: ignore[union-attr]
+
+
 def test_terminal_card_failure_does_not_replay_or_block_resolver() -> None:
     registry, adapter, _card = _registered()
     with (

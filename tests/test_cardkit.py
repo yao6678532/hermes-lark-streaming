@@ -27,6 +27,7 @@ from hermes_lark_streaming.cardkit.markdown import (
     _strip_invalid_image_keys,
     optimize_markdown_style,
 )
+from hermes_lark_streaming.interactions.approval import _official_buttons
 from hermes_lark_streaming.streaming.segments import Segment
 
 # --- Markdown 优化 ---
@@ -158,16 +159,23 @@ class TestBuildApprovalCard:
             buttons=buttons,
         )
 
-        rendered = [item for item in card["body"]["elements"] if item["tag"] == "button"]
+        rows = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
         assert card["schema"] == "2.0"
         assert card["header"]["template"] == "orange"
-        assert [item["value"] for item in rendered] == [item["value"] for item in buttons]
-        assert [item["value"]["hermes_action"] for item in rendered] == [
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["flex_mode"] == "flow"
+        assert len(row["columns"]) == 4
+        assert all(column["width"] == "weighted" and column["weight"] == 1 for column in row["columns"])
+        assert [item["value"] for item in _official_buttons(card)] == [item["value"] for item in buttons]
+        assert [item["value"]["hermes_action"] for item in _official_buttons(card)] == [
             "approve_once",
             "approve_session",
             "approve_always",
             "deny",
         ]
+        assert all(item["tag"] == "button" for column in row["columns"] for item in column["elements"])
+        assert row["columns"][-1]["elements"][0]["value"]["hermes_action"] == "deny"
 
     def test_conditional_and_unknown_choices_are_not_invented_or_dropped(self) -> None:
         buttons = [self._buttons()[0], self._buttons()[-1]]
@@ -180,8 +188,13 @@ class TestBuildApprovalCard:
             },
         )
         card = build_approval_card(command="cmd", description="why", buttons=buttons)
-        rendered = [item for item in card["body"]["elements"] if item["tag"] == "button"]
-        assert [item["value"] for item in rendered] == [item["value"] for item in buttons]
+        assert [item["value"] for item in _official_buttons(card)] == [item["value"] for item in buttons]
+        rows = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
+        assert len(rows) == 1
+        assert len(rows[0]["columns"]) == len(buttons)
+        assert [column["elements"][0]["value"] for column in rows[0]["columns"]] == [
+            item["value"] for item in buttons
+        ]
 
     @pytest.mark.parametrize(
         ("status", "decision", "template", "needle"),

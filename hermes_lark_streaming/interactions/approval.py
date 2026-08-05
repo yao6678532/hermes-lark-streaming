@@ -127,6 +127,19 @@ def handle_approval_action(
     if state is None:
         return None
 
+    # The transform hook runs before Hermes records a successful send.  Reconcile
+    # presentation-only entries against the native adapter state before any
+    # callback validation or FIFO claim so a failed send cannot become a ghost
+    # head that blocks a later real approval.
+    registry.reconcile_native(
+        adapter_key,
+        state.session_key,
+        getattr(adapter, "_approval_state", {}),
+    )
+    state = registry.get(adapter_key, approval_id)
+    if state is None:
+        return None
+
     action = str(action_value.get("hermes_action") or "")
     if action not in state.actions:
         _logger.warning("rejecting non-canonical Feishu approval action id=%s", approval_id)

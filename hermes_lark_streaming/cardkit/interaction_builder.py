@@ -263,6 +263,27 @@ def _style_approval_button(button: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _build_responsive_action_row(buttons: list[dict[str, Any]]) -> dict[str, Any]:
+    """Place every official approval action in one responsive CardKit row."""
+    columns = [
+        {
+            "tag": "column",
+            "width": "weighted",
+            "weight": 1,
+            "vertical_align": "center",
+            "elements": [_style_approval_button(button)],
+        }
+        for button in buttons
+    ]
+    return {
+        "tag": "column_set",
+        "flex_mode": "flow",
+        "horizontal_spacing": "medium",
+        "horizontal_align": "left",
+        "columns": columns,
+    }
+
+
 def build_approval_card(
     *,
     command: str,
@@ -301,8 +322,8 @@ def build_approval_card(
             }
         )
 
-    if status == "pending":
-        elements.extend(_style_approval_button(button) for button in buttons)
+    if status == "pending" and buttons:
+        elements.append(_build_responsive_action_row(buttons))
     elif status in {"approved", "denied"}:
         label, zh_label = _APPROVAL_DECISION_LABELS.get(
             decision,
