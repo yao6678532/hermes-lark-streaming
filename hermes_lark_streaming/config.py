@@ -116,6 +116,21 @@ class Config:
         return value if value in {"text", "card"} else "text"
 
     @property
+    def confirmation_style(self) -> str:
+        """Feishu approval presentation; invalid values preserve Hermes UI."""
+        display = self._reload().get("display")
+        if not isinstance(display, dict):
+            return "hermes"
+        platforms = display.get("platforms")
+        if not isinstance(platforms, dict):
+            return "hermes"
+        feishu = platforms.get("feishu")
+        if not isinstance(feishu, dict):
+            return "hermes"
+        value = str(feishu.get("confirmation_style", "hermes") or "hermes").strip().lower()
+        return value if value in {"hermes", "openclaw"} else "hermes"
+
+    @property
     def feishu_app_id(self) -> str:
         return str(self._platform_cfg().get("app_id", ""))
 

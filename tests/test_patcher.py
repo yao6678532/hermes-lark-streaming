@@ -24,9 +24,11 @@ from hermes_lark_streaming.patcher import (
     MK_CRON_DELIVER,
     MK_CRON_DELIVER_END,
     CronPatcher,
+    FeishuAdapterPatcher,
     Patcher,
     PatcherError,
     _answer_hook,
+    _approval_ui_hook,
     _complete_hook,
     _cron_deliver_hook,
     _followup_complete_hook,
@@ -47,6 +49,8 @@ _CRON_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/cr
 
 CRON_SRC = Path.home() / ".hermes" / "hermes-agent" / "cron" / "scheduler.py"
 CRON_BAK = CRON_SRC.with_suffix(CRON_SRC.suffix + ".hermes_lark.bak")
+FEISHU_ADAPTER_SRC = Path.home() / ".hermes" / "hermes-agent" / "plugins" / "platforms" / "feishu" / "adapter.py"
+FEISHU_ADAPTER_BAK = FEISHU_ADAPTER_SRC.with_suffix(FEISHU_ADAPTER_SRC.suffix + ".hermes_lark.bak")
 SAMPLE_CRON = SAMPLES_DIR / "scheduler.py"
 V020_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "hermes-v0.20.0"
 V020_RUN = V020_FIXTURE_DIR / "gateway" / "run.py"
@@ -116,12 +120,25 @@ def v020_scheduler_copy(tmp_path: Path) -> Path:
     return dst
 
 
+@pytest.fixture()
+def v020_feishu_adapter_copy(tmp_path: Path) -> Path:
+    src = FEISHU_ADAPTER_BAK if FEISHU_ADAPTER_BAK.exists() else FEISHU_ADAPTER_SRC
+    assert src.exists(), f"missing Hermes v0.20.0 Feishu adapter: {src}"
+    dst = tmp_path / "adapter.py"
+    shutil.copy2(src, dst)
+    return dst
+
+
 def _patcher(path: Path) -> Patcher:
     return Patcher(run_path=path)
 
 
 def _cron_patcher(path: Path) -> CronPatcher:
     return CronPatcher(cron_path=path)
+
+
+def _feishu_patcher(path: Path) -> FeishuAdapterPatcher:
+    return FeishuAdapterPatcher(adapter_path=path)
 
 
 def _build_cron_hook_runner():
@@ -385,6 +402,53 @@ class TestHermesV020Compatibility:
         assert v020_scheduler_copy.read_bytes() == after_first
         patcher.remove()
         assert v020_scheduler_copy.read_bytes() == pristine
+
+    def test_feishu_approval_adapter_round_trips(self, v020_feishu_adapter_copy: Path) -> None:
+        pristine = v020_feishu_adapter_copy.read_bytes()
+        patcher = _feishu_patcher(v020_feishu_adapter_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        assert patcher.is_fully_patched()
+        content = v020_feishu_adapter_copy.read_text(encoding="utf-8")
+        ast.parse(content)
+        assert "# HERMES_LARK_APPROVAL_UI_BEGIN" in content
+        assert "on_feishu_approval_card(" in content
+        assert "# HERMES_LARK_APPROVAL_ACTION_BEGIN" in content
+        assert "on_feishu_approval_action(" in content
+        after_first = v020_feishu_adapter_copy.read_bytes()
+
+        patcher.apply()
+        assert v020_feishu_adapter_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v020_feishu_adapter_copy.read_bytes() == pristine
+
+    def test_feishu_missing_callback_anchor_fails(self, v020_feishu_adapter_copy: Path) -> None:
+        content = v020_feishu_adapter_copy.read_text(encoding="utf-8").replace(
+            "def _handle_approval_card_action(",
+            "def _handle_approval_card_action_moved(",
+            1,
+        )
+        v020_feishu_adapter_copy.write_text(content, encoding="utf-8")
+        with pytest.raises(PatcherError, match="approval callback anchor"):
+            _feishu_patcher(v020_feishu_adapter_copy).verify_target()
+
+
+def test_approval_transform_hook_fails_open_to_hermes_card() -> None:
+    namespace: dict = {}
+    source = (
+        "def transform(card, self, chat_id, command, session_key, description):\n"
+        f"{_approval_ui_hook('    ')}"
+        "    return card\n"
+    )
+    exec(compile(source, "<approval-ui-hook-test>", "exec"), namespace)
+    original = {"official": True}
+    with patch(
+        "hermes_lark_streaming.patch.on_feishu_approval_card",
+        side_effect=RuntimeError("transform failed"),
+    ):
+        assert namespace["transform"](original, object(), "chat", "cmd", "session", "why") is original
 
 
 class TestGeneratedAnswerHook:

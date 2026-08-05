@@ -88,6 +88,34 @@ class TestClarifyStyle:
     def test_invalid_or_missing_defaults_to_text(self, raw: dict[str, Any]) -> None:
         assert self._make_clarify_config(raw).clarify_style == "text"
 
+
+class TestConfirmationStyle:
+    @staticmethod
+    def _make(raw: dict[str, Any]) -> Config:
+        cfg = Config()
+        cfg._reload = lambda: raw  # type: ignore[assignment]
+        return cfg
+
+    @pytest.mark.parametrize("value", ["hermes", "openclaw", " OPENCLAW "])
+    def test_reads_supported_values(self, value: str) -> None:
+        cfg = self._make(
+            {"display": {"platforms": {"feishu": {"confirmation_style": value}}}}
+        )
+        assert cfg.confirmation_style == value.strip().lower()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {},
+            {"display": {}},
+            {"display": {"platforms": {"feishu": {}}}},
+            {"display": {"platforms": {"feishu": {"confirmation_style": "boolean"}}}},
+            {"display": "invalid"},
+        ],
+    )
+    def test_invalid_or_missing_defaults_to_hermes(self, raw: dict[str, Any]) -> None:
+        assert self._make(raw).confirmation_style == "hermes"
+
 class TestFooterFields:
     def test_normal_2d_fields(self) -> None:
         cfg = _make_config({"streaming": {"footer": {"fields": [["a", "b"], ["c"]]}}})

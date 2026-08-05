@@ -19,7 +19,7 @@ from hermes_lark_streaming.cardkit.builder import (
     build_complete_card,
     build_streaming_card_v2,
 )
-from hermes_lark_streaming.cardkit.interaction_builder import build_clarify_card
+from hermes_lark_streaming.cardkit.interaction_builder import build_approval_card, build_clarify_card
 from hermes_lark_streaming.cardkit.markdown import (
     _downgrade_tables,
     _find_tables_outside_code_blocks,
@@ -131,6 +131,81 @@ class TestBuildClarifyCard:
         assert card["header"]["template"] == "green"
         assert all(element["tag"] != "action" for element in card["body"]["elements"])
         assert "B" in card["body"]["elements"][-1]["content"]
+
+
+class TestBuildApprovalCard:
+    @staticmethod
+    def _buttons() -> list[dict]:
+        return [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "value": {"hermes_action": action, "approval_id": 7, "future": action},
+            }
+            for action, label in (
+                ("approve_once", "Allow Once"),
+                ("approve_session", "Session"),
+                ("approve_always", "Always"),
+                ("deny", "Deny"),
+            )
+        ]
+
+    def test_pending_preserves_every_official_payload(self) -> None:
+        buttons = self._buttons()
+        card = build_approval_card(
+            command="git clean -fd",
+            description="delete untracked files",
+            buttons=buttons,
+        )
+
+        rendered = [item for item in card["body"]["elements"] if item["tag"] == "button"]
+        assert card["schema"] == "2.0"
+        assert card["header"]["template"] == "orange"
+        assert [item["value"] for item in rendered] == [item["value"] for item in buttons]
+        assert [item["value"]["hermes_action"] for item in rendered] == [
+            "approve_once",
+            "approve_session",
+            "approve_always",
+            "deny",
+        ]
+
+    def test_conditional_and_unknown_choices_are_not_invented_or_dropped(self) -> None:
+        buttons = [self._buttons()[0], self._buttons()[-1]]
+        buttons.insert(
+            1,
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "Future scope"},
+                "value": {"hermes_action": "approve_future_scope", "approval_id": 7},
+            },
+        )
+        card = build_approval_card(command="cmd", description="why", buttons=buttons)
+        rendered = [item for item in card["body"]["elements"] if item["tag"] == "button"]
+        assert [item["value"] for item in rendered] == [item["value"] for item in buttons]
+
+    @pytest.mark.parametrize(
+        ("status", "decision", "template", "needle"),
+        [
+            ("approved", "once", "green", "Allowed once"),
+            ("approved", "session", "green", "Allowed for this session"),
+            ("approved", "always", "green", "Always allowed"),
+            ("denied", "deny", "red", "Denied"),
+            ("expired", "", "grey", "no longer pending"),
+        ],
+    )
+    def test_terminal_cards_have_no_actions(
+        self, status: str, decision: str, template: str, needle: str
+    ) -> None:
+        card = build_approval_card(
+            command="cmd",
+            description="why",
+            buttons=self._buttons(),
+            status=status,  # type: ignore[arg-type]
+            decision=decision,
+        )
+        assert card["header"]["template"] == template
+        assert all(item["tag"] != "button" for item in card["body"]["elements"])
+        assert needle in card["body"]["elements"][-1]["content"]
 
 
 class TestStripInvalidImageKeys:

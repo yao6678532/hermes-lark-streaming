@@ -14,6 +14,7 @@ from inspect import iscoroutinefunction
 from typing import Any
 
 from .controller import get_controller
+from .interactions.approval import ApprovalActionResult, handle_approval_action, transform_approval_card
 from .interactions.clarify import (
     ClarifyAdapterProxy,
     _callback_event,
@@ -121,7 +122,7 @@ def on_feishu_normalize(
 
 
 def on_clarify_adapter(*, adapter: Any, source: Any, gateway: Any = None) -> Any:
-    """Wrap Feishu clarify delivery while leaving every other adapter API intact."""
+    """Attach the profile-scoped interaction controller to a Feishu adapter."""
     try:
         profile_home = None
         if gateway is not None:
@@ -131,7 +132,13 @@ def on_clarify_adapter(*, adapter: Any, source: Any, gateway: Any = None) -> Any
                 _logger.debug("failed to resolve Feishu clarify profile home", exc_info=True)
         ctrl = get_controller(profile_home)
         platform = getattr(getattr(source, "platform", None), "value", "")
-        if not ctrl.clarify_card_enabled or platform not in {"feishu", "lark"}:
+        if (
+            platform not in {"feishu", "lark"}
+            or not (
+                bool(getattr(ctrl, "clarify_card_enabled", False))
+                or bool(getattr(ctrl, "approval_card_enabled", False))
+            )
+        ):
             return adapter
         if adapter is None or isinstance(adapter, ClarifyAdapterProxy):
             return adapter
@@ -143,12 +150,64 @@ def on_clarify_adapter(*, adapter: Any, source: Any, gateway: Any = None) -> Any
             )
             if value and str(value).strip()
         )
-        if not owner_ids:
+        if (
+            bool(getattr(ctrl, "clarify_card_enabled", False))
+            and not owner_ids
+            and not bool(getattr(ctrl, "approval_card_enabled", False))
+        ):
             return adapter
         return ClarifyAdapterProxy(adapter, ctrl, owner_ids)
     except Exception:
         _logger.exception("on_clarify_adapter error")
         return adapter
+
+
+def on_feishu_approval_card(
+    *,
+    adapter: Any,
+    card: dict[str, Any],
+    chat_id: str,
+    command: str,
+    session_key: str,
+    description: str,
+) -> dict[str, Any]:
+    """Transform Hermes' already-built approval card, or return it unchanged."""
+    ctrl = getattr(adapter, "_hermes_lark_interaction_controller", None)
+    if ctrl is None or not ctrl.approval_card_enabled:
+        return card
+    return transform_approval_card(
+        registry=ctrl.approval_registry,
+        adapter=adapter,
+        card=card,
+        chat_id=chat_id,
+        command=command,
+        session_key=session_key,
+        description=description,
+    )
+
+
+def on_feishu_approval_action(
+    *,
+    adapter: Any,
+    approval_id: Any,
+    action_value: dict[str, Any],
+    choice: str,
+    open_id: str,
+    callback_chat_id: str,
+) -> ApprovalActionResult | None:
+    """Consume plugin-owned ``hermes_action`` callbacks via Hermes' resolver."""
+    ctrl = getattr(adapter, "_hermes_lark_interaction_controller", None)
+    if ctrl is None or not ctrl.approval_card_enabled:
+        return None
+    return handle_approval_action(
+        registry=ctrl.approval_registry,
+        adapter=adapter,
+        approval_id=approval_id,
+        action_value=action_value,
+        choice=choice,
+        open_id=open_id,
+        callback_chat_id=callback_chat_id,
+    )
 
 
 async def on_feishu_interaction_action(
