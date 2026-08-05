@@ -256,6 +256,11 @@ class StreamCardController(StreamingController):
             session_key=session_key,
         )
 
+    def clarify_id_for_card_message(self, *, chat_id: str, card_msg_id: str) -> str:
+        """Resolve a form callback's clarify id when Feishu omits button value."""
+        state = self._clarify_registry.find_by_card_message(chat_id, card_msg_id)
+        return state.clarify_id if state is not None else ""
+
     def _get_loop(self) -> asyncio.AbstractEventLoop | None:
         """获取事件循环，缓存以便跨线程复用."""
         try:

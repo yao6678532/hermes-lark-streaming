@@ -16,6 +16,8 @@ from typing import Any
 from .controller import get_controller
 from .interactions.clarify import (
     ClarifyAdapterProxy,
+    _callback_event,
+    _field,
     parse_card_action,
     raw_message_with_action_value,
 )
@@ -157,7 +159,33 @@ async def on_feishu_interaction_action(
     if platform not in {"feishu", "lark"}:
         return False
     raw_message = getattr(event, "raw_message", None)
+    callback_event = _callback_event(raw_message)
+    callback_action = _field(callback_event, "action")
+    callback_context = _field(callback_event, "context")
+    callback_chat_id = str(_field(callback_context, "open_chat_id", "") or "").strip()
+    callback_message_id = str(_field(callback_context, "open_message_id", "") or "").strip()
+    callback_action_name = str(_field(callback_action, "name", "") or "").strip()
     action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
+    if action_value is None and callback_action_name in {
+        "clarify_other_submit",
+        "clarify_other_back",
+    } and callback_chat_id and callback_message_id:
+        try:
+            profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+            ctrl = get_controller(profile_home)
+            clarify_id = ctrl.clarify_id_for_card_message(
+                chat_id=callback_chat_id,
+                card_msg_id=callback_message_id,
+            )
+        except Exception:
+            clarify_id = ""
+        if clarify_id:
+            decoded = {
+                "hermes_lark_action": callback_action_name,
+                "clarify_id": clarify_id,
+            }
+            action_value = decoded
+            raw_message = raw_message_with_action_value(raw_message, decoded)
     if action_value is None:
         # Hermes' Feishu adapter serializes unrecognized callbacks into a
         # synthetic ``/card button <json>`` command.  Recover only our
@@ -168,12 +196,12 @@ async def on_feishu_interaction_action(
             payload = synthetic_text.split(" ", 2)
             if len(payload) == 3:
                 try:
-                    decoded = json.loads(payload[2])
+                    synthetic_decoded = json.loads(payload[2])
                 except (TypeError, ValueError):
-                    decoded = None
-                if isinstance(decoded, dict) and "hermes_lark_action" in decoded:
-                    action_value = decoded
-                    raw_message = raw_message_with_action_value(raw_message, decoded)
+                    synthetic_decoded = None
+                if isinstance(synthetic_decoded, dict) and "hermes_lark_action" in synthetic_decoded:
+                    action_value = synthetic_decoded
+                    raw_message = raw_message_with_action_value(raw_message, synthetic_decoded)
     if action_value is None:
         return False
     try:

@@ -62,6 +62,14 @@ class ClarifyCardRegistry:
         with self._lock:
             return self._states.get(clarify_id)
 
+    def find_by_card_message(self, chat_id: str, card_msg_id: str) -> ClarifyCardState | None:
+        """Find a presentation state from Feishu callback message context."""
+        with self._lock:
+            for state in self._states.values():
+                if state.chat_id == chat_id and state.card_msg_id == card_msg_id:
+                    return state
+        return None
+
     def remove(self, clarify_id: str) -> None:
         with self._lock:
             self._states.pop(clarify_id, None)

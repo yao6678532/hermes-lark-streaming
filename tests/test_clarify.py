@@ -459,6 +459,14 @@ def test_parse_card_action_accepts_runtime_wrappers_and_json_value() -> None:
     assert operators == frozenset({"owner-open", "owner-user"})
 
 
+def test_registry_finds_state_by_card_message() -> None:
+    registry = ClarifyCardRegistry()
+    state = _state()
+    registry.register(state)
+    assert registry.find_by_card_message("chat-1", "msg-1") is state
+    assert registry.find_by_card_message("other-chat", "msg-1") is None
+
+
 @pytest.mark.asyncio
 async def test_gateway_hook_leaves_approval_action_on_hermes_path() -> None:
     approval_raw = SimpleNamespace(
@@ -578,6 +586,50 @@ async def test_gateway_hook_recovers_plugin_action_from_synthetic_card_command()
             ),
         )
     assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "A"
+
+
+@pytest.mark.asyncio
+async def test_gateway_hook_recovers_form_action_name_when_feishu_omits_value() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    state = _state()
+    registry.register(state)
+
+    async def _handle(**kwargs: object) -> bool:
+        return await handle_clarify_action(client=AsyncMock(), registry=registry, **kwargs)
+
+    ctrl = SimpleNamespace(
+        enabled=True,
+        clarify_id_for_card_message=lambda *, chat_id, card_msg_id: (
+            state.clarify_id if (chat_id, card_msg_id) == ("chat-1", "msg-1") else ""
+        ),
+        on_clarify_action=AsyncMock(side_effect=_handle),
+    )
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat-1")
+    raw = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value=None,
+                name="clarify_other_back",
+                form_value={"clarify_other_input": "ignored"},
+                input_value=None,
+            ),
+            context=SimpleNamespace(open_chat_id="chat-1", open_message_id="msg-1"),
+            operator=SimpleNamespace(open_id="owner-open", user_id="owner-user", union_id=""),
+        )
+    )
+    event = SimpleNamespace(raw_message=raw, text="/card button")
+    with patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl):
+        assert await on_feishu_interaction_action(
+            message_id="callback-token",
+            source=source,
+            event=event,
+            session_key="feishu:chat-1:owner",
+            gateway=SimpleNamespace(
+                _resolve_profile_home_for_source=lambda _source: "/profiles/owner",
+            ),
+        )
+    assert registry.get("clarify-1").status == "pending"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
