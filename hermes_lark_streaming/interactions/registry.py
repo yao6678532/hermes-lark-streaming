@@ -7,7 +7,14 @@ import time
 from dataclasses import dataclass
 from typing import Literal
 
-ClarifyStatus = Literal["pending", "resolving", "answered", "awaiting_text", "expired"]
+ClarifyStatus = Literal[
+    "pending",
+    "input",
+    "resolving",
+    "answered",
+    "awaiting_text",
+    "expired",
+]
 _MAX_PRESENTATION_STATES = 1000
 
 
@@ -59,14 +66,29 @@ class ClarifyCardRegistry:
         with self._lock:
             self._states.pop(clarify_id, None)
 
-    def claim(self, clarify_id: str) -> ClarifyCardState | None:
+    def claim(
+        self,
+        clarify_id: str,
+        *,
+        expected_status: ClarifyStatus = "pending",
+    ) -> ClarifyCardState | None:
         """Atomically reserve a pending card so only one click may resolve it."""
         with self._lock:
             state = self._states.get(clarify_id)
-            if state is None or state.status != "pending":
+            if state is None or state.status != expected_status:
                 return None
             state.status = "resolving"
             return state
+
+    def set_status(self, clarify_id: str, status: ClarifyStatus, *, answer: str = "") -> bool:
+        """Update presentation state without changing Hermes' pending entry."""
+        with self._lock:
+            state = self._states.get(clarify_id)
+            if state is None:
+                return False
+            state.status = status
+            state.answer = answer
+            return True
 
     def release(self, clarify_id: str) -> None:
         """Return a validation-rejected claim to pending."""

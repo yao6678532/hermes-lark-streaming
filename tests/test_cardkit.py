@@ -101,6 +101,23 @@ class TestBuildClarifyCard:
             "hermes_lark_action": "clarify_other",
             "clarify_id": "clarify-1",
         }
+        assert all(action.get("type") != "primary" for action in actions)
+
+    def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
+        card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=["A", "B"],
+            status="input",
+        )
+        form = card["body"]["elements"][1]
+        assert form["tag"] == "form"
+        input_element, submit, back = form["elements"]
+        assert input_element["tag"] == "input"
+        assert input_element["name"] == "clarify_other_input"
+        assert submit["value"]["hermes_lark_action"] == "clarify_other_submit"
+        assert submit["form_action_type"] == "submit"
+        assert back["value"]["hermes_lark_action"] == "clarify_other_back"
 
     def test_answered_card_removes_actions(self) -> None:
         card = build_clarify_card(

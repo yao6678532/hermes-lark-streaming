@@ -32,13 +32,15 @@ def _raw_action(
     chat_id: str = "chat-1",
     open_id: str = "owner-open",
     user_id: str = "owner-user",
+    form_value: dict[str, object] | None = None,
+    input_value: str | None = None,
 ) -> SimpleNamespace:
     value = {"hermes_lark_action": action, "clarify_id": clarify_id}
     if response is not None:
         value["response"] = response
     return SimpleNamespace(
         event=SimpleNamespace(
-            action=SimpleNamespace(value=value),
+            action=SimpleNamespace(value=value, form_value=form_value, input_value=input_value),
             context=SimpleNamespace(open_chat_id=chat_id),
             operator=SimpleNamespace(open_id=open_id, user_id=user_id, union_id=""),
         )
@@ -99,7 +101,7 @@ async def test_single_select_resolves_real_hermes_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_other_uses_official_awaiting_text_and_next_text_flow() -> None:
+async def test_other_switches_same_card_to_input_without_mutating_hermes_wait() -> None:
     _register_official()
     registry = ClarifyCardRegistry()
     registry.register(_state())
@@ -112,13 +114,228 @@ async def test_other_uses_official_awaiting_text_and_next_text_flow() -> None:
         source_chat_id="chat-1",
         session_key="feishu:chat-1:owner",
     )
+    pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner", include_choice_prompts=True)
+    assert pending is not None and pending.awaiting_text is False and not pending.event.is_set()
+    assert registry.get("clarify-1").status == "input"  # type: ignore[union-attr]
+    updated = client.cardkit_update.await_args.args[1]
+    assert updated["body"]["elements"][1]["tag"] == "form"
+
+
+@pytest.mark.asyncio
+async def test_other_submit_resolves_hermes_wait_from_real_form_value() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action(
+            "clarify_other_submit",
+            form_value={"clarify_other_input": "custom answer"},
+        ),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "custom answer"
+    assert registry.get("clarify-1").status == "answered"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_empty_form_submit_does_not_resolve() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other_submit", form_value={"clarify_other_input": "  "}),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner", include_choice_prompts=True)
+    assert pending is not None and not pending.event.is_set()
+    assert registry.get("clarify-1").status == "input"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_other_submit_wrong_identity_and_double_submit_are_safe() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    wrong = _raw_action(
+        "clarify_other_submit", form_value={"clarify_other_input": "secret"}, open_id="wrong", user_id="wrong"
+    )
+    assert await handle_clarify_action(
+        client=client, registry=registry, raw_message=wrong, source_chat_id="chat-1", session_key="feishu:chat-1:owner"
+    )
+    assert await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other_submit", form_value={"clarify_other_input": "secret"}),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other_submit", form_value={"clarify_other_input": "second"}),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "secret"
+
+
+@pytest.mark.asyncio
+async def test_other_submit_wrong_chat_does_not_resolve() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    wrong = _raw_action(
+        "clarify_other_submit",
+        form_value={"clarify_other_input": "secret"},
+        chat_id="wrong-chat",
+    )
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=wrong,
+        source_chat_id="wrong-chat",
+        session_key="feishu:chat-1:owner",
+    )
+    pending = clarify_gateway.get_pending_for_session(
+        "feishu:chat-1:owner",
+        include_choice_prompts=True,
+    )
+    assert pending is not None and not pending.event.is_set()
+    assert registry.get("clarify-1").status == "input"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_expired_other_submit_is_safe() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) is None
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action(
+            "clarify_other_submit",
+            form_value={"clarify_other_input": "too late"},
+        ),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert registry.get("clarify-1").status == "expired"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_back_restores_buttons_without_touching_pending_wait() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other_back", form_value={"clarify_other_input": "ignored"}),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner", include_choice_prompts=True)
+    assert pending is not None and not pending.event.is_set()
+    assert registry.get("clarify-1").status == "pending"  # type: ignore[union-attr]
+    assert client.cardkit_update.await_args_list[-1].args[1]["body"]["elements"][1]["tag"] == "button"
+
+
+@pytest.mark.asyncio
+async def test_form_callback_malformed_falls_back_to_awaiting_text() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other_submit"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
     pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner")
     assert pending is not None and pending.awaiting_text is True
-    assert clarify_gateway.resolve_text_response_for_session(
-        "feishu:chat-1:owner",
-        "my custom answer",
+    assert registry.get("clarify-1").status == "awaiting_text"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_input_card_update_failure_preserves_text_fallback() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    client.cardkit_update.side_effect = [RuntimeError("unsupported form"), RuntimeError("still unavailable")]
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_other"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
     )
-    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "my custom answer"
+    pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner")
+    assert pending is not None and pending.awaiting_text is True
     assert registry.get("clarify-1").status == "awaiting_text"  # type: ignore[union-attr]
 
 
