@@ -75,6 +75,31 @@ def _button(
     return button
 
 
+def _build_responsive_button_group(buttons: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build one CardKit action group with equal desktop/mobile button areas."""
+    columns = []
+    for button in buttons:
+        rendered = deepcopy(button)
+        rendered["width"] = "fill"
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "vertical_align": "center",
+                "horizontal_align": "center",
+                "elements": [rendered],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "flex_mode": "stretch",
+        "horizontal_spacing": "medium",
+        "horizontal_align": "center",
+        "columns": columns,
+    }
+
+
 def build_clarify_card(
     *,
     clarify_id: str,
@@ -114,8 +139,37 @@ def build_clarify_card(
                 zh_label="其他回答…",
             )
         )
-        elements.extend(actions)
+        elements.append(_build_responsive_button_group(actions))
     elif status == "input":
+        submit = {
+            "tag": "button",
+            "name": "clarify_other_submit",
+            "value": {
+                "hermes_lark_action": "clarify_other_submit",
+                "clarify_id": clarify_id,
+            },
+            "text": {
+                "tag": "plain_text",
+                "content": "Submit",
+                "i18n_content": _i18n("Submit", "提交"),
+            },
+            "type": "primary",
+            "form_action_type": "submit",
+        }
+        back = {
+            "tag": "button",
+            "name": "clarify_other_back",
+            "value": {
+                "hermes_lark_action": "clarify_other_back",
+                "clarify_id": clarify_id,
+            },
+            "text": {
+                "tag": "plain_text",
+                "content": "Back to choices",
+                "i18n_content": _i18n("Back to choices", "返回选项"),
+            },
+            "form_action_type": "submit",
+        }
         elements.append(
             {
                 "tag": "form",
@@ -130,35 +184,7 @@ def build_clarify_card(
                             "i18n_content": _i18n("Type your answer...", "请输入其他回答…"),
                         },
                     },
-                    {
-                        "tag": "button",
-                        "name": "clarify_other_submit",
-                        "value": {
-                            "hermes_lark_action": "clarify_other_submit",
-                            "clarify_id": clarify_id,
-                        },
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "Submit",
-                            "i18n_content": _i18n("Submit", "提交"),
-                        },
-                        "type": "primary",
-                        "form_action_type": "submit",
-                    },
-                    {
-                        "tag": "button",
-                        "name": "clarify_other_back",
-                        "value": {
-                            "hermes_lark_action": "clarify_other_back",
-                            "clarify_id": clarify_id,
-                        },
-                        "text": {
-                            "tag": "plain_text",
-                            "content": "Back to choices",
-                            "i18n_content": _i18n("Back to choices", "返回选项"),
-                        },
-                        "form_action_type": "submit",
-                    },
+                    _build_responsive_button_group([submit, back]),
                 ],
             }
         )
@@ -268,24 +294,7 @@ def _style_approval_button(button: dict[str, Any]) -> dict[str, Any]:
 
 def _build_responsive_action_row(buttons: list[dict[str, Any]]) -> dict[str, Any]:
     """Place every official approval action in one responsive CardKit group."""
-    columns = [
-        {
-            "tag": "column",
-            "width": "weighted",
-            "weight": 1,
-            "vertical_align": "center",
-            "horizontal_align": "center",
-            "elements": [_style_approval_button(button)],
-        }
-        for button in buttons
-    ]
-    return {
-        "tag": "column_set",
-        "flex_mode": "stretch",
-        "horizontal_spacing": "medium",
-        "horizontal_align": "center",
-        "columns": columns,
-    }
+    return _build_responsive_button_group([_style_approval_button(button) for button in buttons])
 
 
 def build_approval_card(

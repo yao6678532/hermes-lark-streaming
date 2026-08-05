@@ -89,9 +89,13 @@ class TestBuildClarifyCard:
         assert card["schema"] == "2.0"
         assert card["header"]["template"] == "blue"
         assert card["header"]["text_tag_list"][0]["color"] == "blue"
-        actions = card["body"]["elements"][1:]
-        assert len(actions) == 4
-        assert all(action["tag"] == "button" for action in actions)
+        groups = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
+        assert len(groups) == 1
+        group = groups[0]
+        assert group["flex_mode"] == "stretch"
+        assert len(group["columns"]) == 4
+        actions = [column["elements"][0] for column in group["columns"]]
+        assert all(action["tag"] == "button" and action["width"] == "fill" for action in actions)
         assert actions[0]["value"] == {
             "hermes_lark_action": "clarify_select",
             "clarify_id": "clarify-1",
@@ -104,6 +108,20 @@ class TestBuildClarifyCard:
         }
         assert all(action.get("type") != "primary" for action in actions)
 
+    @pytest.mark.parametrize("choice_count", [1, 2, 3, 4])
+    def test_pending_dynamic_choice_count_keeps_other_last(self, choice_count: int) -> None:
+        choices = [f"choice-{index}" for index in range(choice_count)]
+        card = build_clarify_card(clarify_id="clarify-1", question="Which path?", choices=choices)
+        group = next(item for item in card["body"]["elements"] if item["tag"] == "column_set")
+        actions = [column["elements"][0] for column in group["columns"]]
+        assert len(actions) == choice_count + 1
+        assert [action["value"]["response"] for action in actions[:-1]] == choices
+        assert actions[-1]["value"] == {
+            "hermes_lark_action": "clarify_other",
+            "clarify_id": "clarify-1",
+        }
+        assert all(action["width"] == "fill" for action in actions)
+
     def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
         card = build_clarify_card(
             clarify_id="clarify-1",
@@ -113,25 +131,35 @@ class TestBuildClarifyCard:
         )
         form = card["body"]["elements"][1]
         assert form["tag"] == "form"
-        input_element, submit, back = form["elements"]
+        input_element, group = form["elements"]
         assert input_element["tag"] == "input"
         assert input_element["name"] == "clarify_other_input"
+        assert group["tag"] == "column_set"
+        assert group["flex_mode"] == "stretch"
+        assert len(group["columns"]) == 2
+        submit, back = [column["elements"][0] for column in group["columns"]]
+        assert submit["name"] == "clarify_other_submit"
         assert submit["value"]["hermes_lark_action"] == "clarify_other_submit"
+        assert submit["value"]["clarify_id"] == "clarify-1"
         assert submit["form_action_type"] == "submit"
+        assert submit["width"] == "fill"
+        assert back["name"] == "clarify_other_back"
         assert back["value"]["hermes_lark_action"] == "clarify_other_back"
+        assert back["value"]["clarify_id"] == "clarify-1"
+        assert back["form_action_type"] == "submit"
+        assert back["width"] == "fill"
 
-    def test_answered_card_removes_actions(self) -> None:
+    @pytest.mark.parametrize("status", ["answered", "awaiting_text", "expired"])
+    def test_non_pending_cards_remove_actions(self, status: str) -> None:
         card = build_clarify_card(
             clarify_id="clarify-1",
             question="Which path?",
             choices=["A", "B"],
-            status="answered",
-            answer="B",
+            status=status,  # type: ignore[arg-type]
+            answer="B" if status == "answered" else "",
         )
 
-        assert card["header"]["template"] == "green"
-        assert all(element["tag"] != "action" for element in card["body"]["elements"])
-        assert "B" in card["body"]["elements"][-1]["content"]
+        assert all(element["tag"] not in {"button", "column_set", "form"} for element in card["body"]["elements"])
 
 
 class TestBuildApprovalCard:

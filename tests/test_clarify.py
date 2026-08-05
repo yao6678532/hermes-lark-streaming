@@ -294,7 +294,9 @@ async def test_back_restores_buttons_without_touching_pending_wait() -> None:
     pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner", include_choice_prompts=True)
     assert pending is not None and not pending.event.is_set()
     assert registry.get("clarify-1").status == "pending"  # type: ignore[union-attr]
-    assert client.cardkit_update.await_args_list[-1].args[1]["body"]["elements"][1]["tag"] == "button"
+    restored = client.cardkit_update.await_args_list[-1].args[1]["body"]["elements"][1]
+    assert restored["tag"] == "column_set"
+    assert restored["flex_mode"] == "stretch"
 
 
 @pytest.mark.asyncio
