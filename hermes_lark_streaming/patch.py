@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -13,7 +14,11 @@ from inspect import iscoroutinefunction
 from typing import Any
 
 from .controller import get_controller
-from .interactions.clarify import ClarifyAdapterProxy, parse_card_action
+from .interactions.clarify import (
+    ClarifyAdapterProxy,
+    parse_card_action,
+    raw_message_with_action_value,
+)
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -153,6 +158,22 @@ async def on_feishu_interaction_action(
         return False
     raw_message = getattr(event, "raw_message", None)
     action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
+    if action_value is None:
+        # Hermes' Feishu adapter serializes unrecognized callbacks into a
+        # synthetic ``/card button <json>`` command.  Recover only our
+        # explicit plugin namespace from that command; preserve the original
+        # callback's form_value/input_value and identity fields.
+        synthetic_text = str(getattr(event, "text", "") or "").strip()
+        if synthetic_text.startswith("/card "):
+            payload = synthetic_text.split(" ", 2)
+            if len(payload) == 3:
+                try:
+                    decoded = json.loads(payload[2])
+                except (TypeError, ValueError):
+                    decoded = None
+                if isinstance(decoded, dict) and "hermes_lark_action" in decoded:
+                    action_value = decoded
+                    raw_message = raw_message_with_action_value(raw_message, decoded)
     if action_value is None:
         return False
     try:

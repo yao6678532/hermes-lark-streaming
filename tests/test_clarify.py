@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -435,6 +436,29 @@ def test_typed_card_command_and_approval_namespace_are_not_intercepted() -> None
     assert parse_card_action(approval_raw) == (None, "", frozenset())
 
 
+def test_parse_card_action_accepts_runtime_wrappers_and_json_value() -> None:
+    raw = _raw_action("clarify_other_back")
+    value = raw.event.action.value
+    wrapped = {
+        "payload": {
+            "data": {
+                "event": {
+                    "action": {
+                        "value": json.dumps(value),
+                        "name": "clarify_other_back",
+                    },
+                    "context": {"open_chat_id": "chat-1"},
+                    "operator": {"open_id": "owner-open", "user_id": "owner-user"},
+                }
+            }
+        }
+    }
+    parsed, chat_id, operators = parse_card_action(wrapped)
+    assert parsed == value
+    assert chat_id == "chat-1"
+    assert operators == frozenset({"owner-open", "owner-user"})
+
+
 @pytest.mark.asyncio
 async def test_gateway_hook_leaves_approval_action_on_hermes_path() -> None:
     approval_raw = SimpleNamespace(
@@ -513,6 +537,46 @@ async def test_gateway_hook_consumes_real_callback_chain_only() -> None:
         )
 
     get_ctrl.assert_called_once_with("/profiles/owner")
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "A"
+
+
+@pytest.mark.asyncio
+async def test_gateway_hook_recovers_plugin_action_from_synthetic_card_command() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+
+    async def _handle(**kwargs: object) -> bool:
+        return await handle_clarify_action(client=AsyncMock(), registry=registry, **kwargs)
+
+    ctrl = SimpleNamespace(
+        enabled=True,
+        on_clarify_action=AsyncMock(side_effect=_handle),
+    )
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat-1")
+    raw = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value={}, form_value={"clarify_other_input": "gray"}, input_value=None
+            ),
+            context=SimpleNamespace(open_chat_id="chat-1"),
+            operator=SimpleNamespace(open_id="owner-open", user_id="owner-user", union_id=""),
+        )
+    )
+    event = SimpleNamespace(
+        raw_message=raw,
+        text='/card button {"hermes_lark_action":"clarify_select","clarify_id":"clarify-1","response":"A"}',
+    )
+    with patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl):
+        assert await on_feishu_interaction_action(
+            message_id="callback-token",
+            source=source,
+            event=event,
+            session_key="feishu:chat-1:owner",
+            gateway=SimpleNamespace(
+                _resolve_profile_home_for_source=lambda _source: "/profiles/owner",
+            ),
+        )
     assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "A"
 
 

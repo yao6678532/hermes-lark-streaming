@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +28,67 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
+def _callback_event(raw_message: Any) -> Any:
+    """Find the SDK callback event through common gateway wrapper layers.
+
+    Hermes normally stores ``P2CardActionTrigger`` directly in
+    ``MessageEvent.raw_message``.  Some adapter/runtime versions wrap that
+    object in ``data``/``message``/``payload`` before constructing the
+    synthetic event.  Keep this traversal bounded and only accept a node
+    that actually exposes an ``action`` field.
+    """
+    current = raw_message
+    for _ in range(4):
+        if _field(current, "action") is not None:
+            return current
+        nested_event = _field(current, "event")
+        if nested_event is not None:
+            current = nested_event
+            continue
+        moved = False
+        for key in ("data", "message", "payload"):
+            nested = _field(current, key)
+            if nested is not None:
+                current = nested
+                moved = True
+                break
+        if not moved:
+            break
+    return current
+
+
+def _action_value(action: Any) -> dict[str, Any] | None:
+    """Normalize SDK/dict callbacks where ``action.value`` may be JSON text."""
+    value = _field(action, "value")
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+def raw_message_with_action_value(raw_message: Any, value: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild a minimal callback preserving SDK form and identity fields."""
+    event = _callback_event(raw_message)
+    action = _field(event, "action")
+    return {
+        "event": {
+            "action": {
+                "value": value,
+                "form_value": _field(action, "form_value"),
+                "input_value": _field(action, "input_value"),
+            },
+            "context": _field(event, "context"),
+            "operator": _field(event, "operator"),
+        }
+    }
+
+
 def _parse_card_action_details(
     raw_message: Any,
 ) -> tuple[dict[str, Any] | None, str, frozenset[str], dict[str, Any] | None, str | None]:
@@ -37,10 +99,13 @@ def _parse_card_action_details(
     ``event.action.input_value``.  Dict-shaped test/event payloads use the
     same names, so no synthetic user message is needed to recover the text.
     """
-    event = _field(raw_message, "event")
+    event = _callback_event(raw_message)
     action = _field(event, "action")
-    value = _field(action, "value")
-    if not isinstance(value, dict) or "hermes_lark_action" not in value:
+    value = _action_value(action)
+    if value is None or "hermes_lark_action" not in value:
+        # Do not consume ordinary Feishu card actions (including Hermes'
+        # approval namespace); only our explicit value can identify a
+        # clarify wait.
         return None, "", frozenset(), None, None
 
     context = _field(event, "context")
