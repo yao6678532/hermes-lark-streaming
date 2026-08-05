@@ -48,6 +48,10 @@ _CRON_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/cr
 CRON_SRC = Path.home() / ".hermes" / "hermes-agent" / "cron" / "scheduler.py"
 CRON_BAK = CRON_SRC.with_suffix(CRON_SRC.suffix + ".hermes_lark.bak")
 SAMPLE_CRON = SAMPLES_DIR / "scheduler.py"
+V020_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "hermes-v0.20.0"
+V020_RUN = V020_FIXTURE_DIR / "gateway" / "run.py"
+V020_CRON = V020_FIXTURE_DIR / "cron" / "scheduler.py"
+V020_RELEASE_COMMIT = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
 
 def _ensure_sample() -> Path:
     src = RUN_BAK if RUN_BAK.exists() else RUN_SRC
@@ -93,6 +97,22 @@ def scheduler_copy(tmp_path: Path) -> Path:
     src = _ensure_cron_sample()
     dst = tmp_path / "scheduler.py"
     shutil.copy2(src, dst)
+    return dst
+
+
+@pytest.fixture()
+def v020_run_copy(tmp_path: Path) -> Path:
+    assert V020_RUN.exists(), f"missing pinned Hermes v0.20.0 fixture: {V020_RUN}"
+    dst = tmp_path / "run.py"
+    shutil.copy2(V020_RUN, dst)
+    return dst
+
+
+@pytest.fixture()
+def v020_scheduler_copy(tmp_path: Path) -> Path:
+    assert V020_CRON.exists(), f"missing pinned Hermes v0.20.0 fixture: {V020_CRON}"
+    dst = tmp_path / "scheduler.py"
+    shutil.copy2(V020_CRON, dst)
     return dst
 
 
@@ -297,6 +317,74 @@ class TestVerify:
         )
         with pytest.raises(PatcherError, match="abort anchor"):
             _patcher(p).verify_target()
+
+    def test_verify_fails_when_clarify_send_callback_moves(self, run_copy: Path) -> None:
+        content = run_copy.read_text(encoding="utf-8").replace(
+            "def _clarify_callback_sync(question: str, choices) -> str:",
+            "def _clarify_callback_moved(question: str, choices) -> str:",
+            1,
+        )
+        run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify send anchor"):
+            _patcher(run_copy).verify_target()
+
+    def test_verify_fails_when_clarify_action_anchor_moves(self, run_copy: Path) -> None:
+        content = run_copy.read_text(encoding="utf-8").replace(
+            "_quick_key = self._session_key_for_source(source)",
+            "_quick_key = self._new_session_key_for_source(source)",
+            1,
+        )
+        run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify action anchor"):
+            _patcher(run_copy).verify_target()
+
+
+class TestHermesV020Compatibility:
+    """Regression baseline pinned to the exact Hermes Agent v0.20.0 release."""
+
+    def test_gateway_fixture_is_pristine_release_and_round_trips(self, v020_run_copy: Path) -> None:
+        pristine = v020_run_copy.read_bytes()
+        patcher = _patcher(v020_run_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        assert patcher.is_fully_patched()
+        after_first = v020_run_copy.read_bytes()
+
+        patcher.apply()
+        assert v020_run_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v020_run_copy.read_bytes() == pristine
+
+    def test_gateway_fixture_missing_semantic_anchor_fails(self, v020_run_copy: Path) -> None:
+        content = v020_run_copy.read_text(encoding="utf-8").replace(
+            "_quick_key = self._session_key_for_source(source)",
+            "_quick_key = self._new_session_key_for_source(source)",
+            1,
+        )
+        v020_run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify action anchor"):
+            _patcher(v020_run_copy).verify_target()
+
+    def test_cron_fixture_round_trips(self, v020_scheduler_copy: Path) -> None:
+        pristine = v020_scheduler_copy.read_bytes()
+        patcher = _cron_patcher(v020_scheduler_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        assert MK_CRON_DELIVER in v020_scheduler_copy.read_text(encoding="utf-8")
+        assert MK_CRON_DELIVER_END in v020_scheduler_copy.read_text(encoding="utf-8")
+        after_first = v020_scheduler_copy.read_bytes()
+
+        patcher.apply()
+        assert v020_scheduler_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v020_scheduler_copy.read_bytes() == pristine
 
 
 class TestGeneratedAnswerHook:
@@ -657,6 +745,32 @@ class TestApplyRemove:
         assert "content=text_content" in content
         assert "reply_to_message_id=event_message_id" in content
         assert "if not images and not media_files:" in content
+        assert "# HERMES_LARK_CLARIFY_SEND_BEGIN" in content
+        assert "on_clarify_adapter(adapter=_status_adapter, source=source, gateway=self)" in content
+        assert "# HERMES_LARK_CLARIFY_ACTION_BEGIN" in content
+        assert "await on_feishu_interaction_action(" in content
+        assert "gateway=self" in content
+
+        clarify_send_hook = content.index("# HERMES_LARK_CLARIFY_SEND_BEGIN")
+        status_adapter_init = min(
+            index
+            for index in (
+                content.find("_status_adapter = self._adapter_for_source(source)"),
+                content.find("_status_adapter = self.adapters.get(source.platform)"),
+            )
+            if index >= 0
+        )
+        official_clarify_callback = content.index("def _clarify_callback_sync(question: str, choices) -> str:")
+        assert status_adapter_init < clarify_send_hook
+        enclosing_run_sync = content.rfind("def run_sync():", 0, official_clarify_callback)
+        assert enclosing_run_sync >= 0
+        assert clarify_send_hook < enclosing_run_sync
+        assert clarify_send_hook < official_clarify_callback
+
+        quick_key = content.index("_quick_key = self._session_key_for_source(source)")
+        clarify_action_hook = content.index("# HERMES_LARK_CLARIFY_ACTION_BEGIN", quick_key)
+        pending_clarify = content.index("# Intercept messages that are responses to a pending clarify", quick_key)
+        assert quick_key < clarify_action_hook < pending_clarify
 
         stop_call = content.index('invalidation_reason="stop_command"')
         stop_hook = content.index("# HERMES_LARK_STOP_BEGIN", stop_call)

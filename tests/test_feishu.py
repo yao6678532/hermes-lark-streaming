@@ -125,6 +125,34 @@ async def test_send_card_to_chat_reuses_uuid_across_retries() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_card_id_to_chat_uses_cardkit_reference() -> None:
+    create = AsyncMock(return_value=_Resp(ok=True, data=SimpleNamespace(message_id="msg-card")))
+    client = _client_with(create_message=create)
+
+    assert await client.send_card_id_to_chat("chat", "card-1") == "msg-card"
+
+    request = create.await_args.args[0]
+    assert request.request_body.receive_id == "chat"
+    assert request.request_body.msg_type == "interactive"
+    assert '"card_id": "card-1"' in request.request_body.content
+
+
+@pytest.mark.asyncio
+async def test_send_card_id_to_chat_replies_when_anchor_is_present() -> None:
+    client = _client_with()
+    client.reply_card_by_id = AsyncMock(return_value="msg-reply")  # type: ignore[method-assign]
+
+    result = await client.send_card_id_to_chat(
+        "chat",
+        "card-1",
+        reply_to_message_id="anchor",
+    )
+
+    assert result == "msg-reply"
+    client.reply_card_by_id.assert_awaited_once_with("anchor", "card-1")
+
+
+@pytest.mark.asyncio
 async def test_cardkit_create_does_not_retry_non_transient_error() -> None:
     create = AsyncMock(side_effect=[_Resp(ok=False, code=230099, msg="content failed")])
     client = _client_with(card_create=create)

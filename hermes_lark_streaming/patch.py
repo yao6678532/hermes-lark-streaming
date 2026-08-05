@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Callable
 from functools import wraps
@@ -13,6 +14,13 @@ from inspect import iscoroutinefunction
 from typing import Any
 
 from .controller import get_controller
+from .interactions.clarify import (
+    ClarifyAdapterProxy,
+    _callback_event,
+    _field,
+    parse_card_action,
+    raw_message_with_action_value,
+)
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
@@ -110,6 +118,111 @@ def on_feishu_normalize(
             event.source = source
     except Exception as exc:
         _logger.warning("on_feishu_normalize error: %s", exc, exc_info=True)
+
+
+def on_clarify_adapter(*, adapter: Any, source: Any, gateway: Any = None) -> Any:
+    """Wrap Feishu clarify delivery while leaving every other adapter API intact."""
+    try:
+        profile_home = None
+        if gateway is not None:
+            try:
+                profile_home = gateway._resolve_profile_home_for_source(source)
+            except Exception:
+                _logger.debug("failed to resolve Feishu clarify profile home", exc_info=True)
+        ctrl = get_controller(profile_home)
+        platform = getattr(getattr(source, "platform", None), "value", "")
+        if not ctrl.clarify_card_enabled or platform not in {"feishu", "lark"}:
+            return adapter
+        if adapter is None or isinstance(adapter, ClarifyAdapterProxy):
+            return adapter
+        owner_ids = frozenset(
+            str(value).strip()
+            for value in (
+                getattr(source, "user_id", None),
+                getattr(source, "user_id_alt", None),
+            )
+            if value and str(value).strip()
+        )
+        if not owner_ids:
+            return adapter
+        return ClarifyAdapterProxy(adapter, ctrl, owner_ids)
+    except Exception:
+        _logger.exception("on_clarify_adapter error")
+        return adapter
+
+
+async def on_feishu_interaction_action(
+    *,
+    message_id: str,
+    source: Any,
+    event: Any,
+    session_key: str,
+    gateway: Any = None,
+) -> bool:
+    """Consume genuine plugin card callbacks before normal command dispatch."""
+    del message_id
+    platform = getattr(getattr(source, "platform", None), "value", "")
+    if platform not in {"feishu", "lark"}:
+        return False
+    raw_message = getattr(event, "raw_message", None)
+    callback_event = _callback_event(raw_message)
+    callback_action = _field(callback_event, "action")
+    callback_context = _field(callback_event, "context")
+    callback_chat_id = str(_field(callback_context, "open_chat_id", "") or "").strip()
+    callback_message_id = str(_field(callback_context, "open_message_id", "") or "").strip()
+    callback_action_name = str(_field(callback_action, "name", "") or "").strip()
+    action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
+    if action_value is None and callback_action_name in {
+        "clarify_other_submit",
+        "clarify_other_back",
+    } and callback_chat_id and callback_message_id:
+        try:
+            profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+            ctrl = get_controller(profile_home)
+            clarify_id = ctrl.clarify_id_for_card_message(
+                chat_id=callback_chat_id,
+                card_msg_id=callback_message_id,
+            )
+        except Exception:
+            clarify_id = ""
+        if clarify_id:
+            decoded = {
+                "hermes_lark_action": callback_action_name,
+                "clarify_id": clarify_id,
+            }
+            action_value = decoded
+            raw_message = raw_message_with_action_value(raw_message, decoded)
+    if action_value is None:
+        # Hermes' Feishu adapter serializes unrecognized callbacks into a
+        # synthetic ``/card button <json>`` command.  Recover only our
+        # explicit plugin namespace from that command; preserve the original
+        # callback's form_value/input_value and identity fields.
+        synthetic_text = str(getattr(event, "text", "") or "").strip()
+        if synthetic_text.startswith("/card "):
+            payload = synthetic_text.split(" ", 2)
+            if len(payload) == 3:
+                try:
+                    synthetic_decoded = json.loads(payload[2])
+                except (TypeError, ValueError):
+                    synthetic_decoded = None
+                if isinstance(synthetic_decoded, dict) and "hermes_lark_action" in synthetic_decoded:
+                    action_value = synthetic_decoded
+                    raw_message = raw_message_with_action_value(raw_message, synthetic_decoded)
+    if action_value is None:
+        return False
+    try:
+        profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+        ctrl = get_controller(profile_home)
+        return bool(
+            await ctrl.on_clarify_action(
+                raw_message=raw_message,
+                source_chat_id=str(getattr(source, "chat_id", "") or ""),
+                session_key=session_key,
+            )
+        )
+    except Exception:
+        _logger.exception("on_feishu_interaction_action error")
+        return True
 
 
 @_safe_hook()

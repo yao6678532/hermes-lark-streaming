@@ -61,6 +61,33 @@ class TestReasoningMode:
         cfg = _make_config(raw)
         assert cfg.reasoning_mode == "segmented"
 
+
+class TestClarifyStyle:
+    def _make_clarify_config(self, raw: dict[str, Any]) -> Config:
+        cfg = Config()
+        cfg._reload = lambda: raw  # type: ignore[assignment]
+        return cfg
+
+    @pytest.mark.parametrize("value", ["text", "card", " CARD "])
+    def test_reads_supported_values(self, value: str) -> None:
+        cfg = self._make_clarify_config(
+            {"display": {"platforms": {"feishu": {"clarify_style": value}}}}
+        )
+        assert cfg.clarify_style == value.strip().lower()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {},
+            {"display": {}},
+            {"display": {"platforms": {"feishu": {}}}},
+            {"display": {"platforms": {"feishu": {"clarify_style": "form"}}}},
+            {"display": "invalid"},
+        ],
+    )
+    def test_invalid_or_missing_defaults_to_text(self, raw: dict[str, Any]) -> None:
+        assert self._make_clarify_config(raw).clarify_style == "text"
+
 class TestFooterFields:
     def test_normal_2d_fields(self) -> None:
         cfg = _make_config({"streaming": {"footer": {"fields": [["a", "b"], ["c"]]}}})

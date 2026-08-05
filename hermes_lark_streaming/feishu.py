@@ -207,6 +207,29 @@ class FeishuClient:
             return str(resp.data.message_id)
         raise FeishuAPIError("send_card_to_chat: response missing message_id")
 
+    async def send_text_to_chat(self, chat_id: str, text: str) -> str:
+        """Send a plain-text fail-open hint without entering Hermes Gateway."""
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("text")
+                .content(self._dumps({"text": str(text)}))
+                .uuid(uuid.uuid4().hex)
+                .build()
+            )
+            .build()
+        )
+        resp = await self._checked_call(
+            "send_text_to_chat",
+            lambda: self._client.im.v1.message.acreate(request),
+        )
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError("send_text_to_chat: response missing message_id")
+
     async def reply_card_by_id(self, message_id: str, card_id: str) -> str:
         """通过 card_id 回复 CardKit 卡片消息，返回 message_id."""
         request_uuid = uuid.uuid4().hex
@@ -229,6 +252,39 @@ class FeishuClient:
         if resp.data and resp.data.message_id:
             return str(resp.data.message_id)
         raise FeishuAPIError("reply_card_by_id: response missing message_id")
+
+    async def send_card_id_to_chat(
+        self,
+        chat_id: str,
+        card_id: str,
+        *,
+        reply_to_message_id: str | None = None,
+    ) -> str:
+        """Send a CardKit entity to a chat or reply anchor."""
+        if reply_to_message_id:
+            return await self.reply_card_by_id(reply_to_message_id, card_id)
+
+        request_uuid = uuid.uuid4().hex
+        request = (
+            CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                CreateMessageRequestBody.builder()
+                .receive_id(chat_id)
+                .msg_type("interactive")
+                .content(self._dumps({"type": "card", "data": {"card_id": card_id}}))
+                .uuid(request_uuid)
+                .build()
+            )
+            .build()
+        )
+        resp = await self._checked_call(
+            "send_card_id_to_chat",
+            lambda: self._client.im.v1.message.acreate(request),
+        )
+        if resp.data and resp.data.message_id:
+            return str(resp.data.message_id)
+        raise FeishuAPIError("send_card_id_to_chat: response missing message_id")
 
     async def cardkit_create(self, card: dict[str, Any]) -> str:
         """创建 CardKit 实体，返回 card_id."""

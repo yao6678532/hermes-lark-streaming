@@ -35,7 +35,7 @@ include = ["hermes_lark_streaming*"]
 [tool.ruff]
 target-version = "py311"
 line-length = 120
-exclude = ["tests/samples"]
+exclude = ["tests/samples", "tests/fixtures"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
