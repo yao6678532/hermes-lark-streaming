@@ -164,6 +164,10 @@ class ClarifyAdapterProxy:
         self._adapter = adapter
         self._controller = controller
         self._owner_user_ids = owner_user_ids
+        # Adapter-source hooks run inside Hermes' Feishu class, outside this
+        # proxy. Attach the profile-scoped controller so those hooks do not
+        # guess HERMES_HOME in multi-profile mode.
+        adapter._hermes_lark_interaction_controller = controller
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._adapter, name)
@@ -202,7 +206,11 @@ class ClarifyAdapterProxy:
         except Exception:
             official_multi_select = False
 
-        if choices and not (multi_select or official_multi_select):
+        if (
+            bool(getattr(self._controller, "clarify_card_enabled", True))
+            and choices
+            and not (multi_select or official_multi_select)
+        ):
             try:
                 result = await asyncio.wait_for(
                     self._controller.send_clarify_card(

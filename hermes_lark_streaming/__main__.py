@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .patcher import CronPatcher, Patcher
+    from .patcher import CronPatcher, FeishuAdapterPatcher, Patcher
 
 
 def main() -> int:
@@ -42,7 +42,7 @@ def _print_usage() -> None:
     print("Usage: python -m hermes_lark_streaming <command>")
     print()
     print("Commands:")
-    print("  install    Apply AST patch to gateway/run.py and cron/scheduler.py")
+    print("  install    Apply AST patches to gateway, Feishu adapter, and cron")
     print("  uninstall  Remove AST patch")
     print("  restore    Restore from backup")
     print("  status     Show current patch status")
@@ -68,17 +68,29 @@ def _get_cron_patcher() -> CronPatcher | None:
         return None
 
 
+def _get_feishu_patcher() -> FeishuAdapterPatcher | None:
+    from .patcher import FeishuAdapterPatcher, PatcherError
+
+    try:
+        return FeishuAdapterPatcher()
+    except PatcherError as e:
+        print(f"Error: {e}")
+        return None
+
+
 def _cmd_install() -> int:
     patcher = _get_patcher()
-    if patcher is None:
+    feishu_patcher = _get_feishu_patcher()
+    if patcher is None or feishu_patcher is None:
         return 1
 
-    if patcher.is_fully_patched():
+    if patcher.is_fully_patched() and feishu_patcher.is_fully_patched():
         print("Already patched.")
     else:
         print("Verifying target compatibility...")
         try:
             patcher.verify_target()
+            feishu_patcher.verify_target()
         except Exception as e:
             print(f"Verification failed: {e}")
             return 1
@@ -87,6 +99,7 @@ def _cmd_install() -> int:
         print("Applying patch...")
         try:
             patcher.apply()
+            feishu_patcher.apply()
         except Exception as e:
             print(f"Patch failed: {e}")
             return 1
@@ -117,6 +130,14 @@ def _cmd_uninstall() -> int:
         except Exception as e:
             print(f"Cron hook remove failed: {e}")
 
+    feishu_patcher = _get_feishu_patcher()
+    if feishu_patcher is not None and feishu_patcher.is_patched():
+        try:
+            feishu_patcher.remove()
+            print("Feishu approval hooks removed.")
+        except Exception as e:
+            print(f"Feishu approval hook remove failed: {e}")
+
     if not patcher.is_patched():
         print("Not patched.")
         return 0
@@ -141,6 +162,14 @@ def _cmd_restore() -> int:
         try:
             cron_patcher.restore()
             print("Cron hook restored.")
+        except Exception:
+            pass
+
+    feishu_patcher = _get_feishu_patcher()
+    if feishu_patcher is not None:
+        try:
+            feishu_patcher.restore()
+            print("Feishu adapter restored.")
         except Exception:
             pass
 
@@ -175,6 +204,13 @@ def _cmd_status() -> int:
     cron_patcher = _get_cron_patcher()
     if cron_patcher is not None:
         print(f"Cron hook: {'installed' if cron_patcher.is_patched() else 'not installed'}")
+
+    feishu_patcher = _get_feishu_patcher()
+    if feishu_patcher is not None:
+        print(
+            "Feishu approval hooks: "
+            f"{'installed' if feishu_patcher.is_fully_patched() else 'not installed'}"
+        )
 
     # Check config
     from .config import Config
@@ -213,6 +249,17 @@ def _cmd_verify() -> int:
         print(f"Incompatible: {e}")
         return 1
     print("Compatible.")
+
+    feishu_patcher = _get_feishu_patcher()
+    if feishu_patcher is None:
+        return 1
+    print(f"Feishu target: {feishu_patcher.adapter_path}")
+    try:
+        feishu_patcher.verify_target()
+    except Exception as e:
+        print(f"Feishu incompatible: {e}")
+        return 1
+    print("Feishu approval target compatible.")
 
     cron_patcher = _get_cron_patcher()
     if cron_patcher is not None:

@@ -11,7 +11,9 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+from typing import ClassVar
 
 from .config import hermes_home
 
@@ -191,8 +193,16 @@ def _default_cron_path() -> Path:
     return _resolve_module_path("cron.scheduler", _code_roots())
 
 
+def _default_feishu_adapter_path() -> Path:
+    return _resolve_module_path("plugins.platforms.feishu.adapter", _code_roots())
+
+
 MK_CRON_DELIVER = f"# {PREFIX}_CRON_DELIVER_BEGIN"
 MK_CRON_DELIVER_END = f"# {PREFIX}_CRON_DELIVER_END"
+MK_APPROVAL_UI = f"# {PREFIX}_APPROVAL_UI_BEGIN"
+MK_APPROVAL_UI_END = f"# {PREFIX}_APPROVAL_UI_END"
+MK_APPROVAL_ACTION = f"# {PREFIX}_APPROVAL_ACTION_BEGIN"
+MK_APPROVAL_ACTION_END = f"# {PREFIX}_APPROVAL_ACTION_END"
 
 _ANCHOR_CHECKS: list[tuple[str, tuple[str, ...], str]] = [
     ("Restart typing indicator so the user sees activity", (), "interrupt"),
@@ -653,6 +663,58 @@ def _clarify_action_hook(indent: str) -> str:
     )
 
 
+def _approval_ui_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_APPROVAL_UI,
+        MK_APPROVAL_UI_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_feishu_approval_card",
+            "    card = on_feishu_approval_card(",
+            "        adapter=self,",
+            "        card=card,",
+            "        chat_id=chat_id,",
+            "        command=command,",
+            "        session_key=session_key,",
+            "        description=description,",
+            "    )",
+            *_hook_exception_lines("approval_ui"),
+        ],
+    )
+
+
+def _approval_action_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_APPROVAL_ACTION,
+        MK_APPROVAL_ACTION_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_feishu_approval_action",
+            "    _lark_approval_result = on_feishu_approval_action(",
+            "        adapter=self,",
+            "        approval_id=approval_id,",
+            "        action_value=action_value,",
+            "        choice=choice,",
+            "        open_id=open_id,",
+            "        callback_chat_id=callback_chat_id,",
+            "    )",
+            "    if _lark_approval_result is not None:",
+            "        if P2CardActionTriggerResponse is None:",
+            "            return None",
+            "        response = P2CardActionTriggerResponse()",
+            "        if CallBackCard is not None and _lark_approval_result.card is not None:",
+            "            _lark_card = CallBackCard()",
+            "            _lark_card.type = 'raw'",
+            "            _lark_card.data = _lark_approval_result.card",
+            "            response.card = _lark_card",
+            "        return response",
+            *_hook_exception_lines("approval_action"),
+        ],
+    )
+
+
 def _remove_block(content: str, begin: str, end: str) -> str:
     lines = content.splitlines(keepends=True)
     result: list[str] = []
@@ -1095,6 +1157,127 @@ def _safe_indent(lines: list[str], lineno: int) -> str:
         if lines[i].strip():
             return lines[i][: len(lines[i]) - len(lines[i].lstrip())]
     return ""
+
+
+def _find_approval_ui_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    """Locate Hermes' completed approval-card assignment."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "send_exec_approval":
+            continue
+        for child in ast.walk(node):
+            if (
+                isinstance(child, ast.Assign)
+                and len(child.targets) == 1
+                and isinstance(child.targets[0], ast.Name)
+                and child.targets[0].id == "card"
+                and isinstance(child.value, ast.Dict)
+            ):
+                lineno = child.end_lineno or child.lineno
+                return lineno, _safe_indent(lines, child.lineno - 1)
+    return None
+
+
+def _find_approval_action_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    """Insert after Hermes' approval-id/group/chat checks, before resolution."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != "_handle_approval_card_action":
+            continue
+        for child in node.body:
+            if (
+                isinstance(child, ast.Assign)
+                and len(child.targets) == 1
+                and isinstance(child.targets[0], ast.Name)
+                and child.targets[0].id == "user_name"
+            ):
+                return child.lineno - 1, _safe_indent(lines, child.lineno - 1)
+    return None
+
+
+class FeishuAdapterPatcher:
+    """Inject presentation/callback hooks into Hermes' Feishu adapter."""
+
+    MARKERS: ClassVar[list[tuple[str, str]]] = [
+        (MK_APPROVAL_UI, MK_APPROVAL_UI_END),
+        (MK_APPROVAL_ACTION, MK_APPROVAL_ACTION_END),
+    ]
+
+    def __init__(self, adapter_path: Path | None = None) -> None:
+        self.adapter_path = adapter_path or _default_feishu_adapter_path()
+        if not self.adapter_path.exists():
+            tried = ", ".join(str(r) for r in _code_roots())
+            raise PatcherError(
+                f"plugins/platforms/feishu/adapter.py not found: {self.adapter_path} "
+                f"(tried: {tried}). Set HERMES_HOME and rerun."
+            )
+
+    def is_patched(self) -> bool:
+        return MK_APPROVAL_UI in self.adapter_path.read_text(encoding="utf-8")
+
+    def is_fully_patched(self) -> bool:
+        content = self.adapter_path.read_text(encoding="utf-8")
+        return all(content.count(begin) == 1 and content.count(end) == 1 for begin, end in self.MARKERS)
+
+    def verify_target(self) -> None:
+        content = self.adapter_path.read_text(encoding="utf-8")
+        tree = ast.parse(content)
+        lines = content.splitlines(keepends=True)
+        if _find_approval_ui_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find Feishu send_exec_approval card anchor — Hermes version may be incompatible"
+            )
+        if _find_approval_action_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find Feishu approval callback anchor — Hermes version may be incompatible"
+            )
+
+    def apply(self) -> None:
+        if self.is_fully_patched():
+            return
+        self.verify_target()
+        content = self.adapter_path.read_text(encoding="utf-8")
+        has_markers = any(marker in content for pair in self.MARKERS for marker in pair)
+        if has_markers:
+            for begin, end in self.MARKERS:
+                content = _remove_block_checked(content, begin, end)
+        else:
+            self._backup()
+
+        tree = ast.parse(content)
+        lines = content.splitlines(keepends=True)
+        sites: list[
+            tuple[tuple[int, str] | None, Callable[[str], str], str]
+        ] = [
+            (_find_approval_ui_site(tree, lines), _approval_ui_hook, "approval UI"),
+            (_find_approval_action_site(tree, lines), _approval_action_hook, "approval callback"),
+        ]
+        resolved: list[tuple[int, str, Callable[[str], str]]] = []
+        for site, hook, label in sites:
+            if site is None:
+                raise PatcherError(f"Cannot locate Feishu {label} injection site")
+            resolved.append((site[0], site[1], hook))
+        for index, indent, hook in sorted(resolved, key=lambda item: item[0], reverse=True):
+            rendered = hook(indent)
+            lines[index:index] = rendered.splitlines(keepends=True)
+        _atomic_write(self.adapter_path, "".join(lines))
+
+    def remove(self) -> None:
+        content = self.adapter_path.read_text(encoding="utf-8")
+        if not any(marker in content for pair in self.MARKERS for marker in pair):
+            return
+        for begin, end in self.MARKERS:
+            content = _remove_block_checked(content, begin, end)
+        _atomic_write(self.adapter_path, content)
+
+    def restore(self) -> None:
+        backup = self.adapter_path.with_suffix(self.adapter_path.suffix + _BACKUP_SUFFIX)
+        if not backup.exists():
+            raise PatcherError(f"No backup found: {backup}")
+        shutil.copy2(backup, self.adapter_path)
+
+    def _backup(self) -> None:
+        backup = self.adapter_path.with_suffix(self.adapter_path.suffix + _BACKUP_SUFFIX)
+        if not backup.exists():
+            shutil.copy2(self.adapter_path, backup)
 
 
 class CronPatcher:

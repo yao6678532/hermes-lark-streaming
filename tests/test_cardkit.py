@@ -19,7 +19,7 @@ from hermes_lark_streaming.cardkit.builder import (
     build_complete_card,
     build_streaming_card_v2,
 )
-from hermes_lark_streaming.cardkit.interaction_builder import build_clarify_card
+from hermes_lark_streaming.cardkit.interaction_builder import build_approval_card, build_clarify_card
 from hermes_lark_streaming.cardkit.markdown import (
     _downgrade_tables,
     _find_tables_outside_code_blocks,
@@ -27,6 +27,7 @@ from hermes_lark_streaming.cardkit.markdown import (
     _strip_invalid_image_keys,
     optimize_markdown_style,
 )
+from hermes_lark_streaming.interactions.approval import _official_buttons
 from hermes_lark_streaming.streaming.segments import Segment
 
 # --- Markdown 优化 ---
@@ -88,9 +89,13 @@ class TestBuildClarifyCard:
         assert card["schema"] == "2.0"
         assert card["header"]["template"] == "blue"
         assert card["header"]["text_tag_list"][0]["color"] == "blue"
-        actions = card["body"]["elements"][1:]
-        assert len(actions) == 4
-        assert all(action["tag"] == "button" for action in actions)
+        groups = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
+        assert len(groups) == 1
+        group = groups[0]
+        assert group["flex_mode"] == "stretch"
+        assert len(group["columns"]) == 4
+        actions = [column["elements"][0] for column in group["columns"]]
+        assert all(action["tag"] == "button" and action["width"] == "fill" for action in actions)
         assert actions[0]["value"] == {
             "hermes_lark_action": "clarify_select",
             "clarify_id": "clarify-1",
@@ -103,6 +108,20 @@ class TestBuildClarifyCard:
         }
         assert all(action.get("type") != "primary" for action in actions)
 
+    @pytest.mark.parametrize("choice_count", [1, 2, 3, 4])
+    def test_pending_dynamic_choice_count_keeps_other_last(self, choice_count: int) -> None:
+        choices = [f"choice-{index}" for index in range(choice_count)]
+        card = build_clarify_card(clarify_id="clarify-1", question="Which path?", choices=choices)
+        group = next(item for item in card["body"]["elements"] if item["tag"] == "column_set")
+        actions = [column["elements"][0] for column in group["columns"]]
+        assert len(actions) == choice_count + 1
+        assert [action["value"]["response"] for action in actions[:-1]] == choices
+        assert actions[-1]["value"] == {
+            "hermes_lark_action": "clarify_other",
+            "clarify_id": "clarify-1",
+        }
+        assert all(action["width"] == "fill" for action in actions)
+
     def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
         card = build_clarify_card(
             clarify_id="clarify-1",
@@ -112,25 +131,127 @@ class TestBuildClarifyCard:
         )
         form = card["body"]["elements"][1]
         assert form["tag"] == "form"
-        input_element, submit, back = form["elements"]
+        input_element, group = form["elements"]
         assert input_element["tag"] == "input"
         assert input_element["name"] == "clarify_other_input"
+        assert group["tag"] == "column_set"
+        assert group["flex_mode"] == "stretch"
+        assert len(group["columns"]) == 2
+        submit, back = [column["elements"][0] for column in group["columns"]]
+        assert submit["name"] == "clarify_other_submit"
         assert submit["value"]["hermes_lark_action"] == "clarify_other_submit"
+        assert submit["value"]["clarify_id"] == "clarify-1"
         assert submit["form_action_type"] == "submit"
+        assert submit["width"] == "fill"
+        assert back["name"] == "clarify_other_back"
         assert back["value"]["hermes_lark_action"] == "clarify_other_back"
+        assert back["value"]["clarify_id"] == "clarify-1"
+        assert back["form_action_type"] == "submit"
+        assert back["width"] == "fill"
 
-    def test_answered_card_removes_actions(self) -> None:
+    @pytest.mark.parametrize("status", ["answered", "awaiting_text", "expired"])
+    def test_non_pending_cards_remove_actions(self, status: str) -> None:
         card = build_clarify_card(
             clarify_id="clarify-1",
             question="Which path?",
             choices=["A", "B"],
-            status="answered",
-            answer="B",
+            status=status,  # type: ignore[arg-type]
+            answer="B" if status == "answered" else "",
         )
 
-        assert card["header"]["template"] == "green"
-        assert all(element["tag"] != "action" for element in card["body"]["elements"])
-        assert "B" in card["body"]["elements"][-1]["content"]
+        assert all(element["tag"] not in {"button", "column_set", "form"} for element in card["body"]["elements"])
+
+
+class TestBuildApprovalCard:
+    @staticmethod
+    def _buttons() -> list[dict]:
+        return [
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": label},
+                "value": {"hermes_action": action, "approval_id": 7, "future": action},
+            }
+            for action, label in (
+                ("approve_once", "Allow Once"),
+                ("approve_session", "Session"),
+                ("approve_always", "Always"),
+                ("deny", "Deny"),
+            )
+        ]
+
+    def test_pending_preserves_every_official_payload(self) -> None:
+        buttons = self._buttons()
+        card = build_approval_card(
+            command="git clean -fd",
+            description="delete untracked files",
+            buttons=buttons,
+        )
+
+        rows = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
+        assert card["schema"] == "2.0"
+        assert card["header"]["template"] == "orange"
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["flex_mode"] == "stretch"
+        assert row["flex_mode"] != "flow"
+        assert len(row["columns"]) == 4
+        assert all(column["width"] == "weighted" and column["weight"] == 1 for column in row["columns"])
+        assert [item["value"] for item in _official_buttons(card)] == [item["value"] for item in buttons]
+        assert [item["value"]["hermes_action"] for item in _official_buttons(card)] == [
+            "approve_once",
+            "approve_session",
+            "approve_always",
+            "deny",
+        ]
+        assert all(item["tag"] == "button" for column in row["columns"] for item in column["elements"])
+        assert all(item["width"] == "fill" for item in _official_buttons(card))
+        assert all(column["horizontal_align"] == "center" for column in row["columns"])
+        assert row["columns"][-1]["elements"][0]["value"]["hermes_action"] == "deny"
+
+    def test_conditional_and_unknown_choices_are_not_invented_or_dropped(self) -> None:
+        buttons = [self._buttons()[0], self._buttons()[-1]]
+        buttons.insert(
+            1,
+            {
+                "tag": "button",
+                "text": {"tag": "plain_text", "content": "Future scope"},
+                "value": {"hermes_action": "approve_future_scope", "approval_id": 7},
+            },
+        )
+        card = build_approval_card(command="cmd", description="why", buttons=buttons)
+        assert [item["value"] for item in _official_buttons(card)] == [item["value"] for item in buttons]
+        rows = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
+        assert len(rows) == 1
+        assert len(rows[0]["columns"]) == len(buttons)
+        assert rows[0]["flex_mode"] == "stretch"
+        assert [column["elements"][0]["value"] for column in rows[0]["columns"]] == [
+            item["value"] for item in buttons
+        ]
+        assert all(column["elements"][0]["width"] == "fill" for column in rows[0]["columns"])
+
+    @pytest.mark.parametrize(
+        ("status", "decision", "template", "needle"),
+        [
+            ("approved", "once", "green", "Allowed once"),
+            ("approved", "session", "green", "Allowed for this session"),
+            ("approved", "always", "green", "Always allowed"),
+            ("denied", "deny", "red", "Denied"),
+            ("expired", "", "grey", "no longer pending"),
+        ],
+    )
+    def test_terminal_cards_have_no_actions(
+        self, status: str, decision: str, template: str, needle: str
+    ) -> None:
+        card = build_approval_card(
+            command="cmd",
+            description="why",
+            buttons=self._buttons(),
+            status=status,  # type: ignore[arg-type]
+            decision=decision,
+        )
+        assert card["header"]["template"] == template
+        assert all(item["tag"] != "button" for item in card["body"]["elements"])
+        assert needle in card["body"]["elements"][-1]["content"]
 
 
 class TestStripInvalidImageKeys:

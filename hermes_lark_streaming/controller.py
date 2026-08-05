@@ -22,7 +22,7 @@ from .interactions.clarify import (
     handle_clarify_action,
     send_clarify_card,
 )
-from .interactions.registry import ClarifyCardRegistry
+from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
 from .streaming.controller import StreamingController
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
@@ -145,6 +145,7 @@ class StreamCardController(StreamingController):
         self._text_fallback_aliases: dict[str, set[str]] = {}
         self._unscoped_enabled: bool | None = None
         self._clarify_registry = ClarifyCardRegistry()
+        self._approval_registry = ApprovalCardRegistry()
 
     @property
     def enabled(self) -> bool:
@@ -160,6 +161,14 @@ class StreamCardController(StreamingController):
     @property
     def clarify_card_enabled(self) -> bool:
         return self.enabled and self._cfg.clarify_style == "card"
+
+    @property
+    def approval_card_enabled(self) -> bool:
+        return self.enabled and self._cfg.confirmation_style == "openclaw"
+
+    @property
+    def approval_registry(self) -> ApprovalCardRegistry:
+        return self._approval_registry
 
     @staticmethod
     def _needs_fallback_scope() -> bool:
