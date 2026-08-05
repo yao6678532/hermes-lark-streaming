@@ -48,6 +48,10 @@ _CRON_URL = "https://raw.githubusercontent.com/NousResearch/hermes-agent/main/cr
 CRON_SRC = Path.home() / ".hermes" / "hermes-agent" / "cron" / "scheduler.py"
 CRON_BAK = CRON_SRC.with_suffix(CRON_SRC.suffix + ".hermes_lark.bak")
 SAMPLE_CRON = SAMPLES_DIR / "scheduler.py"
+V020_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "hermes-v0.20.0"
+V020_RUN = V020_FIXTURE_DIR / "gateway" / "run.py"
+V020_CRON = V020_FIXTURE_DIR / "cron" / "scheduler.py"
+V020_RELEASE_COMMIT = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
 
 def _ensure_sample() -> Path:
     src = RUN_BAK if RUN_BAK.exists() else RUN_SRC
@@ -93,6 +97,22 @@ def scheduler_copy(tmp_path: Path) -> Path:
     src = _ensure_cron_sample()
     dst = tmp_path / "scheduler.py"
     shutil.copy2(src, dst)
+    return dst
+
+
+@pytest.fixture()
+def v020_run_copy(tmp_path: Path) -> Path:
+    assert V020_RUN.exists(), f"missing pinned Hermes v0.20.0 fixture: {V020_RUN}"
+    dst = tmp_path / "run.py"
+    shutil.copy2(V020_RUN, dst)
+    return dst
+
+
+@pytest.fixture()
+def v020_scheduler_copy(tmp_path: Path) -> Path:
+    assert V020_CRON.exists(), f"missing pinned Hermes v0.20.0 fixture: {V020_CRON}"
+    dst = tmp_path / "scheduler.py"
+    shutil.copy2(V020_CRON, dst)
     return dst
 
 
@@ -319,6 +339,52 @@ class TestVerify:
 
         with pytest.raises(PatcherError, match="clarify action anchor"):
             _patcher(run_copy).verify_target()
+
+
+class TestHermesV020Compatibility:
+    """Regression baseline pinned to the exact Hermes Agent v0.20.0 release."""
+
+    def test_gateway_fixture_is_pristine_release_and_round_trips(self, v020_run_copy: Path) -> None:
+        pristine = v020_run_copy.read_bytes()
+        patcher = _patcher(v020_run_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        assert patcher.is_fully_patched()
+        after_first = v020_run_copy.read_bytes()
+
+        patcher.apply()
+        assert v020_run_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v020_run_copy.read_bytes() == pristine
+
+    def test_gateway_fixture_missing_semantic_anchor_fails(self, v020_run_copy: Path) -> None:
+        content = v020_run_copy.read_text(encoding="utf-8").replace(
+            "_quick_key = self._session_key_for_source(source)",
+            "_quick_key = self._new_session_key_for_source(source)",
+            1,
+        )
+        v020_run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="clarify action anchor"):
+            _patcher(v020_run_copy).verify_target()
+
+    def test_cron_fixture_round_trips(self, v020_scheduler_copy: Path) -> None:
+        pristine = v020_scheduler_copy.read_bytes()
+        patcher = _cron_patcher(v020_scheduler_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        assert MK_CRON_DELIVER in v020_scheduler_copy.read_text(encoding="utf-8")
+        assert MK_CRON_DELIVER_END in v020_scheduler_copy.read_text(encoding="utf-8")
+        after_first = v020_scheduler_copy.read_bytes()
+
+        patcher.apply()
+        assert v020_scheduler_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v020_scheduler_copy.read_bytes() == pristine
 
 
 class TestGeneratedAnswerHook:
@@ -680,7 +746,7 @@ class TestApplyRemove:
         assert "reply_to_message_id=event_message_id" in content
         assert "if not images and not media_files:" in content
         assert "# HERMES_LARK_CLARIFY_SEND_BEGIN" in content
-        assert "on_clarify_adapter(adapter=_status_adapter, source=source)" in content
+        assert "on_clarify_adapter(adapter=_status_adapter, source=source, gateway=self)" in content
         assert "# HERMES_LARK_CLARIFY_ACTION_BEGIN" in content
         assert "await on_feishu_interaction_action(" in content
         assert "gateway=self" in content

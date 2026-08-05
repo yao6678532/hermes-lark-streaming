@@ -120,10 +120,16 @@ def on_feishu_normalize(
         _logger.warning("on_feishu_normalize error: %s", exc, exc_info=True)
 
 
-def on_clarify_adapter(*, adapter: Any, source: Any) -> Any:
+def on_clarify_adapter(*, adapter: Any, source: Any, gateway: Any = None) -> Any:
     """Wrap Feishu clarify delivery while leaving every other adapter API intact."""
     try:
-        ctrl = get_controller()
+        profile_home = None
+        if gateway is not None:
+            try:
+                profile_home = gateway._resolve_profile_home_for_source(source)
+            except Exception:
+                _logger.debug("failed to resolve Feishu clarify profile home", exc_info=True)
+        ctrl = get_controller(profile_home)
         platform = getattr(getattr(source, "platform", None), "value", "")
         if not ctrl.clarify_card_enabled or platform not in {"feishu", "lark"}:
             return adapter

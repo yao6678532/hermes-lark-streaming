@@ -180,9 +180,29 @@ class ClarifyAdapterProxy:
         clarify_id: str,
         session_key: str,
         metadata: dict[str, Any] | None = None,
+        multi_select: bool = False,
     ) -> Any:
         """Claim supported prompts only after known-good card delivery."""
-        if choices:
+        # Hermes v0.20 registers multi-select on the official pending entry;
+        # the gateway's adapter call remains backward-compatible and may not
+        # forward the flag, so consult Hermes' public pending lookup too.
+        official_multi_select = False
+        try:
+            from tools import clarify_gateway  # type: ignore[import-not-found]
+
+            pending = clarify_gateway.get_pending_for_session(
+                session_key,
+                include_choice_prompts=True,
+            )
+            official_multi_select = bool(
+                pending
+                and str(getattr(pending, "clarify_id", "")) == clarify_id
+                and getattr(pending, "multi_select", False)
+            )
+        except Exception:
+            official_multi_select = False
+
+        if choices and not (multi_select or official_multi_select):
             try:
                 result = await asyncio.wait_for(
                     self._controller.send_clarify_card(

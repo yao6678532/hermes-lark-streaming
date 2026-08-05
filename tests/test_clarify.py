@@ -22,7 +22,7 @@ from hermes_lark_streaming.interactions.registry import (
     ClarifyCardRegistry,
     ClarifyCardState,
 )
-from hermes_lark_streaming.patch import on_feishu_interaction_action
+from hermes_lark_streaming.patch import on_clarify_adapter, on_feishu_interaction_action
 
 
 def _raw_action(
@@ -68,12 +68,13 @@ def _clear_official_registry() -> None:
     clarify_gateway.clear_session("feishu:chat-1:owner")
 
 
-def _register_official(clarify_id: str = "clarify-1") -> None:
+def _register_official(clarify_id: str = "clarify-1", *, multi_select: bool = False) -> None:
     clarify_gateway.register(
         clarify_id=clarify_id,
         session_key="feishu:chat-1:owner",
         question="Which path?",
         choices=["A", "B"],
+        multi_select=multi_select,
     )
 
 
@@ -256,7 +257,7 @@ async def test_expired_other_submit_is_safe() -> None:
         source_chat_id="chat-1",
         session_key="feishu:chat-1:owner",
     )
-    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) is None
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0.01) is None
     await handle_clarify_action(
         client=client,
         registry=registry,
@@ -410,7 +411,7 @@ async def test_double_click_and_conflicting_click_are_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_expired_click_is_consumed_without_new_turn() -> None:
     _register_official()
-    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) is None
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0.01) is None
     registry = ClarifyCardRegistry()
     registry.register(_state())
     client = AsyncMock()
@@ -465,6 +466,21 @@ def test_registry_finds_state_by_card_message() -> None:
     registry.register(state)
     assert registry.find_by_card_message("chat-1", "msg-1") is state
     assert registry.find_by_card_message("other-chat", "msg-1") is None
+
+
+def test_clarify_adapter_uses_source_profile_controller() -> None:
+    adapter = SimpleNamespace()
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), user_id="owner")
+    controller = SimpleNamespace(clarify_card_enabled=True)
+    gateway = SimpleNamespace(
+        _resolve_profile_home_for_source=lambda _source: "/profiles/assistant",
+    )
+
+    with patch("hermes_lark_streaming.patch.get_controller", return_value=controller) as get_ctrl:
+        wrapped = on_clarify_adapter(adapter=adapter, source=source, gateway=gateway)
+
+    get_ctrl.assert_called_once_with("/profiles/assistant")
+    assert isinstance(wrapped, ClarifyAdapterProxy)
 
 
 @pytest.mark.asyncio
@@ -660,6 +676,38 @@ async def test_card_send_failure_delegates_to_official_numbered_text_fallback() 
     sent_text = original.send.await_args.kwargs["content"]
     assert "1. A" in sent_text and "2. B" in sent_text
     pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner")
+    assert pending is not None and pending.awaiting_text is True
+
+
+@pytest.mark.asyncio
+async def test_multi_select_uses_official_text_fallback_without_card_state() -> None:
+    _register_official(multi_select=True)
+
+    class _OfficialTextFallback:
+        send_clarify = BasePlatformAdapter.send_clarify
+
+        def __init__(self) -> None:
+            self.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    original = _OfficialTextFallback()
+    controller = SimpleNamespace(send_clarify_card=AsyncMock())
+    proxy = ClarifyAdapterProxy(original, controller, frozenset({"owner"}))
+
+    result = await proxy.send_clarify(
+        chat_id="chat-1",
+        question="Choose environments",
+        choices=["A", "B"],
+        clarify_id="clarify-1",
+        session_key="feishu:chat-1:owner",
+    )
+
+    assert result.success is True
+    controller.send_clarify_card.assert_not_awaited()
+    sent_text = original.send.await_args.kwargs["content"]
+    assert "Multiple selections allowed" in sent_text
+    pending = clarify_gateway.get_pending_for_session(
+        "feishu:chat-1:owner", include_choice_prompts=True
+    )
     assert pending is not None and pending.awaiting_text is True
 
 

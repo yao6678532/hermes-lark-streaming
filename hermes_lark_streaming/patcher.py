@@ -625,7 +625,7 @@ def _clarify_send_hook(indent: str) -> str:
         [
             "try:",
             "    from hermes_lark_streaming.patch import on_clarify_adapter",
-            "    _status_adapter = on_clarify_adapter(adapter=_status_adapter, source=source)",
+            "    _status_adapter = on_clarify_adapter(adapter=_status_adapter, source=source, gateway=self)",
             *_hook_exception_lines("clarify_send"),
         ],
     )
