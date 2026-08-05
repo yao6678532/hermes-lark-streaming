@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from ..streaming.progress import ProgressSnapshot
 from ..streaming.segments import Segment, SegmentType
 from ..streaming.tooluse import ToolDisplayStep
 from .i18n import _LOCALES, _T, _i18n, _t
@@ -16,6 +17,7 @@ from .markdown import (
 )
 
 STREAMING_ELEMENT_ID = "streaming_content"
+PROGRESS_ELEMENT_ID = "progress_status"
 REASONING_ELEMENT_ID = "reasoning_content"
 REASONING_TEXT_ELEMENT_ID = "reasoning_text"
 TOOL_PANEL_ELEMENT_ID = "tool_panel"
@@ -103,6 +105,18 @@ def _loading_element() -> dict:
             "size": "16px 16px",
         },
         "element_id": _LOADING_ELEMENT_ID,
+    }
+
+
+def _progress_element(snapshot: ProgressSnapshot) -> dict[str, Any]:
+    return {
+        "tag": "markdown",
+        "content": snapshot.content,
+        "i18n_content": _i18n(snapshot.content, snapshot.zh_content),
+        "text_color": "grey",
+        "text_size": "notation",
+        "margin": "0px 0px 0px 0px",
+        "element_id": PROGRESS_ELEMENT_ID,
     }
 
 
@@ -435,9 +449,13 @@ def build_streaming_card_v2(
     header_enabled: bool = False,
     text_size: str = "normal_v2",
     width_mode: str = "default",
+    progress_snapshot: ProgressSnapshot | None = None,
 ) -> dict[str, Any]:
     """CardKit 2.0 流式占位卡片 — 含工具面板 + streaming + loading 元素."""
     elements: list[dict] = []
+
+    if progress_snapshot is not None and progress_snapshot.visible:
+        elements.append(_progress_element(progress_snapshot))
 
     if show_reasoning:
         elements.append(

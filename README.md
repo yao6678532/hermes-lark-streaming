@@ -95,6 +95,7 @@ FEISHU_APP_SECRET=xxxxx
 ```yaml
 streaming:
   enabled: true
+  progress_mode: text  # text 保留 Hermes 独立状态消息；card 在流式卡片内更新状态
   width_mode: default   # 卡片宽度模式：default / compact / fill，默认 default
   header:
     enabled: true      # 卡片 header，默认 false

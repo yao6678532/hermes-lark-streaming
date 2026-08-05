@@ -95,6 +95,7 @@ Customize the appearance of streaming and completion cards with the following op
 ```yaml
 streaming:
   enabled: true
+  progress_mode: text  # text keeps Hermes status messages; card updates status in the streaming card
   width_mode: default   # Card width mode: default / compact / fill, default default
   header:
     enabled: true      # Card header, default false

@@ -62,6 +62,26 @@ class TestReasoningMode:
         assert cfg.reasoning_mode == "segmented"
 
 
+class TestProgressMode:
+    @pytest.mark.parametrize("value", ["text", "card", " CARD "])
+    def test_reads_supported_values(self, value: str) -> None:
+        cfg = _make_config({"streaming": {"progress_mode": value}})
+        assert cfg.progress_mode == value.strip().lower()
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {},
+            {"streaming": {}},
+            {"streaming": {"progress_mode": "percent"}},
+            {"streaming": {"progress_mode": None}},
+            {"streaming": "invalid"},
+        ],
+    )
+    def test_invalid_or_missing_defaults_to_text(self, raw: dict[str, Any]) -> None:
+        assert _make_config(raw).progress_mode == "text"
+
+
 class TestClarifyStyle:
     def _make_clarify_config(self, raw: dict[str, Any]) -> Config:
         cfg = Config()

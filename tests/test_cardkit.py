@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
+    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
@@ -28,6 +29,7 @@ from hermes_lark_streaming.cardkit.markdown import (
     optimize_markdown_style,
 )
 from hermes_lark_streaming.interactions.approval import _official_buttons
+from hermes_lark_streaming.streaming.progress import ProgressState
 from hermes_lark_streaming.streaming.segments import Segment
 
 # --- Markdown 优化 ---
@@ -543,6 +545,17 @@ class TestBuildStreamingCardV2:
     def test_with_tool_steps(self) -> None:
         card = build_streaming_card_v2(tool_steps=[_STEP_RUNNING], elapsed_ms=100)
         assert any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
+
+    def test_fixed_progress_element_starts_working(self) -> None:
+        card = build_streaming_card_v2(progress_snapshot=ProgressState().snapshot())
+        progress = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("element_id") == PROGRESS_ELEMENT_ID
+        )
+
+        assert progress["content"] == "⏳ Working"
+        assert progress["i18n_content"]["zh_cn"] == "⏳ 处理中"
 
     def test_no_tool_use(self) -> None:
         card = build_streaming_card_v2(show_tool_use=False)

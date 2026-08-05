@@ -428,6 +428,22 @@ def on_reasoning_delta(
 
 
 @_safe_hook(default_return=False, log_level="debug")
+def on_long_running_progress(
+    *,
+    ctrl: Any,
+    message_id: str,
+    elapsed_seconds: float,
+) -> bool:
+    """Own Hermes' real long-running heartbeat when an active card is ready."""
+    return bool(
+        ctrl.on_long_running_progress(
+            message_id=message_id,
+            elapsed_seconds=elapsed_seconds,
+        )
+    )
+
+
+@_safe_hook(default_return=False, log_level="debug")
 def on_background_review_message(
     *,
     ctrl: Any,
