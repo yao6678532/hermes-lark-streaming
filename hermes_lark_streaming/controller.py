@@ -375,13 +375,6 @@ class StreamCardController(StreamingController):
         if session is None or session.guard.should_skip("on_thinking"):
             return False
 
-        if self._cfg.progress_mode == "card":
-            if str(source or "").strip().lower() == "interim_commentary":
-                session.progress.on_answering()
-            else:
-                session.progress.on_thinking()
-            self._schedule_flush(session)
-
         if session.segment_state is None:
             return False
         return self._on_thinking_segment(
@@ -399,9 +392,6 @@ class StreamCardController(StreamingController):
         if session is None or session.guard.should_skip("on_reasoning"):
             return False
 
-        if self._cfg.progress_mode == "card":
-            session.progress.on_thinking()
-            self._schedule_flush(session)
         if not self._cfg.show_reasoning:
             return False
 
@@ -428,9 +418,6 @@ class StreamCardController(StreamingController):
             return False
         if session.segment_state is None:
             return False
-
-        if self._cfg.progress_mode == "card":
-            session.progress.on_tool_event(tool_name, status)
 
         if status in ("running", "started", "tool.started"):
             self._pause_merged_reasoning(session)
@@ -461,8 +448,6 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
-        if self._cfg.progress_mode == "card":
-            session.progress.on_answering()
         self._pause_merged_reasoning(session)
         session.segment_state.on_answer_delta(answer_text)
         self._schedule_flush(session)
@@ -619,6 +604,8 @@ class StreamCardController(StreamingController):
         *,
         message_id: str,
         elapsed_seconds: float,
+        iteration: int | None = None,
+        max_iterations: int | None = None,
     ) -> bool:
         """Own a real Hermes heartbeat only when an active card can display it."""
         if not self.enabled or self._cfg.progress_mode != "card":
@@ -631,9 +618,13 @@ class StreamCardController(StreamingController):
             or session.guard.should_skip("on_long_running_progress")
         ):
             return False
-        if not session.progress.visible or not session.progress.available:
+        if not session.progress.available:
             return False
-        session.progress.note_heartbeat(elapsed_seconds)
+        session.progress.note_heartbeat(
+            elapsed_seconds,
+            iteration=iteration,
+            max_iterations=max_iterations,
+        )
         self._schedule_flush(session)
         return True
 

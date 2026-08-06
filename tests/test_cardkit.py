@@ -6,7 +6,6 @@ import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
-    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
@@ -547,24 +546,39 @@ class TestBuildStreamingCardV2:
         card = build_streaming_card_v2(tool_steps=[_STEP_RUNNING], elapsed_ms=100)
         assert any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
 
-    def test_fixed_progress_element_starts_working(self) -> None:
-        card = build_streaming_card_v2(progress_snapshot=ProgressState().snapshot())
-        elements = card["body"]["elements"]
-        progress = next(
-            element for element in elements
-            if element.get("element_id") == PROGRESS_ELEMENT_ID
-        )
-
-        assert progress["content"] == "⏳ Working"
-        assert progress["i18n_content"]["zh_cn"] == "⏳ 处理中"
-        assert elements[-1] is progress
-        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
-
-    def test_text_mode_keeps_loading_anchor(self) -> None:
+    def test_streaming_card_keeps_native_loading_icon(self) -> None:
         elements = build_streaming_card_v2()["body"]["elements"]
+        loading = elements[-1]
 
-        assert elements[-1]["element_id"] == _LOADING_ELEMENT_ID
-        assert not any(element.get("element_id") == PROGRESS_ELEMENT_ID for element in elements)
+        assert loading["element_id"] == _LOADING_ELEMENT_ID
+        assert loading["content"] == " "
+        assert loading["icon"] == {
+            "tag": "custom_icon",
+            "img_key": "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg",
+            "size": "16px 16px",
+        }
+        assert not any(element.get("element_id") == "progress_status" for element in elements)
+
+    def test_card_mode_before_heartbeat_is_still_native_loading_icon(self) -> None:
+        elements = build_streaming_card_v2(progress_snapshot=ProgressState().snapshot())["body"]["elements"]
+        loading = elements[-1]
+
+        assert loading["element_id"] == _LOADING_ELEMENT_ID
+        assert loading["content"] == " "
+        assert "i18n_content" not in loading
+        assert not any(element.get("element_id") == "progress_status" for element in elements)
+
+    def test_heartbeat_updates_loading_content_without_replacing_icon(self) -> None:
+        state = ProgressState()
+        state.note_heartbeat(180, iteration=3, max_iterations=60)
+        elements = build_streaming_card_v2(progress_snapshot=state.snapshot())["body"]["elements"]
+        loading = elements[-1]
+
+        assert loading["element_id"] == _LOADING_ELEMENT_ID
+        assert loading["content"] == "Working · 3 min · iteration 3/60"
+        assert loading["i18n_content"]["zh_cn"] == "运行 · 3 min · iteration 3/60"
+        assert loading["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+        assert not any(element.get("element_id") == "progress_status" for element in elements)
 
     def test_no_tool_use(self) -> None:
         card = build_streaming_card_v2(show_tool_use=False)

@@ -6,7 +6,6 @@ from typing import Any
 
 from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
-    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     _build_reasoning_panel,
@@ -25,11 +24,11 @@ MERGED_REASONING_ELEMENT_ESTIMATE = 4
 
 
 def build_progress_update_action(snapshot: ProgressSnapshot) -> dict[str, Any]:
-    """Update both default and localized content of the fixed status element."""
+    """Update only the content of the fixed native loading element."""
     return {
         "action": "partial_update_element",
         "params": {
-            "element_id": PROGRESS_ELEMENT_ID,
+            "element_id": _LOADING_ELEMENT_ID,
             "partial_element": {
                 "content": snapshot.content,
                 "i18n_content": _i18n(snapshot.content, snapshot.zh_content),
@@ -90,7 +89,6 @@ def find_tool_split_offset(
 
 def build_add_segment_action(
     seg: Segment, all_steps: list[ToolDisplayStep], *, text_size: str = "normal_v2",
-    tail_anchor: str = _LOADING_ELEMENT_ID,
 ) -> dict[str, Any]:
     """构造新增 segment 元素的 batch action."""
     if seg.type == SegmentType.REASONING:
@@ -114,21 +112,19 @@ def build_add_segment_action(
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": tail_anchor,
+            "target_element_id": _LOADING_ELEMENT_ID,
             "elements": [element],
         },
     }
 
 
-def build_add_merged_reasoning_action(
-    *, tail_anchor: str = _LOADING_ELEMENT_ID,
-) -> dict[str, Any]:
+def build_add_merged_reasoning_action() -> dict[str, Any]:
     """Create the one fixed reasoning panel used by merged presentation mode."""
     return {
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": tail_anchor,
+            "target_element_id": _LOADING_ELEMENT_ID,
             "elements": [
                 _build_reasoning_panel(
                     " ",

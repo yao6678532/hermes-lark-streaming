@@ -8,8 +8,6 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from ..cardkit.builder import (
-    _LOADING_ELEMENT_ID,
-    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     build_background_card,
@@ -93,12 +91,6 @@ class StreamingController:
         if session.guard.should_skip("_schedule_flush"):
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
-
-    def _streaming_tail_anchor(self) -> str:
-        """Return the fixed trailing element for the configured presentation."""
-        if self._cfg.progress_mode == "card":
-            return PROGRESS_ELEMENT_ID
-        return _LOADING_ELEMENT_ID
 
     async def _flush_progress(self, session: CardSession) -> None:
         """Update the fixed status element while preserving concurrent events."""
@@ -204,9 +196,7 @@ class StreamingController:
                 await self._client.cardkit_batch_update(
                     session.card_id,
                     [
-                        build_add_merged_reasoning_action(
-                            tail_anchor=self._streaming_tail_anchor(),
-                        )
+                        build_add_merged_reasoning_action()
                     ],
                     sequence=session.sequence,
                 )
@@ -342,8 +332,8 @@ class StreamingController:
                         card={"type": "card", "data": {"card_id": card_id}},
                     )
             session.set_card(card_id=card_id, card_msg_id=card_msg_id)
-            session.element_count = 1 + int(progress_snapshot is not None)
-            if progress_snapshot is not None:
+            session.element_count = 1
+            if progress_snapshot is not None and progress_snapshot.visible:
                 session.progress.mark_rendered(progress_snapshot.revision)
             session.flush.set_throttle(CARDKIT_MS)
 
@@ -458,7 +448,6 @@ class StreamingController:
                         seg,
                         all_steps,
                         text_size=self._cfg.body_text_size,
-                        tail_anchor=self._streaming_tail_anchor(),
                     )
                 )
                 if (
@@ -827,8 +816,8 @@ class StreamingController:
             )
 
         session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
-        session.element_count = 1 + int(progress_snapshot is not None)
-        if progress_snapshot is not None:
+        session.element_count = 1
+        if progress_snapshot is not None and progress_snapshot.visible:
             session.progress.mark_rendered(progress_snapshot.revision)
         session.sequence = 1
         session.split_disabled = False

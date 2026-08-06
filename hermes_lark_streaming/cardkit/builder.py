@@ -17,7 +17,6 @@ from .markdown import (
 )
 
 STREAMING_ELEMENT_ID = "streaming_content"
-PROGRESS_ELEMENT_ID = "progress_status"
 REASONING_ELEMENT_ID = "reasoning_content"
 REASONING_TEXT_ELEMENT_ID = "reasoning_text"
 TOOL_PANEL_ELEMENT_ID = "tool_panel"
@@ -95,28 +94,22 @@ def _build_header(status: str) -> dict[str, Any]:
     }
 
 
-def _loading_element() -> dict:
+def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[str, Any]:
+    heartbeat = progress_snapshot if progress_snapshot and progress_snapshot.visible else None
     return {
         "tag": "markdown",
-        "content": " ",
+        "content": heartbeat.content if heartbeat else " ",
         "icon": {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
         },
         "element_id": _LOADING_ELEMENT_ID,
-    }
-
-
-def _progress_element(snapshot: ProgressSnapshot) -> dict[str, Any]:
-    return {
-        "tag": "markdown",
-        "content": snapshot.content,
-        "i18n_content": _i18n(snapshot.content, snapshot.zh_content),
-        "text_color": "grey",
-        "text_size": "notation",
-        "margin": "0px 0px 0px 0px",
-        "element_id": PROGRESS_ELEMENT_ID,
+        **(
+            {"i18n_content": _i18n(heartbeat.content, heartbeat.zh_content)}
+            if heartbeat
+            else {}
+        ),
     }
 
 
@@ -467,10 +460,7 @@ def build_streaming_card_v2(
 
     if show_streaming_element:
         elements.append(_streaming_element(text_size=text_size))
-    if progress_snapshot is not None and progress_snapshot.visible:
-        elements.append(_progress_element(progress_snapshot))
-    else:
-        elements.append(_loading_element())
+    elements.append(_loading_element(progress_snapshot))
 
     card = {
         "schema": "2.0",

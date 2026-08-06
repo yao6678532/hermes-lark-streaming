@@ -244,6 +244,11 @@ def _build_progress_hook_runner():
     namespace: dict = {}
     source = (
         "async def notify(event_message_id, _elapsed_mins):\n"
+        "    class Agent:\n"
+        "        def get_activity_summary(self):\n"
+        "            return {'api_call_count': 3, 'max_iterations': 60}\n"
+        "    _agent_ref = Agent()\n"
+        "    _heartbeat_text = '⏳ Working'\n"
         "    for _ in range(1):\n"
         f"{_progress_hook('        ')}"
         "        return 'hermes-text'\n"
@@ -558,7 +563,12 @@ async def test_generated_progress_hook_suppresses_only_when_card_owns_heartbeat(
 
     with patch("hermes_lark_streaming.patch.on_long_running_progress", return_value=True) as progress:
         assert await notify("message", 3) == "card-owned"
-    progress.assert_called_once_with(message_id="message", elapsed_seconds=180.0)
+    progress.assert_called_once_with(
+        message_id="message",
+        elapsed_seconds=180.0,
+        iteration=3,
+        max_iterations=60,
+    )
 
     with patch("hermes_lark_streaming.patch.on_long_running_progress", return_value=False):
         assert await notify("message", 3) == "hermes-text"
@@ -853,6 +863,9 @@ class TestApplyRemove:
         assert "on_reasoning_delta(" in content
         assert "# HERMES_LARK_PROGRESS_BEGIN" in content
         assert "on_long_running_progress(" in content
+        assert "_lark_activity = _agent_ref.get_activity_summary()" in content
+        assert "iteration=_lark_activity.get('api_call_count')" in content
+        assert "max_iterations=_lark_activity.get('max_iterations')" in content
         assert "api_mode=getattr(agent, 'api_mode', '')" in content
         assert "on_background_deliver(" in content
         assert "_bg_preview = prompt[:60] + ('...' if len(prompt) > 60 else '')" in content

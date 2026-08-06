@@ -16,14 +16,12 @@ import pytest
 import hermes_lark_streaming.controller as controller_module
 from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
-    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
 from hermes_lark_streaming.patch import on_reasoning_delta
-from hermes_lark_streaming.streaming.progress import ProgressStatus
 from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elements
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
@@ -735,7 +733,7 @@ class TestDispatch:
 
 class TestDoCreateCard:
     @pytest.mark.asyncio
-    async def test_progress_card_starts_with_fixed_working_element(self) -> None:
+    async def test_streaming_card_starts_with_native_loading_element(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl)
         session = _make_session("msg_progress_create")
@@ -744,80 +742,113 @@ class TestDoCreateCard:
         await ctrl._do_create_card(session)
 
         card = ctrl._client.cardkit_create.await_args.args[0]
-        progress = next(
-            element
-            for element in card["body"]["elements"]
-            if element.get("element_id") == PROGRESS_ELEMENT_ID
-        )
-        assert progress["content"] == "⏳ Working"
+        loading = card["body"]["elements"][-1]
+        assert loading["element_id"] == _LOADING_ELEMENT_ID
+        assert loading["content"] == " "
+        assert session.progress.visible is False
         assert session.progress.dirty is False
 
-        elements = card["body"]["elements"]
-        assert elements[-1] is progress
-        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
-
     @pytest.mark.asyncio
-    async def test_card_and_text_modes_use_their_fixed_tail_anchor(self) -> None:
-        for mode, expected_anchor in (
-            ("card", PROGRESS_ELEMENT_ID),
-            ("text", _LOADING_ELEMENT_ID),
-        ):
-            ctrl = _setup_ctrl()
-            ctrl._cfg._raw["streaming"]["progress_mode"] = mode
-            session = CardSession(
-                f"msg_anchor_{mode}",
-                "chat",
-                asyncio.get_running_loop(),
-            )
-            session.state = SessionState.STREAMING
-            session.card_id = f"card_anchor_{mode}"
-            session.card_msg_id = f"card_msg_anchor_{mode}"
-            session.element_count = 1 if mode == "text" else 2
-            session.segment_state.on_answer_delta("answer")
-            ctrl._sessions[session.message_id] = session
-
-            await ctrl._do_flush(session)
-
-            actions = [
-                action
-                for call in ctrl._client.cardkit_batch_update.await_args_list
-                for action in call.args[1]
-                if action.get("action") == "add_elements"
-            ]
-            assert actions[-1]["params"]["target_element_id"] == expected_anchor
-
-    @pytest.mark.asyncio
-    async def test_merged_reasoning_uses_progress_tail_in_card_mode(self) -> None:
+    async def test_card_mode_heartbeat_updates_loading_element_in_place(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl)
-        ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
-        session = CardSession("msg_merged_anchor", "chat", asyncio.get_running_loop())
+        session = CardSession("msg_heartbeat", "chat", asyncio.get_running_loop())
         session.state = SessionState.STREAMING
-        session.card_id = "card_merged_anchor"
-        session.card_msg_id = "card_msg_merged_anchor"
-        session.element_count = 2
-        session.merged_reasoning.append_delta("reasoning")
+        session.card_id = "card_heartbeat"
+        session.card_msg_id = "card_msg_heartbeat"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
 
-        await ctrl._flush_merged_reasoning(session)
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+            iteration=3,
+            max_iterations=60,
+        ) is True
+        await ctrl._do_flush(session)
 
-        action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
-        assert action["params"]["target_element_id"] == PROGRESS_ELEMENT_ID
+        progress_action = next(
+            action
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            if action.get("action") == "partial_update_element"
+        )
+        assert progress_action["params"]["element_id"] == _LOADING_ELEMENT_ID
+        assert progress_action["params"]["partial_element"] == {
+            "content": "Working · 3 min · iteration 3/60",
+            "i18n_content": {"en_us": "Working · 3 min · iteration 3/60", "zh_cn": "运行 · 3 min · iteration 3/60"},
+        }
+
+        pending = CardSession("msg_pending_heartbeat", "chat", asyncio.get_running_loop())
+        pending.state = SessionState.CREATING
+        pending.card_id = "card_pending_heartbeat"
+        ctrl._sessions[pending.message_id] = pending
+        assert ctrl.on_long_running_progress(
+            message_id=pending.message_id,
+            elapsed_seconds=180,
+        ) is False
 
     @pytest.mark.asyncio
-    async def test_split_card_recreates_progress_as_the_trailing_anchor(self) -> None:
+    async def test_heartbeat_updates_only_the_mapped_active_card(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        first = CardSession("msg_heartbeat_one", "chat", asyncio.get_running_loop())
+        first.state = SessionState.STREAMING
+        first.card_id = "card_heartbeat_one"
+        second = CardSession("msg_heartbeat_two", "chat", asyncio.get_running_loop())
+        second.state = SessionState.STREAMING
+        second.card_id = "card_heartbeat_two"
+        ctrl._sessions[first.message_id] = first
+        ctrl._sessions[second.message_id] = second
+
+        assert ctrl.on_long_running_progress(
+            message_id=first.message_id,
+            elapsed_seconds=180,
+        ) is True
+        await ctrl._do_flush(first)
+
+        assert ctrl._client.cardkit_batch_update.await_args.args[0] == first.card_id
+        assert second.progress.visible is False
+
+    @pytest.mark.asyncio
+    async def test_reasoning_tool_answer_do_not_touch_heartbeat_state(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = _make_session("msg_no_lifecycle_progress")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_no_lifecycle_progress"
+        ctrl._sessions[session.message_id] = session
+        initial = session.progress.snapshot()
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+
+        assert session.progress.snapshot() == initial
+        assert session.progress.visible is False
+
+    @pytest.mark.asyncio
+    async def test_split_card_preserves_latest_heartbeat_on_native_loading(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl)
         session = CardSession("msg_progress_split", "chat", asyncio.get_running_loop())
         session.state = SessionState.STREAMING
         session.card_id = "card_progress_old"
         session.card_msg_id = "card_msg_progress_old"
+        session.progress.note_heartbeat(360, iteration=8, max_iterations=60)
 
         assert await ctrl._do_split_card(session, 0, [], set(), {}, []) is True
 
         card = ctrl._client.cardkit_create.await_args.args[0]
-        elements = card["body"]["elements"]
-        assert elements[-1]["element_id"] == PROGRESS_ELEMENT_ID
-        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
+        loading = card["body"]["elements"][-1]
+        assert loading["element_id"] == _LOADING_ELEMENT_ID
+        assert loading["content"] == "Working · 6 min · iteration 8/60"
+        assert loading["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 
     @pytest.mark.asyncio
     async def test_cardkit_success(self) -> None:
@@ -831,113 +862,6 @@ class TestDoCreateCard:
         assert session.card_id == "card_id_abc"
         assert session.state == SessionState.STREAMING
 
-    def test_thinking_tool_answering_uses_real_callbacks(self) -> None:
-        ctrl = _setup_ctrl()
-        _configure_progress(ctrl, show_tool_use=False)
-        session = _make_session("msg_progress_lifecycle")
-        session.state = SessionState.STREAMING
-        session.card_id = "card_progress_lifecycle"
-        ctrl._sessions[session.message_id] = session
-
-        with patch.object(ctrl, "_schedule_flush"):
-            assert ctrl.on_reasoning(
-                message_id=session.message_id,
-                text="plan",
-                api_mode="codex_responses",
-            ) is True
-            assert session.progress.status == ProgressStatus.THINKING
-
-            assert ctrl.on_tool_update(
-                message_id=session.message_id,
-                tool_name="read",
-                status="started",
-            ) is True
-            assert session.progress.status == ProgressStatus.USING_TOOL
-
-            assert ctrl.on_tool_update(
-                message_id=session.message_id,
-                tool_name="read",
-                status="completed",
-            ) is True
-            assert session.progress.status == ProgressStatus.WORKING
-
-            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
-            assert session.progress.status == ProgressStatus.ANSWERING
-
-        assert len(session.tool_use.build_display_steps()) == 1
-
-    @pytest.mark.asyncio
-    async def test_hidden_tool_details_still_record_events_and_update_status(self) -> None:
-        ctrl = _setup_ctrl()
-        _configure_progress(ctrl, show_tool_use=False)
-        session = CardSession("msg_hidden_tools_progress", "chat", asyncio.get_running_loop())
-        session.state = SessionState.STREAMING
-        session.card_id = "card_hidden_tools_progress"
-        session.card_msg_id = "card_msg_hidden_tools_progress"
-        session.element_count = 2
-        ctrl._sessions[session.message_id] = session
-
-        assert ctrl.on_tool_update(
-            message_id=session.message_id,
-            tool_name="read",
-            status="started",
-        ) is True
-        await ctrl._do_flush(session)
-
-        assert session.progress.status == ProgressStatus.USING_TOOL
-        assert len(session.tool_use.build_display_steps()) == 1
-        added_elements = [
-            element
-            for call in ctrl._client.cardkit_batch_update.await_args_list
-            for action in call.args[1]
-            for element in action.get("params", {}).get("elements", [])
-        ]
-        assert not any(str(element.get("element_id", "")).startswith("tools_") for element in added_elements)
-        progress_action = next(
-            action
-            for call in ctrl._client.cardkit_batch_update.await_args_list
-            for action in call.args[1]
-            if action.get("params", {}).get("element_id") == PROGRESS_ELEMENT_ID
-        )
-        partial = progress_action["params"]["partial_element"]
-        assert partial["content"] == "🛠️ Using tool"
-        assert partial["i18n_content"]["zh_cn"] == "🛠️ 调用工具"
-
-    @pytest.mark.asyncio
-    async def test_heartbeat_is_owned_only_by_ready_progress_card(self) -> None:
-        ctrl = _setup_ctrl()
-        _configure_progress(ctrl)
-        session = CardSession("msg_heartbeat", "chat", asyncio.get_running_loop())
-        session.state = SessionState.STREAMING
-        session.card_id = "card_heartbeat"
-        session.card_msg_id = "card_msg_heartbeat"
-        session.element_count = 2
-        ctrl._sessions[session.message_id] = session
-
-        assert ctrl.on_long_running_progress(
-            message_id=session.message_id,
-            elapsed_seconds=180,
-        ) is True
-        await ctrl._do_flush(session)
-
-        progress_action = next(
-            action
-            for call in ctrl._client.cardkit_batch_update.await_args_list
-            for action in call.args[1]
-            if action.get("params", {}).get("element_id") == PROGRESS_ELEMENT_ID
-        )
-        partial = progress_action["params"]["partial_element"]
-        assert partial["content"] == "⏳ Working · 3 min"
-        assert partial["i18n_content"]["zh_cn"] == "⏳ 处理中 · 3 分钟"
-
-        pending = CardSession("msg_pending_heartbeat", "chat", asyncio.get_running_loop())
-        pending.state = SessionState.CREATING
-        ctrl._sessions[pending.message_id] = pending
-        assert ctrl.on_long_running_progress(
-            message_id=pending.message_id,
-            elapsed_seconds=180,
-        ) is False
-
     @pytest.mark.asyncio
     async def test_progress_update_failure_restores_future_heartbeat_fallback(self) -> None:
         ctrl = _setup_ctrl()
@@ -946,9 +870,13 @@ class TestDoCreateCard:
         session.state = SessionState.STREAMING
         session.card_id = "card_progress_failure"
         session.card_msg_id = "card_msg_progress_failure"
-        session.progress.on_thinking()
         ctrl._sessions[session.message_id] = session
         ctrl._client.cardkit_batch_update = AsyncMock(side_effect=RuntimeError("update failed"))
+
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+        ) is True
 
         await ctrl._flush_progress(session)
 
@@ -963,7 +891,6 @@ class TestDoCreateCard:
         _configure_progress(ctrl)
 
         failed = _make_session("msg_progress_failed")
-        failed.progress.on_tool_event("read", "started")
         failed.mark_failed()
         assert failed.progress.visible is False
 
@@ -1019,7 +946,11 @@ class TestDoCreateCard:
         assert session.progress.visible is False
 
         complete_card = ctrl._client.cardkit_update.await_args.args[1]
-        assert PROGRESS_ELEMENT_ID not in str(complete_card)
+        assert complete_card["body"]["elements"]
+        assert not any(
+            element.get("element_id") == _LOADING_ELEMENT_ID
+            for element in complete_card["body"]["elements"]
+        )
         body_text = "\n".join(
             element.get("content", "")
             for element in complete_card["body"]["elements"]

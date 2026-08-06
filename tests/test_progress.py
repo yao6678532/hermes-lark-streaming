@@ -1,78 +1,73 @@
-"""ProgressState tests for lifecycle-only streaming-card status."""
+"""ProgressState tests for Hermes long-running heartbeat presentation."""
 
 from __future__ import annotations
 
-from hermes_lark_streaming.streaming.progress import ProgressState, ProgressStatus
+from hermes_lark_streaming.streaming.progress import ProgressState
 
 
-def test_initial_working_state() -> None:
+def test_initial_state_is_hidden_and_clean() -> None:
     state = ProgressState()
 
-    assert state.status == ProgressStatus.WORKING
-    assert state.visible is True
-    assert state.dirty is True
-    assert state.snapshot().content == "⏳ Working"
-
-
-def test_thinking_tool_answering_transitions() -> None:
-    state = ProgressState()
-
-    state.on_thinking()
-    assert state.status == ProgressStatus.THINKING
-    state.on_tool_event("read", "started")
-    assert state.status == ProgressStatus.USING_TOOL
-    state.on_tool_event("read", "completed")
-    assert state.status == ProgressStatus.WORKING
-    state.on_answering()
-    assert state.status == ProgressStatus.ANSWERING
-
-
-def test_multiple_tool_events_do_not_clear_using_tool_early() -> None:
-    state = ProgressState()
-
-    state.on_tool_event("read", "started")
-    state.on_tool_event("search", "started")
-    state.on_tool_event("read", "completed")
-    assert state.status == ProgressStatus.USING_TOOL
-    state.on_tool_event("search", "completed")
-    assert state.status == ProgressStatus.WORKING
-
-    state.on_tool_event("read", "started")
-    state.on_tool_event("read", "started")
-    state.on_tool_event("read", "completed")
-    assert state.status == ProgressStatus.USING_TOOL
-    state.on_tool_event("read", "failed")
-    assert state.status == ProgressStatus.WORKING
-
-
-def test_real_heartbeat_adds_elapsed_without_inventing_percentage() -> None:
-    state = ProgressState()
-    state.on_thinking()
-    state.note_heartbeat(180)
-
-    content = state.snapshot().content
-    assert content == "💭 Thinking · 3 min"
-    assert "%" not in content
-
-
-def test_terminal_clear_hides_status() -> None:
-    state = ProgressState()
-    state.on_tool_event("read", "started")
-
-    state.clear()
-
-    assert state.status is None
     assert state.visible is False
     assert state.dirty is False
     assert state.snapshot().content == " "
 
 
-def test_disabled_element_stops_dirty_updates_until_recreated() -> None:
+def test_heartbeat_adds_elapsed_and_iteration() -> None:
     state = ProgressState()
+
+    state.note_heartbeat(180, iteration=3, max_iterations=60)
+
     snapshot = state.snapshot()
+    assert snapshot.visible is True
+    assert snapshot.content == "Working · 3 min · iteration 3/60"
+    assert snapshot.zh_content == "运行 · 3 min · iteration 3/60"
+    assert "%" not in snapshot.content
+
+
+def test_heartbeat_without_structured_iteration_keeps_text_simple() -> None:
+    state = ProgressState()
+
+    state.note_heartbeat(180)
+
+    assert state.snapshot().content == "Working · 3 min"
+    assert state.snapshot().zh_content == "运行 · 3 min"
+
+
+def test_repeated_heartbeat_latest_snapshot_wins() -> None:
+    state = ProgressState()
+    state.note_heartbeat(180, iteration=3, max_iterations=60)
+    first_revision = state.snapshot().revision
+
+    state.note_heartbeat(360, iteration=8, max_iterations=60)
+
+    snapshot = state.snapshot()
+    assert snapshot.revision > first_revision
+    assert snapshot.content == "Working · 6 min · iteration 8/60"
+
+
+def test_terminal_clear_hides_heartbeat() -> None:
+    state = ProgressState()
+    state.note_heartbeat(180, iteration=3, max_iterations=60)
+
+    state.clear()
+
+    assert state.visible is False
+    assert state.dirty is False
+    assert state.snapshot().content == " "
+
+
+def test_disabled_element_stops_claiming_heartbeats_until_rendered() -> None:
+    state = ProgressState()
+    state.note_heartbeat(180)
+    snapshot = state.snapshot()
+    state.mark_rendered(snapshot.revision)
     state.disable()
 
     assert state.available is False
     assert state.dirty is False
-    state.mark_rendered(snapshot.revision)
+    state.note_heartbeat(360)
+    assert state.dirty is False
+
+    state.mark_rendered(state.snapshot().revision)
     assert state.available is True

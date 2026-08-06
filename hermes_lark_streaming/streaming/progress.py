@@ -1,89 +1,85 @@
-"""Lifecycle-driven presentation state for the streaming-card status line."""
+"""Hermes long-running heartbeat state for the streaming-card loader."""
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import dataclass
-from enum import StrEnum
-
-
-class ProgressStatus(StrEnum):
-    """Small, verifiable set of states exposed by Hermes lifecycle events."""
-
-    WORKING = "working"
-    THINKING = "thinking"
-    USING_TOOL = "using_tool"
-    ANSWERING = "answering"
-
-
-_STATUS_LABELS: dict[ProgressStatus, tuple[str, str]] = {
-    ProgressStatus.WORKING: ("⏳ Working", "⏳ 处理中"),
-    ProgressStatus.THINKING: ("💭 Thinking", "💭 思考中"),
-    ProgressStatus.USING_TOOL: ("🛠️ Using tool", "🛠️ 调用工具"),
-    ProgressStatus.ANSWERING: ("✍️ Answering", "✍️ 回答中"),
-}
 
 
 @dataclass(frozen=True, slots=True)
 class ProgressSnapshot:
-    """Immutable render snapshot used to avoid clearing concurrent updates."""
+    """Immutable heartbeat snapshot used by the revision-safe flush path."""
 
-    status: ProgressStatus | None
     elapsed_seconds: float
+    iteration: int | None
+    max_iterations: int | None
     revision: int
-
-    @property
-    def visible(self) -> bool:
-        return self.status is not None
+    visible: bool
 
     @property
     def content(self) -> str:
-        return _format_progress(self.status, self.elapsed_seconds, locale="en")
+        return _format_progress(
+            self.elapsed_seconds,
+            self.iteration,
+            self.max_iterations,
+            locale="en",
+            visible=self.visible,
+        )
 
     @property
     def zh_content(self) -> str:
-        return _format_progress(self.status, self.elapsed_seconds, locale="zh")
+        return _format_progress(
+            self.elapsed_seconds,
+            self.iteration,
+            self.max_iterations,
+            locale="zh",
+            visible=self.visible,
+        )
 
 
 def _format_progress(
-    status: ProgressStatus | None,
     elapsed_seconds: float,
+    iteration: int | None,
+    max_iterations: int | None,
     *,
     locale: str,
+    visible: bool,
 ) -> str:
-    if status is None:
+    if not visible:
         return " "
-    label = _STATUS_LABELS[status][1 if locale == "zh" else 0]
-    if elapsed_seconds < 60:
-        return label
-    minutes = max(1, int(elapsed_seconds // 60))
-    suffix = f"{minutes} 分钟" if locale == "zh" else f"{minutes} min"
-    return f"{label} · {suffix}"
+    label = "Working" if locale == "en" else ("运行" if elapsed_seconds >= 60 else "运行中")
+    parts = [label]
+    if elapsed_seconds >= 60:
+        parts.append(f"{int(elapsed_seconds // 60)} min")
+    if iteration is not None and max_iterations is not None:
+        parts.append(f"iteration {iteration}/{max_iterations}")
+    return " · ".join(parts)
 
 
 class ProgressState:
-    """Session-scoped status derived only from real Hermes lifecycle events."""
+    """Session-scoped state driven only by Hermes long-running heartbeats."""
 
     __slots__ = (
-        "_active_tools",
         "_available",
+        "_has_heartbeat",
         "_rendered_revision",
         "_revision",
         "elapsed_seconds",
-        "status",
+        "iteration",
+        "max_iterations",
     )
 
     def __init__(self) -> None:
-        self.status: ProgressStatus | None = ProgressStatus.WORKING
         self.elapsed_seconds = 0.0
-        self._active_tools: Counter[str] = Counter()
+        self.iteration: int | None = None
+        self.max_iterations: int | None = None
         self._available = True
-        self._revision = 1
+        self._has_heartbeat = False
+        self._revision = 0
         self._rendered_revision = 0
 
     @property
     def visible(self) -> bool:
-        return self.status is not None
+        return self._has_heartbeat
 
     @property
     def available(self) -> bool:
@@ -94,57 +90,59 @@ class ProgressState:
         return self.visible and self.available and self._rendered_revision != self._revision
 
     def snapshot(self) -> ProgressSnapshot:
-        return ProgressSnapshot(self.status, self.elapsed_seconds, self._revision)
+        return ProgressSnapshot(
+            elapsed_seconds=self.elapsed_seconds,
+            iteration=self.iteration,
+            max_iterations=self.max_iterations,
+            revision=self._revision,
+            visible=self.visible,
+        )
 
     def mark_rendered(self, revision: int) -> None:
         self._available = True
         self._rendered_revision = max(self._rendered_revision, revision)
 
     def disable(self) -> None:
-        """Stop claiming heartbeats after the fixed element cannot be updated."""
+        """Stop claiming future heartbeats after a CardKit update fails."""
         self._available = False
 
-    def set_status(self, status: ProgressStatus) -> None:
-        if self.status == status:
-            return
-        self.status = status
-        self._revision += 1
-
-    def on_thinking(self) -> None:
-        self._active_tools.clear()
-        self.set_status(ProgressStatus.THINKING)
-
-    def on_answering(self) -> None:
-        self._active_tools.clear()
-        self.set_status(ProgressStatus.ANSWERING)
-
-    def on_tool_event(self, tool_name: str, status: str) -> None:
-        normalized = str(status or "").strip().lower()
-        key = str(tool_name or "tool").strip() or "tool"
-        if normalized in {"running", "started", "tool.started"}:
-            self._active_tools[key] += 1
-            self.set_status(ProgressStatus.USING_TOOL)
-            return
-
-        if self._active_tools[key] > 1:
-            self._active_tools[key] -= 1
-        else:
-            self._active_tools.pop(key, None)
-        if self._active_tools:
-            self.set_status(ProgressStatus.USING_TOOL)
-        elif self.status == ProgressStatus.USING_TOOL:
-            self.set_status(ProgressStatus.WORKING)
-
-    def note_heartbeat(self, elapsed_seconds: float) -> None:
+    def note_heartbeat(
+        self,
+        elapsed_seconds: float,
+        *,
+        iteration: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
         elapsed = max(0.0, float(elapsed_seconds))
-        if elapsed <= self.elapsed_seconds:
-            return
+        normalized_iteration = _normalize_int(iteration)
+        normalized_max_iterations = _normalize_int(max_iterations)
+        changed = (
+            not self._has_heartbeat
+            or elapsed != self.elapsed_seconds
+            or normalized_iteration != self.iteration
+            or normalized_max_iterations != self.max_iterations
+        )
         self.elapsed_seconds = elapsed
-        self._revision += 1
+        self.iteration = normalized_iteration
+        self.max_iterations = normalized_max_iterations
+        if changed:
+            self._has_heartbeat = True
+            self._revision += 1
 
     def clear(self) -> None:
-        self._active_tools.clear()
+        if not self._has_heartbeat:
+            return
+        self._has_heartbeat = False
         self.elapsed_seconds = 0.0
-        if self.status is not None:
-            self.status = None
-            self._revision += 1
+        self.iteration = None
+        self.max_iterations = None
+        self._revision += 1
+
+
+def _normalize_int(value: int | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
