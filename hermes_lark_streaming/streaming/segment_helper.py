@@ -90,6 +90,7 @@ def find_tool_split_offset(
 
 def build_add_segment_action(
     seg: Segment, all_steps: list[ToolDisplayStep], *, text_size: str = "normal_v2",
+    tail_anchor: str = _LOADING_ELEMENT_ID,
 ) -> dict[str, Any]:
     """构造新增 segment 元素的 batch action."""
     if seg.type == SegmentType.REASONING:
@@ -113,19 +114,21 @@ def build_add_segment_action(
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": tail_anchor,
             "elements": [element],
         },
     }
 
 
-def build_add_merged_reasoning_action() -> dict[str, Any]:
+def build_add_merged_reasoning_action(
+    *, tail_anchor: str = _LOADING_ELEMENT_ID,
+) -> dict[str, Any]:
     """Create the one fixed reasoning panel used by merged presentation mode."""
     return {
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": tail_anchor,
             "elements": [
                 _build_reasoning_panel(
                     " ",

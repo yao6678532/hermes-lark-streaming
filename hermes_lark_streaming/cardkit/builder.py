@@ -451,11 +451,8 @@ def build_streaming_card_v2(
     width_mode: str = "default",
     progress_snapshot: ProgressSnapshot | None = None,
 ) -> dict[str, Any]:
-    """CardKit 2.0 流式占位卡片 — 含工具面板 + streaming + loading 元素."""
+    """CardKit 2.0 流式占位卡片 — 内容后保留固定尾部 anchor."""
     elements: list[dict] = []
-
-    if progress_snapshot is not None and progress_snapshot.visible:
-        elements.append(_progress_element(progress_snapshot))
 
     if show_reasoning:
         elements.append(
@@ -470,7 +467,10 @@ def build_streaming_card_v2(
 
     if show_streaming_element:
         elements.append(_streaming_element(text_size=text_size))
-    elements.append(_loading_element())
+    if progress_snapshot is not None and progress_snapshot.visible:
+        elements.append(_progress_element(progress_snapshot))
+    else:
+        elements.append(_loading_element())
 
     card = {
         "schema": "2.0",

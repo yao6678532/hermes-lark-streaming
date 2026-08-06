@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from hermes_lark_streaming.cardkit.builder import _LOADING_ELEMENT_ID, PROGRESS_ELEMENT_ID
 from hermes_lark_streaming.streaming.segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
+    build_add_merged_reasoning_action,
+    build_add_segment_action,
     estimate_segment_elements,
     estimate_tool_elements,
     find_tool_split_offset,
@@ -78,3 +81,32 @@ def test_find_tool_split_offset_returns_none_for_single_step() -> None:
     seg = Segment(SegmentType.TOOL, "tool")
 
     assert find_tool_split_offset(base_count=1, seg=seg, all_steps=[_step()]) is None
+
+
+def test_segment_actions_accept_card_progress_tail_anchor() -> None:
+    steps = [_step()]
+    cases = [
+        Segment(SegmentType.REASONING, "reasoning"),
+        Segment(SegmentType.ANSWER, "answer"),
+        Segment(SegmentType.TOOL, "tool"),
+    ]
+
+    for seg in cases:
+        action = build_add_segment_action(seg, steps, tail_anchor=PROGRESS_ELEMENT_ID)
+        assert action["params"]["target_element_id"] == PROGRESS_ELEMENT_ID
+
+
+def test_segment_actions_default_to_text_loading_anchor() -> None:
+    seg = Segment(SegmentType.ANSWER, "answer")
+
+    action = build_add_segment_action(seg, [])
+
+    assert action["params"]["target_element_id"] == _LOADING_ELEMENT_ID
+
+
+def test_merged_reasoning_accepts_the_same_tail_anchor() -> None:
+    card_action = build_add_merged_reasoning_action(tail_anchor=PROGRESS_ELEMENT_ID)
+    text_action = build_add_merged_reasoning_action()
+
+    assert card_action["params"]["target_element_id"] == PROGRESS_ELEMENT_ID
+    assert text_action["params"]["target_element_id"] == _LOADING_ELEMENT_ID

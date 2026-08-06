@@ -15,6 +15,7 @@ import pytest
 
 import hermes_lark_streaming.controller as controller_module
 from hermes_lark_streaming.cardkit.builder import (
+    _LOADING_ELEMENT_ID,
     PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
@@ -750,6 +751,73 @@ class TestDoCreateCard:
         )
         assert progress["content"] == "⏳ Working"
         assert session.progress.dirty is False
+
+        elements = card["body"]["elements"]
+        assert elements[-1] is progress
+        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
+
+    @pytest.mark.asyncio
+    async def test_card_and_text_modes_use_their_fixed_tail_anchor(self) -> None:
+        for mode, expected_anchor in (
+            ("card", PROGRESS_ELEMENT_ID),
+            ("text", _LOADING_ELEMENT_ID),
+        ):
+            ctrl = _setup_ctrl()
+            ctrl._cfg._raw["streaming"]["progress_mode"] = mode
+            session = CardSession(
+                f"msg_anchor_{mode}",
+                "chat",
+                asyncio.get_running_loop(),
+            )
+            session.state = SessionState.STREAMING
+            session.card_id = f"card_anchor_{mode}"
+            session.card_msg_id = f"card_msg_anchor_{mode}"
+            session.element_count = 1 if mode == "text" else 2
+            session.segment_state.on_answer_delta("answer")
+            ctrl._sessions[session.message_id] = session
+
+            await ctrl._do_flush(session)
+
+            actions = [
+                action
+                for call in ctrl._client.cardkit_batch_update.await_args_list
+                for action in call.args[1]
+                if action.get("action") == "add_elements"
+            ]
+            assert actions[-1]["params"]["target_element_id"] == expected_anchor
+
+    @pytest.mark.asyncio
+    async def test_merged_reasoning_uses_progress_tail_in_card_mode(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
+        session = CardSession("msg_merged_anchor", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_merged_anchor"
+        session.card_msg_id = "card_msg_merged_anchor"
+        session.element_count = 2
+        session.merged_reasoning.append_delta("reasoning")
+
+        await ctrl._flush_merged_reasoning(session)
+
+        action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
+        assert action["params"]["target_element_id"] == PROGRESS_ELEMENT_ID
+
+    @pytest.mark.asyncio
+    async def test_split_card_recreates_progress_as_the_trailing_anchor(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_progress_split", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_progress_old"
+        session.card_msg_id = "card_msg_progress_old"
+
+        assert await ctrl._do_split_card(session, 0, [], set(), {}, []) is True
+
+        card = ctrl._client.cardkit_create.await_args.args[0]
+        elements = card["body"]["elements"]
+        assert elements[-1]["element_id"] == PROGRESS_ELEMENT_ID
+        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
 
     @pytest.mark.asyncio
     async def test_cardkit_success(self) -> None:

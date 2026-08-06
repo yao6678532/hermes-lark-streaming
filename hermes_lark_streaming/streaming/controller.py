@@ -8,6 +8,8 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
 from ..cardkit.builder import (
+    _LOADING_ELEMENT_ID,
+    PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     build_background_card,
@@ -91,6 +93,12 @@ class StreamingController:
         if session.guard.should_skip("_schedule_flush"):
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
+
+    def _streaming_tail_anchor(self) -> str:
+        """Return the fixed trailing element for the configured presentation."""
+        if self._cfg.progress_mode == "card":
+            return PROGRESS_ELEMENT_ID
+        return _LOADING_ELEMENT_ID
 
     async def _flush_progress(self, session: CardSession) -> None:
         """Update the fixed status element while preserving concurrent events."""
@@ -195,7 +203,11 @@ class StreamingController:
             try:
                 await self._client.cardkit_batch_update(
                     session.card_id,
-                    [build_add_merged_reasoning_action()],
+                    [
+                        build_add_merged_reasoning_action(
+                            tail_anchor=self._streaming_tail_anchor(),
+                        )
+                    ],
                     sequence=session.sequence,
                 )
             except FeishuAPIError as error:
@@ -441,7 +453,14 @@ class StreamingController:
                 new_el_ids.add(seg.el_id)
                 new_el_estimates[seg.el_id] = estimated
                 new_el_total += estimated
-                actions.append(build_add_segment_action(seg, all_steps, text_size=self._cfg.body_text_size))
+                actions.append(
+                    build_add_segment_action(
+                        seg,
+                        all_steps,
+                        text_size=self._cfg.body_text_size,
+                        tail_anchor=self._streaming_tail_anchor(),
+                    )
+                )
                 if (
                     seg.type == SegmentType.TOOL
                     and i + 1 < len(segments)

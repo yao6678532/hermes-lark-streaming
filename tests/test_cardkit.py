@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
+    _LOADING_ELEMENT_ID,
     PROGRESS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
@@ -548,14 +549,22 @@ class TestBuildStreamingCardV2:
 
     def test_fixed_progress_element_starts_working(self) -> None:
         card = build_streaming_card_v2(progress_snapshot=ProgressState().snapshot())
+        elements = card["body"]["elements"]
         progress = next(
-            element
-            for element in card["body"]["elements"]
+            element for element in elements
             if element.get("element_id") == PROGRESS_ELEMENT_ID
         )
 
         assert progress["content"] == "⏳ Working"
         assert progress["i18n_content"]["zh_cn"] == "⏳ 处理中"
+        assert elements[-1] is progress
+        assert not any(element.get("element_id") == _LOADING_ELEMENT_ID for element in elements)
+
+    def test_text_mode_keeps_loading_anchor(self) -> None:
+        elements = build_streaming_card_v2()["body"]["elements"]
+
+        assert elements[-1]["element_id"] == _LOADING_ELEMENT_ID
+        assert not any(element.get("element_id") == PROGRESS_ELEMENT_ID for element in elements)
 
     def test_no_tool_use(self) -> None:
         card = build_streaming_card_v2(show_tool_use=False)
