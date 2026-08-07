@@ -46,12 +46,21 @@ def _format_progress(
 ) -> str:
     if not visible:
         return " "
-    label = "Working" if locale == "en" else ("运行" if elapsed_seconds >= 60 else "运行中")
+    label = "Working" if locale == "en" else "运行中"
     parts = [label]
     if elapsed_seconds >= 60:
-        parts.append(f"{int(elapsed_seconds // 60)} min")
-    if iteration is not None and max_iterations is not None:
-        parts.append(f"iteration {iteration}/{max_iterations}")
+        minutes = int(elapsed_seconds // 60)
+        parts.append(
+            f"{minutes} min"
+            if locale == "en"
+            else f"{minutes} 分钟"
+        )
+    if iteration is not None:
+        parts.append(
+            f"Round {iteration}"
+            if locale == "en"
+            else f"第 {iteration} 轮"
+        )
     return " · ".join(parts)
 
 

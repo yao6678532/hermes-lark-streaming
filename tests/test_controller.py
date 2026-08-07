@@ -774,10 +774,14 @@ class TestDoCreateCard:
             if action.get("action") == "partial_update_element"
         )
         assert progress_action["params"]["element_id"] == _LOADING_ELEMENT_ID
-        assert progress_action["params"]["partial_element"] == {
-            "content": "Working · 3 min · iteration 3/60",
-            "i18n_content": {"en_us": "Working · 3 min · iteration 3/60", "zh_cn": "运行 · 3 min · iteration 3/60"},
-        }
+        assert progress_action["params"]["partial_element"] == 
+        {
+        "content": "Working · 3 min · Round 3",
+        "i18n_content": {
+            "en_us": "Working · 3 min · Round 3",
+            "zh_cn": "运行中 · 3 分钟 · 第 3 轮",
+          },
+        },
 
         pending = CardSession("msg_pending_heartbeat", "chat", asyncio.get_running_loop())
         pending.state = SessionState.CREATING
@@ -847,7 +851,7 @@ class TestDoCreateCard:
         card = ctrl._client.cardkit_create.await_args.args[0]
         loading = card["body"]["elements"][-1]
         assert loading["element_id"] == _LOADING_ELEMENT_ID
-        assert loading["content"] == "Working · 6 min · iteration 8/60"
+        assert loading["content"] == "Working · 6 min · Round 8"
         assert loading["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 
     @pytest.mark.asyncio
