@@ -74,14 +74,18 @@ streaming:
   enabled: true
 ```
 
+完整配置说明、默认值、Profile 作用域以及各参数对应功能见 [CONFIGURATION.md](CONFIGURATION.md)。README 只保留安装所需的最小示例；配置行为以插件代码为准。
+
 ### 凭据
 
-凭据按以下顺序解析：
+常用凭据来源：
 
-| 优先级 | 来源 | 变量 |
-|--------|------|------|
-| 1 | 环境变量 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（或 `LARK_APP_ID` / `LARK_APP_SECRET`） |
-| 2 | 配置文件 | `~/.hermes/config.yaml` 中的 `feishu` 或 `lark` 区段 |
+| 来源 | 变量 |
+|------|------|
+| 环境变量 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（或 `LARK_APP_ID` / `LARK_APP_SECRET`） |
+| 配置文件 | `~/.hermes/config.yaml` 中的 `feishu` 或 `lark` 区段 |
+
+完整的凭据解析顺序及 Hermes platform 兼容路径见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ```env
 FEISHU_APP_ID=cli_xxxxx
@@ -90,53 +94,31 @@ FEISHU_APP_SECRET=xxxxx
 
 ### 卡片样式
 
-通过以下配置项自定义流式卡片和完成态卡片的外观：
+如需调整卡片外观，可从以下最小示例开始：
 
 ```yaml
 streaming:
   enabled: true
-  progress_mode: text  # text 保留 Hermes 独立状态消息；card 在流式卡片内更新状态
-  width_mode: default   # 卡片宽度模式：default / compact / fill，默认 default
+  progress_mode: text
+  width_mode: default
   header:
-    enabled: true      # 卡片 header，默认 false
+    enabled: false
   body:
-    text_size: normal_v2  # 回答正文文字大小，默认 normal_v2
+    text_size: normal_v2
   footer:
-    enabled: true         # 卡片 footer，默认 true
-    text_size: notation   # Footer 文字大小，默认 notation
+    enabled: true
+    text_size: notation
     fields:
       - [status, elapsed, context, model]
     show_label: false
-  panel_expanded: false   # 完成态面板保持展开，默认 false
+  panel_expanded: false
 display:
   platforms:
     feishu:
-      show_tool_use: true   # 展示流式和完成态卡片中的工具调用面板，默认 true
+      show_tool_use: true
 ```
 
-**Header**（`streaming.header.enabled`）：控制卡片是否显示顶部状态栏。开启后根据状态自动着色 — 流式中蓝色、完成绿色、中断/错误红色。默认关闭。
-
-**Footer**（`streaming.footer.enabled`）：控制完成态卡片是否显示底部元数据栏。默认开启。
-
-**文字大小**（`body.text_size` / `footer.text_size`）：有效值包括 `heading`、`normal`、`normal_v2`、`notation` 等。详见[飞书文档](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/plain-text)。
-
-**Footer 字段**（`footer.fields`）：二维数组，每个子数组为一行，字段间用 `·` 连接。
-
-| 字段 | 说明 | 有标签 | 无标签 |
-|------|------|--------|--------|
-| `status` | 完成状态 | `✅ Completed` | `✅ Completed` |
-| `elapsed` | 耗时 | `Elapsed 12.3s` | `12.3s` |
-| `model` | 模型名称 | `deepseek-v4-flash` | `deepseek-v4-flash` |
-| `tokens` | Token 用量 | `↑ 1.2K ↓ 500` | `↑ 1.2K ↓ 500` |
-| `context` | 上下文窗口用量 | `Context 50K/200K (25%)` | `50K/200K (25%)` |
-
-**显示标签**（`footer.show_label`）：是否展示字段标签（如 "Elapsed"、"Context"）。默认：`false`。
-
-**面板展开**（`panel_expanded`）：完成态卡片中推理面板和工具面板默认折叠，设为 `true` 保持展开。
-
-**卡片宽度**（`streaming.width_mode`）：控制卡片宽度模式，可选 `default`、`compact`、`fill`。默认：`default`。
-
-**工具调用面板**（`display.platforms.feishu.show_tool_use`）：控制是否展示工具调用面板。平台级配置优先于全局 `display.show_tool_use`，默认：`true`。该配置会在运行时重新读取。
+详细的默认值、fallback、Profile 作用域、凭据来源、热加载边界以及 `footer.fields` 支持字段见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ---
 

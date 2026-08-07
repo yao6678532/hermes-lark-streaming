@@ -74,14 +74,18 @@ streaming:
   enabled: true
 ```
 
+See [CONFIGURATION.md](CONFIGURATION.md) for the complete configuration reference, defaults, profile scope, and the function controlled by each parameter.
+
 ### Credentials
 
-Credentials are resolved in the following order:
+Common credential sources:
 
-| Priority | Source | Variables |
-|----------|--------|-----------|
-| 1 | Environment | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` (or `LARK_APP_ID` / `LARK_APP_SECRET`) |
-| 2 | Config file | `feishu` or `lark` section in `~/.hermes/config.yaml` |
+| Source | Variables |
+|--------|-----------|
+| Environment | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` (or `LARK_APP_ID` / `LARK_APP_SECRET`) |
+| Config file | `feishu` or `lark` section in `~/.hermes/config.yaml` |
+
+See [CONFIGURATION.md](CONFIGURATION.md) for the complete credential resolution order and Hermes platform-compatible paths.
 
 ```env
 FEISHU_APP_ID=cli_xxxxx
@@ -90,53 +94,31 @@ FEISHU_APP_SECRET=xxxxx
 
 ### Card Style
 
-Customize the appearance of streaming and completion cards with the following options:
+For a quick starting point, use this minimal example:
 
 ```yaml
 streaming:
   enabled: true
-  progress_mode: text  # text keeps Hermes status messages; card updates status in the streaming card
-  width_mode: default   # Card width mode: default / compact / fill, default default
+  progress_mode: text
+  width_mode: default
   header:
-    enabled: true      # Card header, default false
+    enabled: false
   body:
-    text_size: normal_v2  # Answer body text size, default normal_v2
+    text_size: normal_v2
   footer:
-    enabled: true         # Card footer, default true
-    text_size: notation   # Footer text size, default notation
+    enabled: true
+    text_size: notation
     fields:
       - [status, elapsed, context, model]
     show_label: false
-  panel_expanded: false   # Keep completion panels expanded, default false
+  panel_expanded: false
 display:
   platforms:
     feishu:
-      show_tool_use: true   # Show tool-use panels in streaming and completion cards; default true
+      show_tool_use: true
 ```
 
-**Header** (`streaming.header.enabled`): Controls whether the card displays a status header bar. When enabled, the header auto-themes by state — blue for streaming, green for completed, red for stopped/error. Default: disabled.
-
-**Footer** (`streaming.footer.enabled`): Controls whether the completion card displays a footer metadata bar. Default: enabled.
-
-**Text Size** (`body.text_size` / `footer.text_size`): Valid values include `heading`, `normal`, `normal_v2`, `notation`, etc. See [Feishu docs](https://open.feishu.cn/document/feishu-cards/card-json-v2-components/content-components/plain-text?lang=en-US).
-
-**Footer Fields** (`footer.fields`): A 2D array where each sub-array is one line, fields joined by `·`.
-
-| Field | Description | With Label | Without Label |
-|-------|-------------|------------|---------------|
-| `status` | Completion status | `✅ Completed` | `✅ Completed` |
-| `elapsed` | Time elapsed | `Elapsed 12.3s` | `12.3s` |
-| `model` | Model name | `deepseek-v4-flash` | `deepseek-v4-flash` |
-| `tokens` | Token usage | `↑ 1.2K ↓ 500` | `↑ 1.2K ↓ 500` |
-| `context` | Context window usage | `Context 50K/200K (25%)` | `50K/200K (25%)` |
-
-**Show Label** (`footer.show_label`): Whether to display field labels like "Elapsed", "Context". Default: `false`.
-
-**Panel Expand** (`panel_expanded`): Reasoning and tool panels are collapsed by default in completion cards. Set to `true` to keep them expanded.
-
-**Card Width** (`streaming.width_mode`): Controls card width mode. Allowed values: `default`, `compact`, `fill`. Default: `default`.
-
-**Tool-Use Panel** (`display.platforms.feishu.show_tool_use`): Controls whether tool-use panels are displayed. The platform-specific setting takes precedence over global `display.show_tool_use`. Default: `true`. This setting is reloaded at runtime.
+See [CONFIGURATION.md](CONFIGURATION.md) for defaults, fallback behavior, profile scope, credentials, hot-reload boundaries, and supported footer fields.
 
 ---
 
