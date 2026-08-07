@@ -927,6 +927,32 @@ class TestApplyRemove:
         assert upgraded.count(begin) == 1
         assert upgraded.count(end) == 1
 
+    def test_apply_upgrades_stale_progress_hook(self, run_copy: Path) -> None:
+        patcher = _patcher(run_copy)
+        patcher.apply()
+        content = run_copy.read_text(encoding="utf-8")
+        begin, end = next(pair for pair in MARKERS if "PROGRESS" in pair[0])
+        block_start = content.index(begin)
+        block_end = content.index(end, block_start) + len(end)
+        block = content[block_start:block_end]
+        stale_block = "".join(
+            line
+            for line in block.splitlines(keepends=True)
+            if "iteration=" not in line and "max_iterations=" not in line
+        )
+        run_copy.write_text(
+            content[:block_start] + stale_block + content[block_end:],
+            encoding="utf-8",
+        )
+
+        assert patcher.is_fully_patched() is False
+        patcher.apply()
+        upgraded = run_copy.read_text(encoding="utf-8")
+
+        assert "_lark_activity = _agent_ref.get_activity_summary()" in upgraded
+        assert "iteration=_lark_activity.get('api_call_count')" in upgraded
+        assert "max_iterations=_lark_activity.get('max_iterations')" in upgraded
+
     def test_apply_hard_fails_when_injection_site_missing(self, run_copy: Path) -> None:
         patcher = _patcher(run_copy)
         with (

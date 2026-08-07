@@ -576,7 +576,7 @@ class TestBuildStreamingCardV2:
 
         assert loading["element_id"] == _LOADING_ELEMENT_ID
         assert loading["content"] == "Working · 3 min · Round 3"
-        assert loading["i18n_content"]["zh_cn"] == "运行 · 3 min · 第 3 轮"
+        assert loading["i18n_content"]["zh_cn"] == "运行中 · 3 分钟 · 第 3 轮"
         assert loading["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
         assert not any(element.get("element_id") == "progress_status" for element in elements)
 

@@ -774,14 +774,13 @@ class TestDoCreateCard:
             if action.get("action") == "partial_update_element"
         )
         assert progress_action["params"]["element_id"] == _LOADING_ELEMENT_ID
-        assert progress_action["params"]["partial_element"] == 
-        {
-        "content": "Working · 3 min · Round 3",
-        "i18n_content": {
-            "en_us": "Working · 3 min · Round 3",
-            "zh_cn": "运行中 · 3 分钟 · 第 3 轮",
-          },
-        },
+        assert progress_action["params"]["partial_element"] == {
+            "content": "Working · 3 min · Round 3",
+            "i18n_content": {
+                "en_us": "Working · 3 min · Round 3",
+                "zh_cn": "运行中 · 3 分钟 · 第 3 轮",
+            },
+        }
 
         pending = CardSession("msg_pending_heartbeat", "chat", asyncio.get_running_loop())
         pending.state = SessionState.CREATING

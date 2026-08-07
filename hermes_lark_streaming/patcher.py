@@ -812,14 +812,26 @@ class Patcher:
 
     def is_fully_patched(self) -> bool:
         content = self.run_path.read_text(encoding="utf-8")
-        tree = ast.parse(content)
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return False
         lines = content.splitlines(keepends=True)
         answer_sites = _find_func_bodies(tree, lines, "_stream_delta_cb")
         for begin, end in self.MARKERS:
             expected = len(answer_sites) if begin == MK_ANSWER else 1
             if content.count(begin) != expected or content.count(end) != expected:
                 return False
-        return True
+        # Marker counts only tell us that a patch exists, not that it matches
+        # the current plugin.  Rebuild the injected blocks from the marker-free
+        # target so a newer hook implementation can refresh an older install.
+        try:
+            pristine = content
+            for begin, end in self.MARKERS:
+                pristine = _remove_block_checked(pristine, begin, end)
+            return self._inject_all(pristine) == content
+        except (PatcherError, SyntaxError):
+            return False
 
     def verify_target(self) -> None:
         content = self.run_path.read_text(encoding="utf-8")
