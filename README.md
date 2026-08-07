@@ -78,12 +78,14 @@ streaming:
 
 ### 凭据
 
-凭据按以下顺序解析：
+常用凭据来源：
 
-| 优先级 | 来源 | 变量 |
-|--------|------|------|
-| 1 | 环境变量 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（或 `LARK_APP_ID` / `LARK_APP_SECRET`） |
-| 2 | 配置文件 | `~/.hermes/config.yaml` 中的 `feishu` 或 `lark` 区段 |
+| 来源 | 变量 |
+|------|------|
+| 环境变量 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（或 `LARK_APP_ID` / `LARK_APP_SECRET`） |
+| 配置文件 | `~/.hermes/config.yaml` 中的 `feishu` 或 `lark` 区段 |
+
+完整的凭据解析顺序及 Hermes platform 兼容路径见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ```env
 FEISHU_APP_ID=cli_xxxxx

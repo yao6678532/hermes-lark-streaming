@@ -78,12 +78,14 @@ See [CONFIGURATION.md](CONFIGURATION.md) for the complete configuration referenc
 
 ### Credentials
 
-Credentials are resolved in the following order:
+Common credential sources:
 
-| Priority | Source | Variables |
-|----------|--------|-----------|
-| 1 | Environment | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` (or `LARK_APP_ID` / `LARK_APP_SECRET`) |
-| 2 | Config file | `feishu` or `lark` section in `~/.hermes/config.yaml` |
+| Source | Variables |
+|--------|-----------|
+| Environment | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` (or `LARK_APP_ID` / `LARK_APP_SECRET`) |
+| Config file | `feishu` or `lark` section in `~/.hermes/config.yaml` |
+
+See [CONFIGURATION.md](CONFIGURATION.md) for the complete credential resolution order and Hermes platform-compatible paths.
 
 ```env
 FEISHU_APP_ID=cli_xxxxx

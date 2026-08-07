@@ -57,10 +57,10 @@ display:
       confirmation_style: hermes # hermes / openclaw；默认 hermes
 
 agent:
-  gateway_notify_interval: 180  # Hermes 配置；当前 Hermes v0.20 fixture 默认 180 秒
+  gateway_notify_interval: 60   # 示例；Hermes-owned，不是插件默认值
 ```
 
-`agent.gateway_notify_interval` 属于 Hermes Gateway，不属于插件；上例中的 180 不是插件默认值。若省略它，由当前 Hermes 版本决定默认周期。
+`agent.gateway_notify_interval` 属于 Hermes Gateway，不属于插件。上例中的 60 只是示例值，不是插件默认值；若省略它，默认值由当前 Hermes 版本决定。
 
 ## Feishu / Lark 凭据与 endpoint
 
@@ -101,7 +101,7 @@ lark:
 | Clarify presentation | `display.platforms.feishu.clarify_style` | `text` / `card` | `text` | 运行时重新读取 | `text` 使用 Hermes 原生文本交互；`card` 使用 Feishu Clarify Card；非法值 fallback 到 `text`。 |
 | Approval presentation | `display.platforms.feishu.confirmation_style` | `hermes` / `openclaw` | `hermes` | 运行时重新读取 | `hermes` 保留 Hermes 原生 approval presentation；`openclaw` 使用插件 Approval Card presentation。Hermes approval state / resolver 仍是真实 source of truth；非法值 fallback 到 `hermes`。 |
 | Working 显示位置 | `streaming.progress_mode` | `text` / `card` | `text` | 重启 gateway | `text` 保持 Hermes 原生 long-running heartbeat 独立文本消息；`card` 在活动 streaming card 能安全接管时显示在卡片底部 progress/loading 区域。插件不解析 `Working` 字符串、不启动本地 heartbeat ticker，也不存在 `streaming.progress_interval` 或 `streaming.heartbeat_interval`。 |
-| Hermes heartbeat 周期 | `agent.gateway_notify_interval` | number，单位秒；`0` 可关闭 | 当前 Hermes v0.20 fixture 为 `180` | 重启 gateway | **Hermes-owned configuration**。控制 Hermes Gateway long-running heartbeat 周期，不是插件 timer；`streaming.progress_mode` 只决定显示位置。profile scoped。 |
+| Hermes heartbeat 周期 | `agent.gateway_notify_interval` | number，单位秒 | 由当前 Hermes 版本决定 | 重启 gateway | **Hermes-owned configuration**。控制 Hermes Gateway long-running heartbeat 周期，不是插件 timer；`streaming.progress_mode` 只决定显示位置。profile scoped。 |
 | 卡片宽度 | `streaming.width_mode` | `default` / `compact` / `fill` | `default` | 重启 gateway | 非法值 fallback 到 `default`。 |
 | 完成态面板展开 | `streaming.panel_expanded` | bool | `false` | 重启 gateway | 控制完成卡片中的 reasoning / tool panel 是否保持展开。 |
 | 卡片存活检测 | `streaming.card_ttl_sec` | int 秒 | `600` | 重启 gateway | 控制卡片 session 的存活检测时长；代码会将值转换为 int。 |
