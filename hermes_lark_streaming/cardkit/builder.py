@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from ..streaming.progress import ProgressSnapshot
 from ..streaming.segments import Segment, SegmentType
 from ..streaming.tooluse import ToolDisplayStep
 from .i18n import _LOCALES, _T, _i18n, _t
@@ -93,16 +94,22 @@ def _build_header(status: str) -> dict[str, Any]:
     }
 
 
-def _loading_element() -> dict:
+def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[str, Any]:
+    heartbeat = progress_snapshot if progress_snapshot and progress_snapshot.visible else None
     return {
         "tag": "markdown",
-        "content": " ",
+        "content": heartbeat.content if heartbeat else " ",
         "icon": {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
             "size": "16px 16px",
         },
         "element_id": _LOADING_ELEMENT_ID,
+        **(
+            {"i18n_content": _i18n(heartbeat.content, heartbeat.zh_content)}
+            if heartbeat
+            else {}
+        ),
     }
 
 
@@ -435,8 +442,9 @@ def build_streaming_card_v2(
     header_enabled: bool = False,
     text_size: str = "normal_v2",
     width_mode: str = "default",
+    progress_snapshot: ProgressSnapshot | None = None,
 ) -> dict[str, Any]:
-    """CardKit 2.0 流式占位卡片 — 含工具面板 + streaming + loading 元素."""
+    """CardKit 2.0 流式占位卡片 — 内容后保留固定尾部 anchor."""
     elements: list[dict] = []
 
     if show_reasoning:
@@ -452,7 +460,7 @@ def build_streaming_card_v2(
 
     if show_streaming_element:
         elements.append(_streaming_element(text_size=text_size))
-    elements.append(_loading_element())
+    elements.append(_loading_element(progress_snapshot))
 
     card = {
         "schema": "2.0",

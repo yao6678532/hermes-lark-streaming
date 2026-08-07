@@ -39,6 +39,7 @@ _HOOK_NAMES = [
     "BG_DELIVER",
     "CLARIFY_SEND",
     "CLARIFY_ACTION",
+    "PROGRESS",
 ]
 MARKERS: list[tuple[str, str]] = [(f"# {PREFIX}_{n}_BEGIN", f"# {PREFIX}_{n}_END") for n in _HOOK_NAMES]
 
@@ -58,6 +59,7 @@ MK_INTERRUPT, MK_INTERRUPT_END = MARKERS[12]
 MK_BG_DELIVER, MK_BG_DELIVER_END = MARKERS[13]
 MK_CLARIFY_SEND, MK_CLARIFY_SEND_END = MARKERS[14]
 MK_CLARIFY_ACTION, MK_CLARIFY_ACTION_END = MARKERS[15]
+MK_PROGRESS, MK_PROGRESS_END = MARKERS[16]
 
 _BACKUP_SUFFIX = ".hermes_lark.bak"
 
@@ -477,6 +479,31 @@ def _reasoning_hook(indent: str) -> str:
     )
 
 
+def _progress_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_PROGRESS,
+        MK_PROGRESS_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_long_running_progress",
+            "    _lark_activity = {}",
+            "    if _agent_ref and hasattr(_agent_ref, 'get_activity_summary'):",
+            "        _lark_activity = _agent_ref.get_activity_summary()",
+            "    if not isinstance(_lark_activity, dict):",
+            "        _lark_activity = {}",
+            "    if on_long_running_progress(",
+            "        message_id=event_message_id,",
+            "        elapsed_seconds=float(_elapsed_mins) * 60.0,",
+            "        iteration=_lark_activity.get('api_call_count'),",
+            "        max_iterations=_lark_activity.get('max_iterations'),",
+            "    ):",
+            "        continue",
+            *_hook_exception_lines("progress"),
+        ],
+    )
+
+
 def _background_review_hook(indent: str) -> str:
     return _make_hook(
         indent,
@@ -785,14 +812,26 @@ class Patcher:
 
     def is_fully_patched(self) -> bool:
         content = self.run_path.read_text(encoding="utf-8")
-        tree = ast.parse(content)
+        try:
+            tree = ast.parse(content)
+        except SyntaxError:
+            return False
         lines = content.splitlines(keepends=True)
         answer_sites = _find_func_bodies(tree, lines, "_stream_delta_cb")
         for begin, end in self.MARKERS:
             expected = len(answer_sites) if begin == MK_ANSWER else 1
             if content.count(begin) != expected or content.count(end) != expected:
                 return False
-        return True
+        # Marker counts only tell us that a patch exists, not that it matches
+        # the current plugin.  Rebuild the injected blocks from the marker-free
+        # target so a newer hook implementation can refresh an older install.
+        try:
+            pristine = content
+            for begin, end in self.MARKERS:
+                pristine = _remove_block_checked(pristine, begin, end)
+            return self._inject_all(pristine) == content
+        except (PatcherError, SyntaxError):
+            return False
 
     def verify_target(self) -> None:
         content = self.run_path.read_text(encoding="utf-8")
@@ -854,6 +893,10 @@ class Patcher:
             raise PatcherError(
                 "Cannot find clarify action anchor in run.py — Hermes version may be incompatible"
             )
+        if _find_long_running_progress_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find long-running progress anchor in run.py — Hermes version may be incompatible"
+            )
 
     def apply(self) -> None:
         if self.is_fully_patched():
@@ -908,6 +951,7 @@ class Patcher:
             ("bg_deliver", "bg_deliver", _find_bg_deliver_site(tree, lines)),
             ("clarify_send", "clarify_send", _find_clarify_send_site(tree, lines)),
             ("clarify_action", "clarify_action", _find_clarify_action_site(tree, lines)),
+            ("progress", "progress", _find_long_running_progress_site(tree, lines)),
         ]
         hook_defs.extend(
             ("answer", f"answer callback {index}", loc)
@@ -941,6 +985,7 @@ class Patcher:
             "bg_deliver": _bg_deliver_hook,
             "clarify_send": _clarify_send_hook,
             "clarify_action": _clarify_action_hook,
+            "progress": _progress_hook,
         }
         for idx, indent, fn_name in sites:
             hook = _HOOK_FNS[fn_name](indent)
@@ -1076,6 +1121,24 @@ def _find_reasoning_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] 
     for i, line in enumerate(lines):
         if line.strip() == "agent.reasoning_config = reasoning_config":
             return i + 1, _safe_indent(lines, i)
+    return None
+
+
+def _find_long_running_progress_site(
+    tree: ast.Module,
+    lines: list[str],
+) -> tuple[int, str] | None:
+    """Locate Hermes' structured heartbeat immediately after its text is built."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.AsyncFunctionDef) or node.name != "_notify_long_running":
+            continue
+        for child in ast.walk(node):
+            if not isinstance(child, ast.Assign) or len(child.targets) != 1:
+                continue
+            target = child.targets[0]
+            if isinstance(target, ast.Name) and target.id == "_heartbeat_text":
+                lineno = child.end_lineno or child.lineno
+                return lineno, _safe_indent(lines, child.lineno - 1)
     return None
 
 

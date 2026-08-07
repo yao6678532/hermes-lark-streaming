@@ -35,6 +35,7 @@ from .segment_helper import (
     MERGED_REASONING_ELEMENT_ESTIMATE,
     build_add_merged_reasoning_action,
     build_add_segment_action,
+    build_progress_update_action,
     build_reasoning_finalized_action,
     build_tool_update_action,
     estimate_segment_elements,
@@ -90,6 +91,28 @@ class StreamingController:
         if session.guard.should_skip("_schedule_flush"):
             return
         session.flush.schedule_update(lambda: self._do_flush(session))
+
+    async def _flush_progress(self, session: CardSession) -> None:
+        """Update the fixed status element while preserving concurrent events."""
+        if self._cfg.progress_mode != "card" or not session.progress.dirty:
+            return
+        assert self._client is not None
+        assert session.card_id is not None
+        snapshot = session.progress.snapshot()
+        if not snapshot.visible:
+            return
+        session.sequence += 1
+        try:
+            await self._client.cardkit_batch_update(
+                session.card_id,
+                [build_progress_update_action(snapshot)],
+                sequence=session.sequence,
+            )
+        except Exception:
+            _logger.debug("CardKit progress stream failed", exc_info=True)
+            session.progress.disable()
+            return
+        session.progress.mark_rendered(snapshot.revision)
 
     def _record_reasoning(self, session: CardSession, text: str, *, activity: bool) -> None:
         """Preserve chronology while applying the source's presentation semantics."""
@@ -172,7 +195,9 @@ class StreamingController:
             try:
                 await self._client.cardkit_batch_update(
                     session.card_id,
-                    [build_add_merged_reasoning_action()],
+                    [
+                        build_add_merged_reasoning_action()
+                    ],
                     sequence=session.sequence,
                 )
             except FeishuAPIError as error:
@@ -272,6 +297,11 @@ class StreamingController:
             assert self._client is not None
 
             reply_to_message_id = session.anchor_id or session.message_id
+            progress_snapshot = (
+                session.progress.snapshot()
+                if self._cfg.progress_mode == "card"
+                else None
+            )
             card = build_streaming_card_v2(
                 show_tool_use=False,
                 show_reasoning=False,
@@ -279,6 +309,7 @@ class StreamingController:
                 header_enabled=self._cfg.header_enabled,
                 text_size=self._cfg.body_text_size,
                 width_mode=self._cfg.width_mode,
+                progress_snapshot=progress_snapshot,
             )
             card_id = await self._client.cardkit_create(card)
             try:
@@ -301,7 +332,9 @@ class StreamingController:
                         card={"type": "card", "data": {"card_id": card_id}},
                     )
             session.set_card(card_id=card_id, card_msg_id=card_msg_id)
-            session.element_count = 1  # loading element
+            session.element_count = 1
+            if progress_snapshot is not None and progress_snapshot.visible:
+                session.progress.mark_rendered(progress_snapshot.revision)
             session.flush.set_throttle(CARDKIT_MS)
 
             if session.image_resolver is None and self._client:
@@ -313,7 +346,10 @@ class StreamingController:
             session.flush.set_card_message_ready(True)
             if session.state == SessionState.CREATING:
                 session.state = SessionState.STREAMING
-            if session.segment_state and session.segment_state.has_dirty:
+            if (
+                (session.segment_state and session.segment_state.has_dirty)
+                or session.progress.dirty
+            ):
                 self._schedule_flush(session)
             _logger.info(
                 "CardKit card created: msg=%s card_id=%s",
@@ -341,6 +377,8 @@ class StreamingController:
         segments = segment_state.segments
         all_steps = session.tool_use.build_display_steps()
         merged_mode = self._cfg.reasoning_mode == "merged"
+
+        await self._flush_progress(session)
 
         if merged_mode:
             # This lane is presentation state. Numbered reasoning segments remain
@@ -405,7 +443,13 @@ class StreamingController:
                 new_el_ids.add(seg.el_id)
                 new_el_estimates[seg.el_id] = estimated
                 new_el_total += estimated
-                actions.append(build_add_segment_action(seg, all_steps, text_size=self._cfg.body_text_size))
+                actions.append(
+                    build_add_segment_action(
+                        seg,
+                        all_steps,
+                        text_size=self._cfg.body_text_size,
+                    )
+                )
                 if (
                     seg.type == SegmentType.TOOL
                     and i + 1 < len(segments)
@@ -734,6 +778,11 @@ class StreamingController:
         )
 
         try:
+            progress_snapshot = (
+                session.progress.snapshot()
+                if self._cfg.progress_mode == "card"
+                else None
+            )
             card = build_streaming_card_v2(
                 show_tool_use=False,
                 show_reasoning=False,
@@ -741,6 +790,7 @@ class StreamingController:
                 header_enabled=self._cfg.header_enabled,
                 text_size=self._cfg.body_text_size,
                 width_mode=self._cfg.width_mode,
+                progress_snapshot=progress_snapshot,
             )
             new_card_id = await self._client.cardkit_create(card)
             new_msg_id = await self._client.reply_card_by_id(session.anchor_id or session.message_id, new_card_id)
@@ -766,7 +816,9 @@ class StreamingController:
             )
 
         session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
-        session.element_count = 1  # loading
+        session.element_count = 1
+        if progress_snapshot is not None and progress_snapshot.visible:
+            session.progress.mark_rendered(progress_snapshot.revision)
         session.sequence = 1
         session.split_disabled = False
         session.split_index = split_idx
@@ -809,6 +861,7 @@ class StreamingController:
         if session.guard.should_skip("_do_complete_card"):
             return False
 
+        session.progress.clear()
         await session.flush.wait_for_flush()
         session.flush.mark_completed()
 

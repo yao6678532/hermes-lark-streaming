@@ -33,6 +33,7 @@ from hermes_lark_streaming.patcher import (
     _complete_hook,
     _cron_deliver_hook,
     _followup_complete_hook,
+    _progress_hook,
     _remove_block,
     _stop_hook,
     _thinking_hook,
@@ -239,6 +240,24 @@ def _build_tool_hook_runner(*, use_turn_context: bool):
     return lambda _ctx: namespace["callback"]
 
 
+def _build_progress_hook_runner():
+    namespace: dict = {}
+    source = (
+        "async def notify(event_message_id, _elapsed_mins):\n"
+        "    class Agent:\n"
+        "        def get_activity_summary(self):\n"
+        "            return {'api_call_count': 3, 'max_iterations': 60}\n"
+        "    _agent_ref = Agent()\n"
+        "    _heartbeat_text = '⏳ Working'\n"
+        "    for _ in range(1):\n"
+        f"{_progress_hook('        ')}"
+        "        return 'hermes-text'\n"
+        "    return 'card-owned'\n"
+    )
+    exec(compile(source, "<progress-hook-test>", "exec"), namespace)
+    return namespace["notify"]
+
+
 class TestVerify:
     def test_verify_passes_on_real_run(self, run_copy: Path) -> None:
         _patcher(run_copy).verify_target()
@@ -356,6 +375,17 @@ class TestVerify:
         run_copy.write_text(content, encoding="utf-8")
 
         with pytest.raises(PatcherError, match="clarify action anchor"):
+            _patcher(run_copy).verify_target()
+
+    def test_verify_fails_when_long_running_anchor_moves(self, run_copy: Path) -> None:
+        content = run_copy.read_text(encoding="utf-8").replace(
+            "async def _notify_long_running():",
+            "async def _notify_long_running_moved():",
+            1,
+        )
+        run_copy.write_text(content, encoding="utf-8")
+
+        with pytest.raises(PatcherError, match="long-running progress anchor"):
             _patcher(run_copy).verify_target()
 
 
@@ -525,6 +555,23 @@ class TestGeneratedAnswerHook:
             result = callback("delta", ctx)
 
         assert result == "native"
+
+
+@pytest.mark.asyncio
+async def test_generated_progress_hook_suppresses_only_when_card_owns_heartbeat() -> None:
+    notify = _build_progress_hook_runner()
+
+    with patch("hermes_lark_streaming.patch.on_long_running_progress", return_value=True) as progress:
+        assert await notify("message", 3) == "card-owned"
+    progress.assert_called_once_with(
+        message_id="message",
+        elapsed_seconds=180.0,
+        iteration=3,
+        max_iterations=60,
+    )
+
+    with patch("hermes_lark_streaming.patch.on_long_running_progress", return_value=False):
+        assert await notify("message", 3) == "hermes-text"
 
 
 class TestGeneratedThinkingHook:
@@ -814,6 +861,11 @@ class TestApplyRemove:
         assert "on_thinking_delta(" in content
         assert "source='interim_commentary'" in content
         assert "on_reasoning_delta(" in content
+        assert "# HERMES_LARK_PROGRESS_BEGIN" in content
+        assert "on_long_running_progress(" in content
+        assert "_lark_activity = _agent_ref.get_activity_summary()" in content
+        assert "iteration=_lark_activity.get('api_call_count')" in content
+        assert "max_iterations=_lark_activity.get('max_iterations')" in content
         assert "api_mode=getattr(agent, 'api_mode', '')" in content
         assert "on_background_deliver(" in content
         assert "_bg_preview = prompt[:60] + ('...' if len(prompt) > 60 else '')" in content
@@ -874,6 +926,32 @@ class TestApplyRemove:
 
         assert upgraded.count(begin) == 1
         assert upgraded.count(end) == 1
+
+    def test_apply_upgrades_stale_progress_hook(self, run_copy: Path) -> None:
+        patcher = _patcher(run_copy)
+        patcher.apply()
+        content = run_copy.read_text(encoding="utf-8")
+        begin, end = next(pair for pair in MARKERS if "PROGRESS" in pair[0])
+        block_start = content.index(begin)
+        block_end = content.index(end, block_start) + len(end)
+        block = content[block_start:block_end]
+        stale_block = "".join(
+            line
+            for line in block.splitlines(keepends=True)
+            if "iteration=" not in line and "max_iterations=" not in line
+        )
+        run_copy.write_text(
+            content[:block_start] + stale_block + content[block_end:],
+            encoding="utf-8",
+        )
+
+        assert patcher.is_fully_patched() is False
+        patcher.apply()
+        upgraded = run_copy.read_text(encoding="utf-8")
+
+        assert "_lark_activity = _agent_ref.get_activity_summary()" in upgraded
+        assert "iteration=_lark_activity.get('api_call_count')" in upgraded
+        assert "max_iterations=_lark_activity.get('max_iterations')" in upgraded
 
     def test_apply_hard_fails_when_injection_site_missing(self, run_copy: Path) -> None:
         patcher = _patcher(run_copy)

@@ -63,6 +63,13 @@ class Config:
         return "segmented"
 
     @property
+    def progress_mode(self) -> str:
+        """Long-running status presentation; invalid values keep Hermes text."""
+        value = str(self._streaming_sec().get("progress_mode", "text") or "text")
+        value = value.strip().lower()
+        return value if value in {"text", "card"} else "text"
+
+    @property
     def show_reasoning(self) -> bool:
         """是否展示推理过程（display.platforms.feishu.show_reasoning → display.show_reasoning）.
 

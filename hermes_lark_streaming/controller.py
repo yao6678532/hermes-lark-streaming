@@ -388,10 +388,11 @@ class StreamCardController(StreamingController):
         """Route native reasoning presentation by its Hermes API-mode semantics."""
         if not self.enabled:
             return False
-        if not self._cfg.show_reasoning:
-            return False
         session = self._get_active_session(message_id)
         if session is None or session.guard.should_skip("on_reasoning"):
+            return False
+
+        if not self._cfg.show_reasoning:
             return False
 
         if session.segment_state is None:
@@ -460,6 +461,9 @@ class StreamCardController(StreamingController):
         if session is None:
             return
 
+        progress = getattr(session, "progress", None)
+        if progress is not None:
+            progress.clear()
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
         _logger.info("on_aborted: msg=%s state=ABORTED", message_id[:12])
@@ -474,6 +478,7 @@ class StreamCardController(StreamingController):
         if session is None or session.state.is_terminal:
             return False
 
+        session.progress.clear()
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
         _logger.info("on_session_aborted: msg=%s state=ABORTED", session.message_id[:12])
@@ -496,6 +501,7 @@ class StreamCardController(StreamingController):
         old_session = self._get_active_session(old_message_id)
         session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
+            old_session.progress.clear()
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
             _logger.info(
@@ -592,6 +598,35 @@ class StreamCardController(StreamingController):
             session.mark_failed()
 
         return await self._complete_session_wait(session)
+
+    def on_long_running_progress(
+        self,
+        *,
+        message_id: str,
+        elapsed_seconds: float,
+        iteration: int | None = None,
+        max_iterations: int | None = None,
+    ) -> bool:
+        """Own a real Hermes heartbeat only when an active card can display it."""
+        if not self.enabled or self._cfg.progress_mode != "card":
+            return False
+        session = self._get_active_session(message_id)
+        if (
+            session is None
+            or session.state != SessionState.STREAMING
+            or not session.card_id
+            or session.guard.should_skip("on_long_running_progress")
+        ):
+            return False
+        if not session.progress.available:
+            return False
+        session.progress.note_heartbeat(
+            elapsed_seconds,
+            iteration=iteration,
+            max_iterations=max_iterations,
+        )
+        self._schedule_flush(session)
+        return True
 
     def on_cron_deliver(
         self,
@@ -695,6 +730,9 @@ class StreamCardController(StreamingController):
         stale_keys = [k for k, v in self._interrupt_map.items() if v == message_id]
         for k in stale_keys:
             del self._interrupt_map[k]
+        progress = getattr(session, "progress", None)
+        if progress is not None:
+            progress.clear()
         session.flush.mark_completed()
         if session.image_resolver:
             session.image_resolver.cancel_pending()
@@ -711,6 +749,7 @@ class StreamCardController(StreamingController):
         stale_keys = [key for key, value in self._interrupt_map.items() if value == session.message_id]
         for key in stale_keys:
             del self._interrupt_map[key]
+        session.progress.clear()
         session.flush.mark_completed()
         if session.image_resolver:
             session.image_resolver.cancel_pending()
@@ -820,6 +859,7 @@ class StreamCardController(StreamingController):
 
     async def _complete_session_wait(self, session: CardSession) -> bool:
         """完成当前流式卡片，并等待最终 API 结果."""
+        session.progress.clear()
         session.flush.mark_completed()
         return await self._do_complete_card(session)
 

@@ -14,12 +14,27 @@ from ..cardkit.builder import (
     _streaming_element,
 )
 from ..cardkit.i18n import _T, _i18n
+from .progress import ProgressSnapshot
 from .segments import Segment, SegmentType
 from .tooluse import ToolDisplayStep
 
 ELEMENT_THRESHOLD = 180  # 飞书硬上限 200，预留 20 给 footer + 波动
 FOOTER_RESERVE = 2  # footer 元素预留（hr + markdown）
 MERGED_REASONING_ELEMENT_ESTIMATE = 4
+
+
+def build_progress_update_action(snapshot: ProgressSnapshot) -> dict[str, Any]:
+    """Update only the content of the fixed native loading element."""
+    return {
+        "action": "partial_update_element",
+        "params": {
+            "element_id": _LOADING_ELEMENT_ID,
+            "partial_element": {
+                "content": snapshot.content,
+                "i18n_content": _i18n(snapshot.content, snapshot.zh_content),
+            },
+        },
+    }
 
 
 def estimate_segment_elements(seg: Segment, all_steps: list[ToolDisplayStep]) -> int:
