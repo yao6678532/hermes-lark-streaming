@@ -8,7 +8,7 @@ from typing import Any
 
 from ..streaming.progress import ProgressSnapshot
 from ..streaming.segments import Segment, SegmentType
-from ..streaming.tooluse import ToolDisplayStep
+from ..streaming.tooluse import ToolDisplayStep, tool_detail_for_display
 from .i18n import _LOCALES, _T, _i18n, _t
 from .markdown import (
     _downgrade_tables,
@@ -119,6 +119,8 @@ def _build_tool_panel(
     *,
     expanded: bool = True,
     element_id: str | None = TOOL_PANEL_ELEMENT_ID,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
 ) -> dict:
     en_t, zh_t = _T["tool_use"]
     en_parts, zh_parts = [en_t], [zh_t]
@@ -133,7 +135,13 @@ def _build_tool_panel(
 
     children: list[dict] = []
     for s in steps:
-        children.extend(_build_tool_step_elements(s))
+        children.extend(
+            _build_tool_step_elements(
+                s,
+                show_tool_detail=show_tool_detail,
+                tool_detail_mode=tool_detail_mode,
+            )
+        )
 
     panel = _collapsible_panel(
         expanded=expanded,
@@ -151,9 +159,18 @@ def _build_tool_panel(
     return panel
 
 
-def _build_tool_step_elements(step: ToolDisplayStep) -> list[dict]:
+def _build_tool_step_elements(
+    step: ToolDisplayStep,
+    *,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
+) -> list[dict]:
     elements: list[dict] = [_build_tool_step_title(step)]
-    detail = _build_tool_step_detail(step)
+    detail = _build_tool_step_detail(
+        step,
+        show_tool_detail=show_tool_detail,
+        tool_detail_mode=tool_detail_mode,
+    )
     if detail:
         elements.append(detail)
     output = _build_tool_step_output(step)
@@ -190,8 +207,17 @@ def _build_tool_step_title(step: ToolDisplayStep) -> dict:
     }
 
 
-def _build_tool_step_detail(step: ToolDisplayStep) -> dict | None:
-    detail = step.get("detail", "").strip()
+def _build_tool_step_detail(
+    step: ToolDisplayStep,
+    *,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
+) -> dict | None:
+    detail = tool_detail_for_display(
+        step,
+        show_detail=show_tool_detail,
+        mode=tool_detail_mode,
+    )
     if not detail:
         return None
     return {
@@ -446,6 +472,8 @@ def build_streaming_card_v2(
     tool_steps: list[ToolDisplayStep] | None = None,
     elapsed_ms: float = 0,
     show_tool_use: bool = True,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
     show_reasoning: bool = False,
     show_streaming_element: bool = True,
     header_enabled: bool = False,
@@ -463,7 +491,14 @@ def build_streaming_card_v2(
 
     if show_tool_use:
         if tool_steps:
-            elements.append(_build_tool_panel(tool_steps, elapsed_ms))
+            elements.append(
+                _build_tool_panel(
+                    tool_steps,
+                    elapsed_ms,
+                    show_tool_detail=show_tool_detail,
+                    tool_detail_mode=tool_detail_mode,
+                )
+            )
         else:
             elements.append(build_streaming_tool_use_pending_panel())
 
@@ -509,6 +544,8 @@ def build_complete_card(
     header_enabled: bool = False,
     body_text_size: str = "normal_v2",
     show_tool_use: bool = True,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
     width_mode: str = "default",
     merged_reasoning_text: str | None = None,
     merged_reasoning_elapsed_ms: float = 0,
@@ -559,6 +596,8 @@ def build_complete_card(
                         steps,
                         expanded=panel_expanded,
                         element_id=TOOL_PANEL_ELEMENT_ID,
+                        show_tool_detail=show_tool_detail,
+                        tool_detail_mode=tool_detail_mode,
                     )
                 )
         elif seg.type == SegmentType.ANSWER and seg.text:

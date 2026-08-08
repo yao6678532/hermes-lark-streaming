@@ -379,6 +379,40 @@ class TestBuildToolPanel:
         assert "Failed" in str(failed["elements"])
         assert "1.2s" in str(failed["elements"])
 
+    def test_detail_visibility_and_compact_mode_keep_title_and_output(self) -> None:
+        step = {
+            **_STEP_SUCCESS,
+            "name": "exec",
+            "title": "Run command",
+            "detail": "python3 anysearch_cli.py batch_search --queries '[long payload]'",
+            "error_block": {
+                "language": "text",
+                "content": "failure details",
+                "fenced": "```text\nfailure details\n```",
+            },
+        }
+        full = _build_tool_panel([step])
+        compact = _build_tool_panel([step], tool_detail_mode="compact")
+        hidden = _build_tool_panel([step], show_tool_detail=False)
+
+        assert "python3 anysearch_cli.py batch_search --queries '[long payload]'" in str(full)
+        assert "anysearch_cli.py batch_search" in str(compact)
+        assert "--queries" not in str(compact)
+        assert "failure details" in str(hidden)
+        assert "python3 anysearch_cli.py" not in str(hidden)
+        assert len(full["elements"]) == len(compact["elements"]) == len(hidden["elements"]) + 1
+
+    def test_malformed_compact_detail_is_omitted_without_breaking_panel(self) -> None:
+        step = {
+            **_STEP_RUNNING,
+            "name": "exec",
+            "title": "Run command",
+            "detail": 'python3 script.py --query "unfinished',
+        }
+        panel = _build_tool_panel([step], tool_detail_mode="compact")
+        assert len(panel["elements"]) == 1
+        assert "Run command" in str(panel["elements"][0])
+
 
 # --- Footer ---
 

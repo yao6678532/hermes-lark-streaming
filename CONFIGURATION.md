@@ -53,6 +53,8 @@ display:
     feishu:
       show_reasoning: false     # 默认 false
       show_tool_use: true       # 默认 true
+      show_tool_detail: true    # 默认 true；只控制每条工具的 secondary detail 行
+      tool_detail_mode: full    # full / compact；默认 full
       clarify_style: text       # text / card；默认 text
       confirmation_style: hermes # hermes / openclaw；默认 hermes
 
@@ -98,6 +100,8 @@ lark:
 | reasoning 组织方式 | `streaming.reasoning_mode` | `segmented` / `merged` | `segmented` | 重启 gateway | `segmented` 按事件顺序保留多个 reasoning 段；`merged` 在完成卡片中合并 reasoning。 |
 | 是否显示 reasoning | `display.platforms.feishu.show_reasoning` | bool | `false` | 运行时重新读取 | 只控制 reasoning 是否展示，不改变 `reasoning_mode`。也兼容 `display.show_reasoning` 作为全局 fallback。 |
 | 是否显示工具调用 UI | `display.platforms.feishu.show_tool_use` | bool | `true` | 运行时重新读取 | 控制统一 Tool Panel 是否显示；`false` 只隐藏面板，不影响 Hermes tools 真实执行。也兼容 `display.show_tool_use` 作为 fallback。 |
+| 工具详情 | `display.platforms.feishu.show_tool_detail` | bool | `true` | 运行时重新读取 | 只隐藏或显示每条工具 step 的 secondary detail 行；不隐藏 Tool Panel、标题、状态、耗时或 result/error diagnostics。也兼容 `display.show_tool_detail` 作为 fallback。 |
+| 工具详情模式 | `display.platforms.feishu.tool_detail_mode` | `full` / `compact` | `full` | 运行时重新读取 | `full` 保留完整的 sanitized detail；`compact` 在同一 sanitized detail 基础上对 Terminal/command 优先显示 executable/script 和安全 subcommand，隐藏长参数 payload；其他工具保守使用 sanitized detail。非法值 fallback 到 `full`。也兼容 `display.tool_detail_mode` 作为 fallback。 |
 | Clarify presentation | `display.platforms.feishu.clarify_style` | `text` / `card` | `text` | 运行时重新读取 | `text` 使用 Hermes 原生文本交互；`card` 使用 Feishu Clarify Card；非法值 fallback 到 `text`。 |
 | Approval presentation | `display.platforms.feishu.confirmation_style` | `hermes` / `openclaw` | `hermes` | 运行时重新读取 | `hermes` 保留 Hermes 原生 approval presentation；`openclaw` 使用插件 Approval Card presentation。Hermes approval state / resolver 仍是真实 source of truth；非法值 fallback 到 `hermes`。 |
 | Working 显示位置 | `streaming.progress_mode` | `text` / `card` | `text` | 重启 gateway | `text` 保持 Hermes 原生 long-running heartbeat 独立文本消息；`card` 在活动 streaming card 能安全接管时显示在卡片底部 progress/loading 区域。插件不解析 `Working` 字符串、不启动本地 heartbeat ticker，也不存在 `streaming.progress_interval` 或 `streaming.heartbeat_interval`。 |
@@ -136,18 +140,21 @@ lark:
 - `progress_mode` 缺失、为空或非法时为 `text`。
 - `clarify_style` 缺失、为空或非法时为 `text`。
 - `confirmation_style` 缺失、为空或非法时为 `hermes`。
+- `tool_detail_mode` 缺失、为空或非法时为 `full`。
 - `width_mode` 缺失、为空或非法时为 `default`。
-- `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled` 和 `show_tool_use` 缺失时分别为 `true` 和 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
+- `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled`、`show_tool_use` 和 `show_tool_detail` 缺失时均为 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
 - `body.text_size` 缺失或空值时为 `normal_v2`；`footer.text_size` 缺失或空值时为 `notation`。这两个 text size 字符串不是插件枚举，非法的 CardKit 值不会由插件额外改写。
 - `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[status, elapsed, context, model]]`；一维字段 list 会自动包装为一行。`footer.show_label` 在字段缺失时为 `false`，footer 应保持 mapping 结构。
 - `card_ttl_sec` 缺失时为 `600`。代码会调用 `int()`，因此不可转换的非数字值不是 fallback，而会在读取时失败。
 
 ## 热加载 vs Gateway restart
 
-`Config._reload()` 每次从当前 profile 的配置文件读取、不更新缓存。以下四项在每次访问时重新读取，通常无需因为配置值本身重启 gateway：
+`Config._reload()` 每次从当前 profile 的配置文件读取、不更新缓存。以下 display presentation 配置项在每次访问时重新读取，通常无需因为配置值本身重启 gateway：
 
 - `display.platforms.feishu.show_reasoning`
 - `display.platforms.feishu.show_tool_use`
+- `display.platforms.feishu.show_tool_detail`
+- `display.platforms.feishu.tool_detail_mode`
 - `display.platforms.feishu.clarify_style`
 - `display.platforms.feishu.confirmation_style`
 
@@ -175,6 +182,21 @@ display:
   platforms:
     feishu:
       show_tool_use: false
+
+# 保留 Tool Panel 的标题、状态、耗时，但隐藏每条工具的 secondary detail 行
+display:
+  platforms:
+    feishu:
+      show_tool_use: true
+      show_tool_detail: false
+
+# Terminal/command detail 使用语义压缩（不是简单字符串截断）
+display:
+  platforms:
+    feishu:
+      show_tool_use: true
+      show_tool_detail: true
+      tool_detail_mode: compact
 
 # 显示 reasoning
 display:

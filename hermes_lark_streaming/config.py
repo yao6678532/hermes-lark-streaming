@@ -103,6 +103,38 @@ class Config:
         return bool(display.get("show_tool_use", True))
 
     @property
+    def show_tool_detail(self) -> bool:
+        """Whether tool steps show their secondary detail line.
+
+        The value is reloaded with the other Feishu display presentation
+        settings so an operator can change it without restarting Hermes.
+        """
+        display = self._reload().get("display")
+        if not isinstance(display, dict):
+            return True
+        platforms = display.get("platforms")
+        if isinstance(platforms, dict):
+            feishu = platforms.get("feishu")
+            if isinstance(feishu, dict) and "show_tool_detail" in feishu:
+                return bool(feishu["show_tool_detail"])
+        return bool(display.get("show_tool_detail", True))
+
+    @property
+    def tool_detail_mode(self) -> str:
+        """Tool detail presentation mode; invalid values fall back to full."""
+        display = self._reload().get("display")
+        if not isinstance(display, dict):
+            return "full"
+        value: Any = display.get("tool_detail_mode", "full")
+        platforms = display.get("platforms")
+        if isinstance(platforms, dict):
+            feishu = platforms.get("feishu")
+            if isinstance(feishu, dict) and "tool_detail_mode" in feishu:
+                value = feishu["tool_detail_mode"]
+        mode = str(value or "full").strip().lower()
+        return mode if mode in {"full", "compact"} else "full"
+
+    @property
     def clarify_style(self) -> str:
         """Feishu clarify presentation; invalid values preserve text fallback.
 
