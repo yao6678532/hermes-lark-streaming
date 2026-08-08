@@ -30,6 +30,7 @@ from ..feishu import (
 from .diagnostics import compact_ids, extract_missing_element_id, segment_state_for_log, summarize_actions
 from .flush import CARDKIT_MS
 from .image import ImageResolver
+from .progress import ActivityKind
 from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
@@ -102,8 +103,6 @@ class StreamingController:
         assert self._client is not None
         assert session.card_id is not None
         snapshot = session.progress.snapshot()
-        if not snapshot.visible:
-            return
         session.sequence += 1
         try:
             await self._client.cardkit_batch_update(
@@ -116,6 +115,16 @@ class StreamingController:
             session.progress.disable()
             return
         session.progress.mark_rendered(snapshot.revision)
+
+    def _note_activity(
+        self,
+        session: CardSession,
+        activity: ActivityKind | None,
+    ) -> bool:
+        """Record card-only activity without changing text-mode semantics."""
+        if self._cfg.progress_mode != "card":
+            return False
+        return session.progress.note_activity(activity)
 
     def _record_reasoning(self, session: CardSession, text: str, *, activity: bool) -> None:
         """Preserve chronology while applying the source's presentation semantics."""
@@ -288,8 +297,15 @@ class StreamingController:
                 return False
             self._pause_merged_reasoning(session)
             self._append_answer_segment(session, text)
+            if text.strip():
+                self._note_activity(session, ActivityKind.ANSWERING)
             self._schedule_flush(session)
             return True
+
+        activity_changed = bool(text.strip()) and self._note_activity(
+            session,
+            ActivityKind.THINKING,
+        )
 
         activity = self._uses_activity_reasoning_presentation(
             api_mode=api_mode,
@@ -307,7 +323,9 @@ class StreamingController:
             self._pause_merged_reasoning(session)
             self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
-            return False
+            if activity_changed:
+                self._schedule_flush(session)
+            return activity_changed
         self._schedule_flush(session)
         return True
 
@@ -360,7 +378,7 @@ class StreamingController:
                     )
             session.set_card(card_id=card_id, card_msg_id=card_msg_id)
             session.element_count = 1
-            if progress_snapshot is not None and progress_snapshot.visible:
+            if progress_snapshot is not None:
                 session.progress.mark_rendered(progress_snapshot.revision)
             session.flush.set_throttle(CARDKIT_MS)
 
@@ -1083,7 +1101,7 @@ class StreamingController:
 
         session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
         session.element_count = 1
-        if progress_snapshot is not None and progress_snapshot.visible:
+        if progress_snapshot is not None:
             session.progress.mark_rendered(progress_snapshot.revision)
         session.sequence = 1
         session.split_disabled = False

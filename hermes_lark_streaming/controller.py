@@ -24,9 +24,11 @@ from .interactions.clarify import (
 )
 from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
 from .streaming.controller import StreamingController
+from .streaming.progress import ActivityKind
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
 from .streaming.text import strip_reasoning_tags
+from .streaming.tooluse import activity_for_tool
 
 _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
@@ -391,11 +393,17 @@ class StreamCardController(StreamingController):
         session = self._get_active_session(message_id)
         if session is None or session.guard.should_skip("on_reasoning"):
             return False
-
-        if not self._cfg.show_reasoning:
+        if session.segment_state is None:
             return False
 
-        if session.segment_state is None:
+        activity_changed = bool(text.strip()) and self._note_activity(
+            session,
+            ActivityKind.THINKING,
+        )
+
+        if not self._cfg.show_reasoning:
+            if activity_changed:
+                self._schedule_flush(session)
             return False
 
         self._record_native_reasoning(session, text, api_mode=api_mode)
@@ -422,6 +430,7 @@ class StreamCardController(StreamingController):
         if status in ("running", "started", "tool.started"):
             self._pause_merged_reasoning(session)
             session.tool_use.record_start(tool_name, detail)
+            self._note_activity(session, activity_for_tool(tool_name))
         else:
             is_error = status in ("error", "failed")
             session.tool_use.record_end(
@@ -429,6 +438,7 @@ class StreamCardController(StreamingController):
                 error=detail if is_error else "",
                 output="" if is_error else detail,
             )
+            self._note_activity(session, None)
 
         session.segment_state.on_tool_event(len(session.tool_use.build_display_steps()))
         session.tool_panel.note_tool_event()
@@ -451,6 +461,8 @@ class StreamCardController(StreamingController):
 
         self._pause_merged_reasoning(session)
         self._append_answer_segment(session, answer_text)
+        if answer_text.strip():
+            self._note_activity(session, ActivityKind.ANSWERING)
         self._schedule_flush(session)
         return True
 
@@ -621,12 +633,13 @@ class StreamCardController(StreamingController):
             return False
         if not session.progress.available:
             return False
-        session.progress.note_heartbeat(
+        visible_changed = session.progress.note_heartbeat(
             elapsed_seconds,
             iteration=iteration,
             max_iterations=max_iterations,
         )
-        self._schedule_flush(session)
+        if visible_changed:
+            self._schedule_flush(session)
         return True
 
     def on_cron_deliver(

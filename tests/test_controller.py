@@ -23,6 +23,7 @@ from hermes_lark_streaming.cardkit.builder import (
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
 from hermes_lark_streaming.patch import on_reasoning_delta
+from hermes_lark_streaming.streaming.progress import ActivityKind
 from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elements
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
@@ -823,26 +824,213 @@ class TestDoCreateCard:
         assert second.progress.visible is False
 
     @pytest.mark.asyncio
-    async def test_reasoning_tool_answer_do_not_touch_heartbeat_state(self) -> None:
+    async def test_reasoning_tool_answer_drive_activity_without_changing_heartbeat_data(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl, show_tool_use=False)
         session = _make_session("msg_no_lifecycle_progress")
         session.state = SessionState.STREAMING
         session.card_id = "card_no_lifecycle_progress"
         ctrl._sessions[session.message_id] = session
-        initial = session.progress.snapshot()
-
         with patch.object(ctrl, "_schedule_flush"):
             assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+            assert session.progress.activity == ActivityKind.THINKING
             assert ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="read",
                 status="started",
             ) is True
+            assert session.progress.activity == ActivityKind.READING
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+            assert session.progress.activity == ActivityKind.ANSWERING
+
+        snapshot = session.progress.snapshot()
+        assert snapshot.elapsed_seconds == 0
+        assert snapshot.iteration is None
+
+    def test_repeated_reasoning_and_answer_deltas_dedupe_activity_revision(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_activity_dedupe")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="first") is True
+            reasoning_revision = session.progress.snapshot().revision
+            assert ctrl.on_reasoning(message_id=session.message_id, text="second") is True
+            assert session.progress.snapshot().revision == reasoning_revision
+
+            assert ctrl.on_answer(message_id=session.message_id, text="first answer") is True
+            answer_revision = session.progress.snapshot().revision
+            assert ctrl.on_answer(message_id=session.message_id, text="second answer") is True
+            assert session.progress.snapshot().revision == answer_revision
+
+    def test_hidden_reasoning_still_drives_activity_without_rendering_reasoning_body(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_reasoning=False)
+        session = _make_session("msg_hidden_reasoning_activity")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush") as schedule:
+            assert ctrl.on_reasoning(message_id=session.message_id, text="private plan") is False
+
+        assert session.progress.activity == ActivityKind.THINKING
+        assert session.segment_state.segments == []
+        schedule.assert_called_once_with(session)
+
+    def test_interim_commentary_structured_source_drives_answering_activity(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_commentary_activity")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="visible commentary",
+                source="interim_commentary",
+            ) is True
+
+        assert session.progress.activity == ActivityKind.ANSWERING
+
+    @pytest.mark.parametrize("show_tool_use", [True, False])
+    def test_tool_activity_is_independent_of_tool_panel_visibility(self, show_tool_use: bool) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=show_tool_use)
+        session = _make_session(f"msg_tool_visibility_{show_tool_use}")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            ) is True
+
+        assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+
+    @pytest.mark.parametrize("terminal_status", ["completed", "error", "failed"])
+    def test_tool_terminal_event_clears_activity(self, terminal_status: str) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session(f"msg_tool_end_{terminal_status}")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="started",
+            )
+            assert session.progress.activity == ActivityKind.SEARCHING
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status=terminal_status,
+                detail="failed" if terminal_status != "completed" else "done",
+            )
+
+        assert session.progress.activity is None
+        assert session.progress.visible is False
+
+    @pytest.mark.asyncio
+    async def test_long_tool_heartbeats_do_not_replace_or_update_activity_status(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = CardSession("msg_long_tool", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_long_tool"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+        await ctrl._do_flush(session)
+        ctrl._client.cardkit_batch_update.reset_mock()
+
+        with patch.object(ctrl, "_schedule_flush") as schedule:
+            for elapsed, iteration in ((30, 2), (60, 5), (120, 9)):
+                assert ctrl.on_long_running_progress(
+                    message_id=session.message_id,
+                    elapsed_seconds=elapsed,
+                    iteration=iteration,
+                ) is True
+
+        assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+        assert session.progress.snapshot().zh_content == "正在执行命令"
+        assert session.progress.snapshot().elapsed_seconds == 120
+        assert session.progress.snapshot().iteration == 9
+        schedule.assert_not_called()
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_tool_end_blanks_status_then_next_heartbeat_restores_progress(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = CardSession("msg_tool_fallback", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_tool_fallback"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+        await ctrl._do_flush(session)
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=120,
+                iteration=5,
+            )
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="completed",
+            )
+        await ctrl._do_flush(session)
+
+        cleared_action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
+        assert cleared_action["params"]["partial_element"]["content"] == " "
+        assert session.progress.visible is False
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=150,
+                iteration=6,
+            ) is True
+        await ctrl._do_flush(session)
+        restored_action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
+        assert restored_action["params"]["partial_element"]["i18n_content"]["zh_cn"] == (
+            "运行中 · 2 分钟 · 第 6 轮"
+        )
+
+    def test_text_progress_mode_does_not_create_activity_state(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_text_progress")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_text_progress"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            ) is True
             assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
 
-        assert session.progress.snapshot() == initial
-        assert session.progress.visible is False
+        assert session.progress.activity is None
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+        ) is False
 
     @pytest.mark.asyncio
     async def test_split_card_preserves_latest_heartbeat_on_native_loading(self) -> None:
@@ -897,6 +1085,26 @@ class TestDoCreateCard:
             message_id=session.message_id,
             elapsed_seconds=180,
         ) is False
+
+    @pytest.mark.asyncio
+    async def test_activity_update_failure_is_fail_open_for_answer_processing(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_activity_failure", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_activity_failure"
+        session.card_msg_id = "card_msg_activity_failure"
+        ctrl._sessions[session.message_id] = session
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=RuntimeError("update failed"))
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+        await ctrl._flush_progress(session)
+
+        assert session.progress.available is False
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+        assert session.segment_state.segments[-1].text == "answer"
 
     def test_failed_and_aborted_sessions_clear_progress(self) -> None:
         ctrl = _setup_ctrl()
@@ -956,6 +1164,7 @@ class TestDoCreateCard:
         ]
         assert await ctrl._do_complete_card(session) is True
         assert session.progress.visible is False
+        assert session.progress.activity is None
 
         complete_card = ctrl._client.cardkit_update.await_args.args[1]
         assert complete_card["body"]["elements"]

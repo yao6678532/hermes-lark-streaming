@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from hermes_lark_streaming.streaming.progress import ActivityKind
 from hermes_lark_streaming.streaming.tooluse import (
     ToolUseTracker,
     _basename_only,
@@ -16,10 +17,31 @@ from hermes_lark_streaming.streaming.tooluse import (
     _humanize_tool_name,
     _resolve_tool_descriptor,
     _sanitize_detail,
+    activity_for_tool,
     compact_command_detail,
     redact_inline_secrets,
     tool_detail_for_display,
 )
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "expected"),
+    [
+        ("terminal", ActivityKind.EXECUTING_COMMAND),
+        ("bash", ActivityKind.EXECUTING_COMMAND),
+        ("python", ActivityKind.EXECUTING_COMMAND),
+        ("web_search", ActivityKind.SEARCHING),
+        ("browser_navigate", ActivityKind.SEARCHING),
+        ("read_file", ActivityKind.READING),
+        ("web_fetch", ActivityKind.READING),
+        ("provider_custom_tool", ActivityKind.USING_TOOL),
+    ],
+)
+def test_activity_for_tool_uses_shared_descriptor_registry(
+    tool_name: str,
+    expected: ActivityKind,
+) -> None:
+    assert activity_for_tool(tool_name) == expected
 
 
 class TestRedactInlineSecrets:

@@ -104,7 +104,7 @@ lark:
 | 工具详情模式 | `display.platforms.feishu.tool_detail_mode` | `full` / `compact` | `full` | 运行时重新读取 | `full` 保留完整的 sanitized detail；`compact` 在同一 sanitized detail 基础上对 Terminal/command 优先显示 executable/script 和安全 subcommand，隐藏长参数 payload；其他工具保守使用 sanitized detail。非法值 fallback 到 `full`。也兼容 `display.tool_detail_mode` 作为 fallback。 |
 | Clarify presentation | `display.platforms.feishu.clarify_style` | `text` / `card` | `text` | 运行时重新读取 | `text` 使用 Hermes 原生文本交互；`card` 使用 Feishu Clarify Card；非法值 fallback 到 `text`。 |
 | Approval presentation | `display.platforms.feishu.confirmation_style` | `hermes` / `openclaw` | `hermes` | 运行时重新读取 | `hermes` 保留 Hermes 原生 approval presentation；`openclaw` 使用插件 Approval Card presentation。Hermes approval state / resolver 仍是真实 source of truth；非法值 fallback 到 `hermes`。 |
-| Working 显示位置 | `streaming.progress_mode` | `text` / `card` | `text` | 重启 gateway | `text` 保持 Hermes 原生 long-running heartbeat 独立文本消息；`card` 在活动 streaming card 能安全接管时显示在卡片底部 progress/loading 区域。插件不解析 `Working` 字符串、不启动本地 heartbeat ticker，也不存在 `streaming.progress_interval` 或 `streaming.heartbeat_interval`。 |
+| Working 显示位置 | `streaming.progress_mode` | `text` / `card` | `text` | 重启 gateway | `text` 保持 Hermes 原生 long-running heartbeat 独立文本消息；`card` 在活动 streaming card 能安全接管时显示在卡片底部 progress/loading 区域。存在明确的结构化 activity 时优先显示简洁 activity 状态；activity 为空时才显示 heartbeat 时长与轮次。插件不解析 `Working` 字符串、不启动本地 heartbeat ticker，也不存在 `streaming.progress_interval` 或 `streaming.heartbeat_interval`。 |
 | Hermes heartbeat 周期 | `agent.gateway_notify_interval` | number，单位秒 | 由当前 Hermes 版本决定 | 重启 gateway | **Hermes-owned configuration**。控制 Hermes Gateway long-running heartbeat 周期，不是插件 timer；`streaming.progress_mode` 只决定显示位置。profile scoped。 |
 | 卡片宽度 | `streaming.width_mode` | `default` / `compact` / `fill` | `default` | 重启 gateway | 非法值 fallback 到 `default`。 |
 | 完成态面板展开 | `streaming.panel_expanded` | bool | `false` | 重启 gateway | 控制完成卡片中的 reasoning / unified Tool Panel 是否保持展开；默认 `false`，因此工具面板完成时折叠。 |
@@ -232,12 +232,14 @@ agent:
 
 heartbeat 周期是 Hermes 参数，不是 `streaming.progress_mode`。修改 `agent.gateway_notify_interval` 后需要重启 gateway。
 
+`progress_mode: card` 的 activity 状态只由 reasoning、tool lifecycle 和 answer delta 等结构化事件驱动，不使用本地 timer，也不显示秒级计时。明确 activity 结束后，卡片会等待下一次真实 Hermes heartbeat 再恢复运行时长与轮次；heartbeat 周期仍完全由 `agent.gateway_notify_interval` 控制。
+
 ## Phase 1～4 保留的关键语义
 
 - Phase 1：`show_reasoning` 控制是否显示，`reasoning_mode` 控制组织方式；reasoning 与 answer/body 分离。GPT/Codex quota footer 不属于本任务的配置改造。
 - Phase 2：Clarify Card 只是 Feishu presentation，Hermes resolver / pending state 仍是 source of truth；卡片失败时回退到 Hermes text flow。
 - Phase 3：`confirmation_style: openclaw` 只是 presentation style，不替换 Hermes approval state，不增加自定义 always-allow policy，最终仍使用 Hermes resolver。
-- Phase 4：插件只消费真实 Hermes long-running notifications，不创建本地 ticker；heartbeat 周期由 `agent.gateway_notify_interval` 控制，iteration 来自 Hermes structured activity（例如 `api_call_count`），不从文本解析。无法安全接管 card 时 fail-open。
+- Phase 4：插件只消费真实 Hermes long-running notifications，不创建本地 ticker；明确的结构化 activity 优先于 heartbeat，activity 为空时 heartbeat 才显示运行时长与轮次。heartbeat 周期由 `agent.gateway_notify_interval` 控制，iteration 来自 Hermes structured activity（例如 `api_call_count`），不从文本解析。无法安全接管 card 时 fail-open。
 
 ## Fail-open 语义
 

@@ -25,7 +25,7 @@ MERGED_REASONING_ELEMENT_ESTIMATE = 4
 
 
 def build_progress_update_action(snapshot: ProgressSnapshot) -> dict[str, Any]:
-    """Update only the content of the fixed native loading element."""
+    """Update only the content of the fixed native loading/status element."""
     return {
         "action": "partial_update_element",
         "params": {

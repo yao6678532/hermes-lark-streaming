@@ -120,6 +120,8 @@ display:
 
 See [CONFIGURATION.md](CONFIGURATION.md) for defaults, fallback behavior, profile scope, credentials, hot-reload boundaries, and supported footer fields.
 
+With `progress_mode: card`, the card footer prioritizes concise activity from structured events. When no explicit activity exists, it falls back to Hermes heartbeat minutes and rounds. The plugin uses no local timer.
+
 ---
 
 ## CLI Commands

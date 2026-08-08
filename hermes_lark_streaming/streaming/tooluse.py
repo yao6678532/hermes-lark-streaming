@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, TypedDict
 
+from .progress import ActivityKind
+
 
 class ToolStatus(StrEnum):
     RUNNING = "running"
@@ -312,6 +314,7 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["skill"], "icon": "app-default_outlined", "title": "Load skill", "sanitizer": None},
     {
         "aliases": ["read", "open"],
+        "activity": ActivityKind.READING,
         "icon": "file-link-text_outlined",
         "title": "Read",
         "sanitizer": "path",
@@ -326,33 +329,51 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     },
     {
         "aliases": ["web_search", "web-search", "search"],
+        "activity": ActivityKind.SEARCHING,
         "icon": "search_outlined",
         "title": "Search",
         "sanitizer": "search",
     },
     {
         "aliases": ["web_fetch", "web-fetch", "fetch"],
+        "activity": ActivityKind.READING,
         "icon": "language_outlined",
         "title": "Fetch web page",
         "sanitizer": "url",
         "no_result": True,
     },
-    {"aliases": ["grep"], "icon": "doc-search_outlined", "title": "Search text", "sanitizer": "search"},
-    {"aliases": ["glob"], "icon": "folder_outlined", "title": "Search files", "sanitizer": "path"},
+    {
+        "aliases": ["grep"],
+        "activity": ActivityKind.SEARCHING,
+        "icon": "doc-search_outlined",
+        "title": "Search text",
+        "sanitizer": "search",
+    },
+    {
+        "aliases": ["glob"],
+        "activity": ActivityKind.SEARCHING,
+        "icon": "folder_outlined",
+        "title": "Search files",
+        "sanitizer": "path",
+    },
     {
         "aliases": ["exec", "bash", "command", "run"],
+        "activity": ActivityKind.EXECUTING_COMMAND,
+        "activity_aliases": ["shell", "python"],
         "icon": "setting_outlined",
         "title": "Run command",
         "sanitizer": "command",
     },
     {
         "aliases": ["terminal"],
+        "activity": ActivityKind.EXECUTING_COMMAND,
         "icon": "setting-inter_outlined",
         "title": "Terminal",
         "sanitizer": "command",
     },
     {
         "aliases": ["browser", "playwright", "navigate"],
+        "activity": ActivityKind.SEARCHING,
         "icon": "browser-mac_outlined",
         "title": "Browser",
         "no_result": True,
@@ -373,6 +394,21 @@ def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
             if normalized == alias or normalized.startswith(f"{alias}_"):
                 return desc
     return None
+
+
+def activity_for_tool(name: str | None) -> ActivityKind:
+    """Map a structured tool name through the shared Tool Panel registry."""
+    if not name:
+        return ActivityKind.USING_TOOL
+    normalized = name.strip().lower().replace("-", "_")
+    for desc in _TOOL_DESCRIPTORS:
+        aliases = [*desc["aliases"], *desc.get("activity_aliases", [])]
+        for alias in aliases:
+            normalized_alias = alias.replace("-", "_")
+            if normalized == normalized_alias or normalized.startswith(f"{normalized_alias}_"):
+                activity = desc.get("activity")
+                return activity if isinstance(activity, ActivityKind) else ActivityKind.USING_TOOL
+    return ActivityKind.USING_TOOL
 
 
 def _humanize_tool_name(name: str) -> str:

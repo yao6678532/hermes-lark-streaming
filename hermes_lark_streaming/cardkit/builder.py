@@ -95,10 +95,10 @@ def _build_header(status: str) -> dict[str, Any]:
 
 
 def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[str, Any]:
-    heartbeat = progress_snapshot if progress_snapshot and progress_snapshot.visible else None
+    status = progress_snapshot if progress_snapshot and progress_snapshot.visible else None
     return {
         "tag": "markdown",
-        "content": heartbeat.content if heartbeat else " ",
+        "content": status.content if status else " ",
         "icon": {
             "tag": "custom_icon",
             "img_key": _LOADING_IMG_KEY,
@@ -106,8 +106,8 @@ def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[
         },
         "element_id": _LOADING_ELEMENT_ID,
         **(
-            {"i18n_content": _i18n(heartbeat.content, heartbeat.zh_content)}
-            if heartbeat
+            {"i18n_content": _i18n(status.content, status.zh_content)}
+            if status
             else {}
         ),
     }

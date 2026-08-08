@@ -29,7 +29,7 @@ from hermes_lark_streaming.cardkit.markdown import (
     optimize_markdown_style,
 )
 from hermes_lark_streaming.interactions.approval import _official_buttons
-from hermes_lark_streaming.streaming.progress import ProgressState
+from hermes_lark_streaming.streaming.progress import ActivityKind, ProgressState
 from hermes_lark_streaming.streaming.segments import Segment
 
 # --- Markdown 优化 ---
@@ -633,6 +633,18 @@ class TestBuildStreamingCardV2:
         assert loading["i18n_content"]["zh_cn"] == "运行中 · 3 分钟 · 第 3 轮"
         assert loading["icon"]["img_key"] == "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
         assert not any(element.get("element_id") == "progress_status" for element in elements)
+
+    def test_activity_takes_priority_without_elapsed_or_round(self) -> None:
+        state = ProgressState()
+        state.note_heartbeat(180, iteration=3, max_iterations=60)
+        state.note_activity(ActivityKind.THINKING)
+
+        loading = build_streaming_card_v2(progress_snapshot=state.snapshot())["body"]["elements"][-1]
+
+        assert loading["content"] == "Thinking"
+        assert loading["i18n_content"]["zh_cn"] == "思考中"
+        assert "min" not in loading["content"]
+        assert "Round" not in loading["content"]
 
     def test_no_tool_use(self) -> None:
         card = build_streaming_card_v2(show_tool_use=False)
