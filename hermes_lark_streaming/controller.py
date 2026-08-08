@@ -438,7 +438,7 @@ class StreamCardController(StreamingController):
                 error=detail if is_error else "",
                 output="" if is_error else detail,
             )
-            self._note_activity(session, None)
+            self._note_activity(session, session.tool_use.active_activity)
 
         session.segment_state.on_tool_event(len(session.tool_use.build_display_steps()))
         session.tool_panel.note_tool_event()

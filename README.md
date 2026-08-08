@@ -120,7 +120,7 @@ display:
 
 详细的默认值、fallback、Profile 作用域、凭据来源、热加载边界以及 `footer.fields` 支持字段见 [CONFIGURATION.md](CONFIGURATION.md)。
 
-使用 `progress_mode: card` 时，卡片底部会优先显示由结构化事件驱动的简洁 activity；没有明确 activity 时，继续显示 Hermes heartbeat 提供的分钟与轮次。插件不使用本地计时器。
+使用 `progress_mode: card` 时，卡片底部状态区域会优先显示由结构化事件驱动的简洁 activity；没有明确 activity 时，继续显示 Hermes heartbeat 提供的分钟与轮次。插件不使用本地计时器。
 
 ---
 

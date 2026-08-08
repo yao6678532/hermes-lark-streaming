@@ -892,6 +892,54 @@ class TestDoCreateCard:
 
         assert session.progress.activity == ActivityKind.ANSWERING
 
+    def test_thinking_callback_with_reasoning_and_answer_prefers_answering(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_thinking_with_answer")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="<think>分析...</think>最终答案",
+            ) is True
+
+        answer_text = "".join(
+            seg.text for seg in session.segment_state.segments if seg.type == "answer"
+        )
+        assert "最终答案" in answer_text
+        assert session.progress.activity == ActivityKind.ANSWERING
+
+    def test_pure_structured_thinking_callback_sets_thinking(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_pure_thinking")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Reasoning:\n分析...",
+            ) is True
+
+        assert session.progress.activity == ActivityKind.THINKING
+        assert [seg.type for seg in session.segment_state.segments] == ["reasoning"]
+
+    def test_hidden_pure_thinking_keeps_body_empty_and_sets_activity(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_reasoning=False)
+        session = _make_session("msg_hidden_pure_thinking")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Reasoning:\n分析...",
+            ) is True
+
+        assert session.segment_state.segments == []
+        assert session.progress.activity == ActivityKind.THINKING
+
     @pytest.mark.parametrize("show_tool_use", [True, False])
     def test_tool_activity_is_independent_of_tool_panel_visibility(self, show_tool_use: bool) -> None:
         ctrl = _setup_ctrl()
@@ -931,6 +979,122 @@ class TestDoCreateCard:
 
         assert session.progress.activity is None
         assert session.progress.visible is False
+
+    def test_overlapping_tools_restore_latest_remaining_activity(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_tool_overlap_restore")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+            assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="started",
+            )
+            assert session.progress.activity == ActivityKind.SEARCHING
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="completed",
+            )
+            assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="completed",
+            )
+
+        assert session.progress.activity is None
+
+    def test_older_tool_end_does_not_clear_newer_running_tool(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_old_tool_end")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="started",
+            )
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="completed",
+            )
+
+        assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+
+    def test_duplicate_late_tool_end_preserves_other_running_activity(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_duplicate_tool_end")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="web_search",
+                status="started",
+            )
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="completed",
+            )
+            assert session.progress.activity == ActivityKind.SEARCHING
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="completed",
+            )
+
+        assert session.progress.activity == ActivityKind.SEARCHING
+
+    def test_known_tool_end_restores_unknown_running_tool_activity(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_session("msg_unknown_tool_restore")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="provider_custom_tool",
+                status="started",
+            )
+            assert session.progress.activity == ActivityKind.USING_TOOL
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="started",
+            )
+            assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+            ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="terminal",
+                status="completed",
+            )
+
+        assert session.progress.activity == ActivityKind.USING_TOOL
 
     @pytest.mark.asyncio
     async def test_long_tool_heartbeats_do_not_replace_or_update_activity_status(self) -> None:

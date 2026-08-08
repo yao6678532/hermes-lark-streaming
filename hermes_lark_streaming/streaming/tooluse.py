@@ -484,6 +484,16 @@ class ToolUseTracker:
         )
 
     @property
+    def active_activity(self) -> ActivityKind | None:
+        """Activity for the most recently started tool that is still running."""
+        if self._session is None:
+            return None
+        for step in reversed(self._session.steps):
+            if step.status == ToolStatus.RUNNING:
+                return activity_for_tool(step.name)
+        return None
+
+    @property
     def step_count(self) -> int:
         return len(self._session.steps) if self._session else 0
 

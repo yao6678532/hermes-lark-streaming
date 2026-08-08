@@ -302,11 +302,6 @@ class StreamingController:
             self._schedule_flush(session)
             return True
 
-        activity_changed = bool(text.strip()) and self._note_activity(
-            session,
-            ActivityKind.THINKING,
-        )
-
         activity = self._uses_activity_reasoning_presentation(
             api_mode=api_mode,
             source=normalized_source,
@@ -316,6 +311,13 @@ class StreamingController:
         split = split_reasoning_text(text)
         reasoning = split.get("reasoning_text")
         answer = split.get("answer_text")
+
+        next_activity: ActivityKind | None = None
+        if answer and answer.strip():
+            next_activity = ActivityKind.ANSWERING
+        elif (reasoning and reasoning.strip()) or text.strip():
+            next_activity = ActivityKind.THINKING
+        activity_changed = self._note_activity(session, next_activity) if next_activity else False
 
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)

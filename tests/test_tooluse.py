@@ -44,6 +44,19 @@ def test_activity_for_tool_uses_shared_descriptor_registry(
     assert activity_for_tool(tool_name) == expected
 
 
+def test_active_activity_uses_latest_running_step_and_restores_previous() -> None:
+    tracker = ToolUseTracker()
+    tracker.record_start("terminal")
+    assert tracker.active_activity == ActivityKind.EXECUTING_COMMAND
+    tracker.record_start("web_search")
+    assert tracker.active_activity == ActivityKind.SEARCHING
+
+    tracker.record_end("web_search")
+    assert tracker.active_activity == ActivityKind.EXECUTING_COMMAND
+    tracker.record_end("terminal")
+    assert tracker.active_activity is None
+
+
 class TestRedactInlineSecrets:
     def test_sensitive_key_value(self) -> None:
         assert "token=xxx" not in redact_inline_secrets("token=xxx")
