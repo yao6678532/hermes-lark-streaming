@@ -1208,19 +1208,30 @@ class TestDoFlush:
             )
         await ctrl._do_flush(session)
 
+        for text in (" ", "\n"):
+            with patch.object(ctrl, "_schedule_flush"):
+                assert ctrl.on_answer(message_id=session.message_id, text=text)
+            await ctrl._do_flush(session)
+
+        whitespace_partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert whitespace_partials[-1]["params"]["partial_element"]["expanded"] is True
+
         with patch.object(ctrl, "_schedule_flush"):
-            assert ctrl.on_answer(message_id=session.message_id, text="hello ")
+            assert ctrl.on_answer(message_id=session.message_id, text="hello")
         await ctrl._do_flush(session)
         first_answer_partials = [
             action for action in self._tool_actions(ctrl)
             if action["action"] == "partial_update_element"
         ]
+        assert len(first_answer_partials) == len(whitespace_partials) + 1
         assert first_answer_partials[-1]["params"]["partial_element"]["expanded"] is False
 
-        for text in ("world ", "again"):
-            with patch.object(ctrl, "_schedule_flush"):
-                assert ctrl.on_answer(message_id=session.message_id, text=text)
-            await ctrl._do_flush(session)
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text=" world")
+        await ctrl._do_flush(session)
 
         later_partials = [
             action for action in self._tool_actions(ctrl)
@@ -1228,7 +1239,7 @@ class TestDoFlush:
         ]
         assert len(later_partials) == len(first_answer_partials)
         assert any(
-            "hello world again" in call.args[2]
+            "hello world" in call.args[2]
             for call in ctrl._client.cardkit_stream_element.await_args_list
         )
 

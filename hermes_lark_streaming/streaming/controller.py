@@ -192,7 +192,8 @@ class StreamingController:
 
         had_answer = self._active_card_has_answer(session)
         segment_state.on_answer_delta(text)
-        if not had_answer:
+        has_answer = self._active_card_has_answer(session)
+        if not had_answer and has_answer:
             session.tool_panel.note_answer_started()
         return True
 
