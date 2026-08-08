@@ -8,6 +8,7 @@ from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    TOOL_PANEL_ELEMENT_ID,
     _build_reasoning_panel,
     _build_tool_panel,
     _format_elapsed,
@@ -54,6 +55,22 @@ def estimate_segment_elements(seg: Segment, all_steps: list[ToolDisplayStep]) ->
 
 def tool_segment_end(seg: Segment, all_steps: list[ToolDisplayStep]) -> int:
     return seg.tool_end_offset if seg.tool_end_offset else len(all_steps)
+
+
+def active_tool_range(
+    segments: list[Segment], split_index: int, all_steps: list[ToolDisplayStep]
+) -> tuple[int, int] | None:
+    """Return the tool step slice owned by the current physical card."""
+    tool_segments = [
+        seg for seg in segments[split_index:] if seg.type == SegmentType.TOOL
+    ]
+    if not tool_segments:
+        return None
+    start = min(seg.tool_offset for seg in tool_segments)
+    end = max(tool_segment_end(seg, all_steps) for seg in tool_segments)
+    if start >= end:
+        return None
+    return start, min(end, len(all_steps))
 
 
 def estimate_tool_elements(start: int, end: int, all_steps: list[ToolDisplayStep]) -> int:
@@ -118,6 +135,26 @@ def build_add_segment_action(
     }
 
 
+def build_add_tool_panel_action(
+    steps: list[ToolDisplayStep], *, expanded: bool = True,
+) -> dict[str, Any]:
+    """Create the one fixed tool panel for the current physical card."""
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": _LOADING_ELEMENT_ID,
+            "elements": [
+                _build_tool_panel(
+                    steps,
+                    expanded=expanded,
+                    element_id=TOOL_PANEL_ELEMENT_ID,
+                )
+            ],
+        },
+    }
+
+
 def build_add_merged_reasoning_action() -> dict[str, Any]:
     """Create the one fixed reasoning panel used by merged presentation mode."""
     return {
@@ -163,11 +200,12 @@ def build_reasoning_finalized_action(seg: Segment) -> dict[str, Any]:
 
 def build_tool_update_action(
     *,
-    element_id: str,
     steps: list[ToolDisplayStep],
+    expanded: bool = True,
+    element_id: str = TOOL_PANEL_ELEMENT_ID,
 ) -> dict[str, Any]:
-    """构造 tool panel 局部更新 action."""
-    panel = _build_tool_panel(steps)
+    """Update the fixed tool panel's header, children, and expansion state."""
+    panel = _build_tool_panel(steps, expanded=expanded, element_id=None)
     return {
         "action": "partial_update_element",
         "params": {
@@ -175,6 +213,7 @@ def build_tool_update_action(
             "partial_element": {
                 "elements": panel["elements"],
                 "header": panel["header"],
+                "expanded": panel["expanded"],
             },
         },
     }

@@ -18,6 +18,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    TOOL_PANEL_ELEMENT_ID,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
@@ -1090,6 +1091,213 @@ class TestDoCreateCard:
 
 
 class TestDoFlush:
+    @staticmethod
+    def _tool_actions(ctrl: StreamCardController) -> list[dict]:
+        return [
+            action
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            if action.get("params", {}).get("element_id") == TOOL_PANEL_ELEMENT_ID
+            or any(
+                element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+                for element in action.get("params", {}).get("elements", [])
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tool_events_share_one_fixed_panel_and_follow_live_expansion(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_unified_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_unified_tools"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+
+        adds = [
+            element
+            for action in self._tool_actions(ctrl)
+            for element in action.get("params", {}).get("elements", [])
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        ]
+        assert len(adds) == 1
+        assert adds[0]["expanded"] is True
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+            assert ctrl.on_answer(message_id=session.message_id, text="answer")
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert partials[-1]["params"]["partial_element"]["expanded"] is False
+        collapsed_count = len(partials)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text=" answer 2")
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert len(partials) == collapsed_count
+        assert any("answer answer 2" in call.args[2] for call in ctrl._client.cardkit_stream_element.await_args_list)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="exec", status="started", detail="pytest"
+            )
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert partials[-1]["params"]["partial_element"]["expanded"] is True
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="exec", status="completed", detail="passed"
+            )
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert partials[-1]["params"]["partial_element"]["expanded"] is False
+        collapsed_count = len(partials)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text=" answer 3")
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert len(partials) == collapsed_count
+        assert len(adds) == 1
+        assert [seg.type for seg in session.segment_state.segments] == [
+            "tool", "answer", "tool", "answer",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_answer_deltas_collapse_tool_panel_only_once(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_answer_deltas")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_answer_deltas"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+        await ctrl._do_flush(session)
+
+        for text in (" ", "\n"):
+            with patch.object(ctrl, "_schedule_flush"):
+                assert ctrl.on_answer(message_id=session.message_id, text=text)
+            await ctrl._do_flush(session)
+
+        whitespace_partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert whitespace_partials[-1]["params"]["partial_element"]["expanded"] is True
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text="hello")
+        await ctrl._do_flush(session)
+        first_answer_partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert len(first_answer_partials) == len(whitespace_partials) + 1
+        assert first_answer_partials[-1]["params"]["partial_element"]["expanded"] is False
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text=" world")
+        await ctrl._do_flush(session)
+
+        later_partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert len(later_partials) == len(first_answer_partials)
+        assert any(
+            "hello world" in call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_show_tool_use_false_keeps_tracker_and_hides_panel(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = _make_session("msg_hidden_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_hidden_tools"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+        await ctrl._do_flush(session)
+
+        assert len(session.tool_use.build_display_steps()) == 1
+        assert not self._tool_actions(ctrl)
+        assert session.segment_state.segments[0].type == "tool"
+
+    @pytest.mark.asyncio
+    async def test_missing_fixed_tool_panel_is_recreated_without_failing_session(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_missing_tool_panel")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_missing_tool_panel"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+        ctrl._client.cardkit_batch_update = AsyncMock(
+            side_effect=[
+                FeishuAPIError(
+                    f"cardkit_batch_update: code=300313, msg=ErrMsg: not find elementID : {TOOL_PANEL_ELEMENT_ID};",
+                    300313,
+                ),
+                None,
+            ]
+        )
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+        assert session.tool_panel.created is False
+        assert session.tool_panel.dirty is True
+        assert session.state == SessionState.STREAMING
+
+        await ctrl._do_flush(session)
+        assert session.tool_panel.created is True
+        assert session.tool_panel.dirty is False
+        assert ctrl._client.cardkit_batch_update.await_count == 2
+
     @pytest.mark.asyncio
     async def test_three_step_pipeline(self) -> None:
         """step1 创建元素 → step2 刷文本 → step3 创建 tool 面板."""
@@ -2473,6 +2681,111 @@ class TestOnThinking:
 
         types = [s.type for s in session.segment_state.segments]
         assert types == ["reasoning", "answer"]
+
+    @pytest.mark.asyncio
+    async def test_interim_commentary_marks_tool_panel_only_on_first_answer(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_commentary_panel")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_commentary_panel"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        def tool_panel_actions() -> list[dict]:
+            return [
+                action
+                for call in ctrl._client.cardkit_batch_update.await_args_list
+                for action in call.args[1]
+                if action.get("params", {}).get("element_id") == TOOL_PANEL_ELEMENT_ID
+                or any(
+                    element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+                    for element in action.get("params", {}).get("elements", [])
+                )
+            ]
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+        await ctrl._do_flush(session)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl._on_thinking_segment(
+                session,
+                "commentary one",
+                source="interim_commentary",
+            )
+        await ctrl._do_flush(session)
+        first_partials = [
+            action for action in tool_panel_actions()
+            if action["action"] == "partial_update_element"
+        ]
+        assert first_partials[-1]["params"]["partial_element"]["expanded"] is False
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl._on_thinking_segment(
+                session,
+                "commentary two",
+                source="interim_commentary",
+            )
+        await ctrl._do_flush(session)
+
+        later_partials = [
+            action for action in tool_panel_actions()
+            if action["action"] == "partial_update_element"
+        ]
+        assert len(later_partials) == len(first_partials)
+        answer_segments = [
+            seg for seg in session.segment_state.segments if seg.type == "answer"
+        ]
+        assert answer_segments[0].text == "commentary onecommentary two"
+        assert any(
+            "commentary onecommentary two" in call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        )
+
+    def test_split_reasoning_answer_marks_tool_panel_only_on_first_answer(self) -> None:
+        ctrl = _setup_ctrl()
+        ctrl._cfg._reload = lambda: {"display": {"platforms": {"feishu": {"show_reasoning": True}}}}  # type: ignore[assignment]
+        session = _make_session("msg_split_answer_panel")
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl._on_thinking_segment(
+                session,
+                "<thinking>reasoning</thinking>\nanswer one",
+            )
+            first_revision = session.tool_panel.revision
+            session.tool_panel.mark_rendered(first_revision, 0)
+            ctrl._on_thinking_segment(session, "answer two")
+
+        answer_segments = [
+            seg for seg in session.segment_state.segments if seg.type == "answer"
+        ]
+        assert [seg.text for seg in answer_segments] == ["reasoning\nanswer oneanswer two"]
+        assert session.tool_panel.revision == first_revision
+
+    def test_active_card_answer_ignores_sealed_card_history(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_active_card_answer")
+        old_answer = Segment("answer", "answer_old")
+        old_answer.text = "answer from card one"
+        new_tool = Segment("tool", "tool_new")
+        session.segment_state.segments = [old_answer, new_tool]
+        session.split_index = 1
+
+        assert ctrl._active_card_has_answer(session) is False
+        first_revision = session.tool_panel.revision
+        assert ctrl._append_answer_segment(session, "answer from card two") is True
+        assert ctrl._active_card_has_answer(session) is True
+        assert session.tool_panel.revision == first_revision + 1
+
+        assert ctrl._append_answer_segment(session, " more") is True
+        assert session.tool_panel.revision == first_revision + 1
 
     def test_merged_mode_uses_shared_reasoning_ingestion(self) -> None:
         ctrl = _setup_ctrl()

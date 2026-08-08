@@ -431,6 +431,7 @@ class StreamCardController(StreamingController):
             )
 
         session.segment_state.on_tool_event(len(session.tool_use.build_display_steps()))
+        session.tool_panel.note_tool_event()
         self._schedule_flush(session)
         return True
 
@@ -449,7 +450,7 @@ class StreamCardController(StreamingController):
             return False
 
         self._pause_merged_reasoning(session)
-        session.segment_state.on_answer_delta(answer_text)
+        self._append_answer_segment(session, answer_text)
         self._schedule_flush(session)
         return True
 

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ..cardkit.builder import (
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    TOOL_PANEL_ELEMENT_ID,
     build_background_card,
     build_complete_card,
     build_cron_card,
@@ -33,8 +34,10 @@ from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
     MERGED_REASONING_ELEMENT_ESTIMATE,
+    active_tool_range,
     build_add_merged_reasoning_action,
     build_add_segment_action,
+    build_add_tool_panel_action,
     build_progress_update_action,
     build_reasoning_finalized_action,
     build_tool_update_action,
@@ -171,6 +174,30 @@ class StreamingController:
             session.merged_reasoning.pause()
 
     @staticmethod
+    def _active_card_has_answer(session: CardSession) -> bool:
+        """Return whether the current physical card already has answer text."""
+        segment_state = session.segment_state
+        if segment_state is None:
+            return False
+        return any(
+            seg.type == SegmentType.ANSWER and seg.text.strip()
+            for seg in segment_state.segments[session.split_index:]
+        )
+
+    def _append_answer_segment(self, session: CardSession, text: str) -> bool:
+        """Append answer text and mark the tool panel only on first-card answer."""
+        segment_state = session.segment_state
+        if segment_state is None or not text:
+            return False
+
+        had_answer = self._active_card_has_answer(session)
+        segment_state.on_answer_delta(text)
+        has_answer = self._active_card_has_answer(session)
+        if not had_answer and has_answer:
+            session.tool_panel.note_answer_started()
+        return True
+
+    @staticmethod
     def _consume_merged_reasoning_segments(session: CardSession) -> None:
         """Mark chronology segments consumed only after the fixed UI is current."""
         if not session.merged_reasoning.created or session.merged_reasoning.dirty:
@@ -260,7 +287,7 @@ class StreamingController:
             if not text:
                 return False
             self._pause_merged_reasoning(session)
-            segment_state.on_answer_delta(text)
+            self._append_answer_segment(session, text)
             self._schedule_flush(session)
             return True
 
@@ -278,7 +305,7 @@ class StreamingController:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
             self._pause_merged_reasoning(session)
-            segment_state.on_answer_delta(answer)
+            self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
         self._schedule_flush(session)
@@ -385,133 +412,199 @@ class StreamingController:
             # intact for chronology, splitting, and diagnostics.
             await self._flush_merged_reasoning(session)
 
-        # ── 步骤 1: batch_update — 按 segment 顺序处理结构性变更 ──
+        # ── 步骤 1: batch_update — chronology 保留，TOOL 由固定 presentation lane 消费 ──
         actions: list[dict[str, Any]] = []
         new_el_ids: set[str] = set()
         new_el_estimates: dict[str, int] = {}
-        updated_tool_segs: list[Segment] = []
-        new_el_total = 0  # 同一 flush 内新 segment 估计 + dirty segment 增量的累计
+        tool_panel_segments: list[Segment] = []
+        tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None
+        new_el_total = 0
+        tool_panel_seen = False
 
         for i, seg in enumerate(segments):
             if i < session.split_index:
                 continue
-
             if merged_mode and seg.type == SegmentType.REASONING:
                 continue
 
-            # show_tool_use=False: 流式态跳过所有 TOOL segment 处理
-            # （新建与 dirty 更新两条路径），只保留 reasoning/answer
-            if seg.type == SegmentType.TOOL and not self._cfg.show_tool_use:
-                if not seg.created:
-                    seg.created = True  # 防止 next flush 再次进入 not created 分支
-                seg.dirty = False
+            if seg.type == SegmentType.TOOL:
+                if not self._cfg.show_tool_use:
+                    seg.created = True
+                    seg.dirty = False
+                    continue
+                if tool_panel_seen:
+                    seg.created = True
+                    seg.dirty = False
+                    continue
+                tool_panel_seen = True
+                tool_range = active_tool_range(segments, session.split_index, all_steps)
+                if tool_range is None:
+                    seg.created = True
+                    seg.dirty = False
+                    continue
+                start, end = tool_range
+                steps = all_steps[start:end]
+                panel_estimate = estimate_tool_elements(start, end, all_steps)
+                if (
+                    not session.tool_panel.created
+                    and not session.tool_panel.dirty
+                    and seg.created
+                    and seg.element_estimate > 0
+                ):
+                    # Compatibility with a session restored from the previous
+                    # per-segment renderer: infer the fixed panel's already
+                    # rendered estimate from its chronology segment once.
+                    session.tool_panel.created = True
+                    session.tool_panel.element_estimate = seg.element_estimate
+                panel_needs_update = (
+                    not session.tool_panel.created
+                    or session.tool_panel.dirty
+                    or any(
+                        tool_seg.dirty
+                        for tool_seg in segments[session.split_index:]
+                        if tool_seg.type == SegmentType.TOOL
+                    )
+                )
+                if panel_needs_update:
+                    current_estimate = session.tool_panel.element_estimate
+                    delta = panel_estimate - current_estimate
+                    if (
+                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                        and not session.split_disabled
+                    ):
+                        previous_split_index = session.split_index
+                        previous_card_id = session.card_id
+                        rollover = await self._maybe_rollover_unified_tool_panel(
+                            session=session,
+                            split_index=i,
+                            all_steps=all_steps,
+                            actions=actions,
+                            new_el_ids=new_el_ids,
+                            new_el_estimates=new_el_estimates,
+                            tool_panel_segments=tool_panel_segments,
+                            pending_delta=new_el_total,
+                        )
+                        if rollover == "failed":
+                            return
+                        if rollover == "split":
+                            if session.split_index != previous_split_index or session.card_id != previous_card_id:
+                                actions = []
+                                new_el_ids = set()
+                                new_el_estimates = {}
+                                tool_panel_segments = []
+                                tool_panel_snapshot = None
+                                new_el_total = 0
+                                tool_panel_seen = False
+                                return await self._do_flush(session)
+                            # New-card creation can fail.  The existing card is
+                            # intentionally kept alive with split disabled; the
+                            # tool panel is then rendered on it in a second batch.
+                            actions = []
+                            new_el_ids = set()
+                            new_el_estimates = {}
+                            tool_panel_segments = []
+                            tool_panel_snapshot = None
+                            new_el_total = 0
+                            return await self._do_flush(session)
+                    if (
+                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                        and session.element_count + new_el_total > 1
+                        and not session.split_disabled
+                    ):
+                        previous_split_index = session.split_index
+                        previous_card_id = session.card_id
+                        split_ok = await self._do_split_card(
+                            session,
+                            i,
+                            actions,
+                            new_el_ids,
+                            new_el_estimates,
+                            tool_panel_segments,
+                        )
+                        if not split_ok:
+                            return
+                        if session.split_index != previous_split_index or session.card_id != previous_card_id:
+                            actions = []
+                            new_el_ids = set()
+                            new_el_estimates = {}
+                            tool_panel_segments = []
+                            tool_panel_snapshot = None
+                            new_el_total = 0
+                            tool_panel_seen = False
+                            return await self._do_flush(session)
+                        actions = []
+                        new_el_ids = set()
+                        new_el_estimates = {}
+                        tool_panel_segments = []
+                        tool_panel_snapshot = None
+                        new_el_total = 0
+                    if session.tool_panel.created:
+                        actions.append(
+                            build_tool_update_action(
+                                steps=steps,
+                                expanded=self._tool_panel_expanded(session),
+                            )
+                        )
+                    else:
+                        actions.append(
+                            build_add_tool_panel_action(
+                                steps,
+                                expanded=self._tool_panel_expanded(session),
+                            )
+                        )
+                    tool_panel_segments = [
+                        tool_seg
+                        for tool_seg in segments[session.split_index:]
+                        if tool_seg.type == SegmentType.TOOL
+                    ]
+                    tool_panel_snapshot = (
+                        session.tool_panel.revision,
+                        panel_estimate,
+                        tool_panel_segments,
+                        list(steps),
+                    )
+                    new_el_total += delta
                 continue
 
             if not seg.created:
                 estimated = estimate_segment_elements(seg, all_steps)
-                if (
-                    seg.type == SegmentType.TOOL
-                    and session.element_count + new_el_total + estimated + FOOTER_RESERVE > ELEMENT_THRESHOLD
-                    and not session.split_disabled
-                ):
-                    split_offset = find_tool_split_offset(
-                        base_count=session.element_count + new_el_total,
-                        seg=seg,
-                        all_steps=all_steps,
-                    )
-                    if split_offset is not None:
-                        segment_state.split_tool_segment(i, split_offset)
-                        estimated = estimate_segment_elements(seg, all_steps)
                 if (
                     session.element_count + new_el_total + estimated + FOOTER_RESERVE > ELEMENT_THRESHOLD
                     and session.element_count + new_el_total > 1
                     and not session.split_disabled
                 ):
                     split_ok = await self._do_split_card(
-                        session, i, actions, new_el_ids, new_el_estimates, updated_tool_segs,
+                        session, i, actions, new_el_ids, new_el_estimates, tool_panel_segments,
                     )
                     if not split_ok:
                         return
                     actions = []
                     new_el_ids = set()
                     new_el_estimates = {}
-                    updated_tool_segs = []
+                    tool_panel_segments = []
+                    tool_panel_snapshot = None
                     new_el_total = 0
-
-                if seg.type == SegmentType.TOOL:
-                    updated_tool_segs.append(seg)
                 new_el_ids.add(seg.el_id)
                 new_el_estimates[seg.el_id] = estimated
                 new_el_total += estimated
                 actions.append(
-                    build_add_segment_action(
-                        seg,
-                        all_steps,
-                        text_size=self._cfg.body_text_size,
-                    )
+                    build_add_segment_action(seg, all_steps, text_size=self._cfg.body_text_size)
                 )
-                if (
-                    seg.type == SegmentType.TOOL
-                    and i + 1 < len(segments)
-                    and segments[i + 1].type == SegmentType.TOOL
-                    and segments[i + 1].tool_offset == seg.tool_end_offset
-                    and not session.split_disabled
-                ):
-                    split_ok = await self._do_split_card(
-                        session, i + 1, actions, new_el_ids, new_el_estimates, updated_tool_segs,
-                    )
-                    if not split_ok:
-                        return
-                    actions = []
-                    new_el_ids = set()
-                    new_el_estimates = {}
-                    updated_tool_segs = []
-                    new_el_total = 0
             elif seg.type == SegmentType.REASONING and seg.elapsed_ms > 0 and not seg.reasoning_finalized:
                 _logger.info(
                     "CardKit reasoning finalized: msg=%s el=%s elapsed=%.0fms seq=%d",
-                    session.message_id[:12],
-                    seg.el_id,
-                    seg.elapsed_ms,
-                    session.sequence + 1,
+                    session.message_id[:12], seg.el_id, seg.elapsed_ms, session.sequence + 1,
                 )
                 actions.append(build_reasoning_finalized_action(seg))
-            elif seg.type == SegmentType.TOOL and seg.dirty:
-                if seg.tool_end_offset > 0:
-                    start, end = seg.tool_offset, seg.tool_end_offset
-                else:
-                    start, end = seg.tool_offset, len(all_steps)
-                rollover = await self._maybe_rollover_tool_segment(
-                    session=session,
-                    segment_state=segment_state,
-                    index=i,
-                    seg=seg,
-                    all_steps=all_steps,
-                    actions=actions,
-                    new_el_ids=new_el_ids,
-                    new_el_estimates=new_el_estimates,
-                    updated_tool_segs=updated_tool_segs,
-                    pending_delta=new_el_total,
-                )
-                if rollover == "failed":
-                    return
-                if rollover == "split":
-                    actions = []
-                    new_el_ids = set()
-                    new_el_estimates = {}
-                    updated_tool_segs = []
-                    new_el_total = 0
-                    continue
-                estimate = estimate_tool_elements(start, end, all_steps)
-                actions.append(
-                    build_tool_update_action(element_id=seg.el_id, steps=all_steps[start:end])
-                )
-                updated_tool_segs.append(seg)
-                new_el_estimates[seg.el_id] = estimate
-                new_el_total += estimate - seg.element_estimate
 
         if actions and not await self._do_batch_update(
-            session, segments, actions, new_el_ids, new_el_estimates, updated_tool_segs,
+            session,
+            segments,
+            actions,
+            new_el_ids,
+            new_el_estimates,
+            tool_panel_segments,
+            tool_panel_snapshot=tool_panel_snapshot,
         ):
             return
 
@@ -568,6 +661,8 @@ class StreamingController:
         new_el_ids: set[str],
         new_el_estimates: dict[str, int],
         updated_tool_segs: list[Segment],
+        *,
+        tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
     ) -> bool:
         """执行 batch_update 并处理快照/标记。返回 False 表示失败."""
         assert self._client is not None
@@ -592,6 +687,10 @@ class StreamingController:
         pre_flush_tool_slices = {
             seg.el_id: pre_flush_tool_steps[seg.tool_offset:tool_segment_end(seg, pre_flush_tool_steps)]
             for seg in updated_tool_segs
+        }
+        pre_flush_tool_panel_offsets = {
+            seg.el_id: (seg.tool_offset, seg.tool_end_offset)
+            for seg in (tool_panel_snapshot[2] if tool_panel_snapshot else [])
         }
         try:
             await self._client.cardkit_batch_update(
@@ -629,6 +728,25 @@ class StreamingController:
                     seg.element_estimate = estimate
                 if seg.created and offset_ok and tool_slice_ok:
                     seg.dirty = False
+            if tool_panel_snapshot is not None:
+                revision, estimate, panel_segments, rendered_steps = tool_panel_snapshot
+                session.element_count += estimate - session.tool_panel.element_estimate
+                current_range = active_tool_range(segments, session.split_index, current_tool_steps)
+                current_steps = (
+                    current_tool_steps[current_range[0]:current_range[1]]
+                    if current_range is not None
+                    else []
+                )
+                current = session.tool_panel.mark_rendered(revision, estimate)
+                if current_steps != rendered_steps:
+                    session.tool_panel.dirty = True
+                for panel_seg in panel_segments:
+                    panel_seg.created = True
+                    offsets_changed = pre_flush_tool_panel_offsets.get(panel_seg.el_id) != (
+                        panel_seg.tool_offset,
+                        panel_seg.tool_end_offset,
+                    )
+                    panel_seg.dirty = session.tool_panel.dirty or not current or offsets_changed
         except FeishuAPIError as e:
             missing_el_id = extract_missing_element_id(e)
             action_summary = summarize_actions(actions)
@@ -650,15 +768,34 @@ class StreamingController:
             # 缺失元素（300313）时回滚 stale segment：本地 created=True 但卡片上不存在，
             # 下一轮 flush 会用 add_elements 重建该元素，避免反复 partial_update 死循环。
             if missing_el_id:
+                panel_state_reset = False
+                if missing_el_id == TOOL_PANEL_ELEMENT_ID:
+                    old_estimate = session.tool_panel.element_estimate
+                    session.tool_panel.reset_render_state(dirty=True)
+                    session.element_count = max(0, session.element_count - old_estimate)
+                    panel_state_reset = True
+                    for panel_seg in segments[session.split_index:]:
+                        if panel_seg.type == SegmentType.TOOL:
+                            panel_seg.created = False
+                            panel_seg.dirty = True
+                    _logger.info(
+                        "CardKit recovered stale unified tool panel -> will re-add on next flush"
+                    )
                 for seg in segments[session.split_index:]:
                     if seg.el_id == missing_el_id and seg.created:
                         seg.created = False
                         seg.dirty = True
+                        if seg.type == SegmentType.TOOL and not panel_state_reset:
+                            old_estimate = session.tool_panel.element_estimate
+                            session.tool_panel.reset_render_state(dirty=True)
+                            session.element_count = max(0, session.element_count - old_estimate)
+                            panel_state_reset = True
                         # 同步扣减元素计数：该 segment 当初 add 成功时已累加进 element_count，
                         # 回滚为未创建后下一轮会重新 add 并再次累加，这里先扣除避免重复计数。
-                        session.element_count -= seg.element_estimate
-                        if session.element_count < 0:
-                            session.element_count = 0
+                        if seg.type != SegmentType.TOOL or not panel_state_reset:
+                            session.element_count -= seg.element_estimate
+                            if session.element_count < 0:
+                                session.element_count = 0
                         _logger.info(
                             "CardKit recovered stale segment %s -> will re-add on next flush",
                             seg.el_id,
@@ -668,56 +805,120 @@ class StreamingController:
             return False
         return True
 
-    async def _maybe_rollover_tool_segment(
+    @staticmethod
+    def _tool_panel_expanded(session: CardSession) -> bool:
+        """Derive live expansion from structured tool/answer state."""
+        if session.tool_use.has_running:
+            return True
+        segment_state = session.segment_state
+        has_answer = bool(
+            segment_state
+            and any(
+                seg.type == SegmentType.ANSWER and seg.text.strip()
+                for seg in segment_state.segments[session.split_index:]
+            )
+        )
+        return not has_answer
+
+    async def _maybe_rollover_unified_tool_panel(
         self,
         *,
         session: CardSession,
-        segment_state: SegmentState,
-        index: int,
-        seg: Segment,
+        split_index: int,
         all_steps: list[ToolDisplayStep],
         actions: list[dict[str, Any]],
         new_el_ids: set[str],
         new_el_estimates: dict[str, int],
-        updated_tool_segs: list[Segment],
+        tool_panel_segments: list[Segment],
         pending_delta: int = 0,
     ) -> str | None:
-        """按 tool step 边界拆分过大的 dirty tool segment."""
-        start = seg.tool_offset
-        end = tool_segment_end(seg, all_steps)
-        estimate = estimate_tool_elements(start, end, all_steps)
-        delta = estimate - seg.element_estimate
-        if (
-            delta <= 0
-            or session.element_count + pending_delta + delta + FOOTER_RESERVE <= ELEMENT_THRESHOLD
-            or session.split_disabled
-        ):
+        """Split a unified panel at a tool step boundary when it outgrows the card."""
+        segment_state = session.segment_state
+        if segment_state is None:
             return None
-
+        seg = segment_state.segments[split_index]
+        if seg.type != SegmentType.TOOL:
+            return None
+        active_range = active_tool_range(segment_state.segments, session.split_index, all_steps)
+        if active_range is None:
+            return None
+        active_start, _ = active_range
+        base_count = (
+            session.element_count
+            + pending_delta
+            - session.tool_panel.element_estimate
+        )
         split_offset = find_tool_split_offset(
-            base_count=session.element_count + pending_delta - seg.element_estimate,
+            base_count=base_count,
             seg=seg,
             all_steps=all_steps,
         )
+        split_target_index = split_index + 1
         if split_offset is None:
+            # A one-step segment cannot be split internally.  Prefer a later
+            # chronology boundary when the current card can still retain a
+            # fitting prefix of the unified panel.
+            tool_segments = [
+                (index, candidate)
+                for index, candidate in enumerate(segment_state.segments[session.split_index:], session.split_index)
+                if candidate.type == SegmentType.TOOL
+            ]
+            fitting_boundary: tuple[int, int] | None = None
+            for candidate_index, candidate in tool_segments[1:]:
+                candidate_end = candidate.tool_offset
+                if candidate_end <= active_start:
+                    continue
+                candidate_estimate = estimate_tool_elements(
+                    active_start,
+                    candidate_end,
+                    all_steps,
+                )
+                if base_count + candidate_estimate + FOOTER_RESERVE <= ELEMENT_THRESHOLD:
+                    fitting_boundary = (candidate_index, candidate_end)
+            if fitting_boundary is None:
+                return None
+            split_target_index, split_offset = fitting_boundary
+        else:
+            split_target_index = split_index + 1
+        panel_steps = all_steps[active_start:split_offset]
+        if not panel_steps:
             return None
-
-        old_estimate = estimate_tool_elements(seg.tool_offset, split_offset, all_steps)
-        actions.append(
+        panel_estimate = estimate_tool_elements(active_start, split_offset, all_steps)
+        panel_action = (
             build_tool_update_action(
-                element_id=seg.el_id,
-                steps=all_steps[seg.tool_offset:split_offset],
+                steps=panel_steps,
+                expanded=self._tool_panel_expanded(session),
+            )
+            if session.tool_panel.created
+            else build_add_tool_panel_action(
+                panel_steps,
+                expanded=self._tool_panel_expanded(session),
             )
         )
-        updated_tool_segs.append(seg)
-        new_el_estimates[seg.el_id] = old_estimate
-        segment_state.split_tool_segment(index, split_offset)
-        split_ok = await self._do_split_card(
-            session, index + 1, actions, new_el_ids, new_el_estimates, updated_tool_segs,
+        actions.append(panel_action)
+        tool_panel_segments = [
+            candidate
+            for index, candidate in enumerate(segment_state.segments[session.split_index:], session.split_index)
+            if candidate.type == SegmentType.TOOL and index < split_target_index
+        ]
+        tool_panel_snapshot = (
+            session.tool_panel.revision,
+            panel_estimate,
+            tool_panel_segments,
+            list(panel_steps),
         )
-        if not split_ok:
-            return "failed"
-        return "split"
+        if split_target_index == split_index + 1:
+            segment_state.split_tool_segment(split_index, split_offset)
+        split_ok = await self._do_split_card(
+            session,
+            split_target_index,
+            actions,
+            new_el_ids,
+            new_el_estimates,
+            tool_panel_segments,
+            tool_panel_snapshot=tool_panel_snapshot,
+        )
+        return "split" if split_ok else "failed"
 
     async def _do_split_card(
         self,
@@ -727,6 +928,8 @@ class StreamingController:
         new_el_ids: set[str],
         new_el_estimates: dict[str, int],
         updated_tool_segs: list[Segment],
+        *,
+        tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
     ) -> bool:
         """拆卡：先 flush pending actions，封旧卡，创建新卡。返回 False 表示失败需中断 flush."""
         assert self._client is not None
@@ -739,7 +942,13 @@ class StreamingController:
         seal_start_idx = session.split_index
 
         if actions and not await self._do_batch_update(
-            session, segments, actions, new_el_ids, new_el_estimates, updated_tool_segs,
+            session,
+            segments,
+            actions,
+            new_el_ids,
+            new_el_estimates,
+            updated_tool_segs,
+            tool_panel_snapshot=tool_panel_snapshot,
         ):
             return False
 
@@ -824,6 +1033,9 @@ class StreamingController:
         session.split_index = split_idx
         for seg in segments[split_idx:]:
             seg.created = False
+        session.tool_panel.reset_render_state(
+            dirty=any(seg.type == SegmentType.TOOL for seg in segments[split_idx:])
+        )
         if merged_mode:
             # The new card replays the accumulated lane. Older sealed cards keep
             # only the merged reasoning that belongs to their chronology slice.
