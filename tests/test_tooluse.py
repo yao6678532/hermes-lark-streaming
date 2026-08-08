@@ -247,6 +247,9 @@ class TestToolUseTracker:
         tracker = ToolUseTracker()
         assert tracker.build_display_steps() == []
         assert tracker.elapsed_ms == 0.0
+        assert tracker.has_running is False
+        assert tracker.step_count == 0
+        assert tracker.error_count == 0
 
     def test_record_start_creates_running_step(self) -> None:
         tracker = ToolUseTracker()
@@ -255,6 +258,7 @@ class TestToolUseTracker:
         assert len(steps) == 1
         assert steps[0]["status"] == "running"
         assert steps[0]["name"] == "read"
+        assert tracker.has_running is True
 
     def test_record_end_matches_by_name(self) -> None:
         tracker = ToolUseTracker()
@@ -263,6 +267,7 @@ class TestToolUseTracker:
         steps = tracker.build_display_steps()
         assert steps[0]["status"] == "success"
         assert steps[0]["output"] == "contents"
+        assert tracker.has_running is False
 
     def test_record_end_with_error(self) -> None:
         tracker = ToolUseTracker()
@@ -271,6 +276,7 @@ class TestToolUseTracker:
         steps = tracker.build_display_steps()
         assert steps[0]["status"] == "error"
         assert steps[0]["error"] == "command failed"
+        assert tracker.has_running is False
 
     def test_record_end_without_start_skipped(self) -> None:
         # 无 session 存在，record_end 直接返回
@@ -288,6 +294,16 @@ class TestToolUseTracker:
         assert len(steps) == 2
         assert steps[0]["status"] == "success"
         assert steps[1]["status"] == "error"
+        assert tracker.error_count == 1
+
+    def test_two_running_steps_remain_running_until_both_end(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start("read", "a.py")
+        tracker.record_start("exec", "pytest")
+        tracker.record_end("read", output="content")
+        assert tracker.has_running is True
+        tracker.record_end("exec", output="ok")
+        assert tracker.has_running is False
 
     def test_max_steps_limit(self) -> None:
         tracker = ToolUseTracker(max_steps=2)

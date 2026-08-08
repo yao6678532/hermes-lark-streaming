@@ -14,6 +14,7 @@ from .flush import CARDKIT_MS, FlushController
 from .progress import ProgressState
 from .reasoning import MergedReasoningState
 from .segments import Segment, SegmentState
+from .toolpanel import ToolPanelState
 from .tooluse import ToolUseTracker
 from .unavailable_guard import UnavailableGuard
 
@@ -66,6 +67,7 @@ class CardSession:
         "split_disabled",
         "split_index",
         "state",
+        "tool_panel",
         "tool_use",
     )
 
@@ -84,6 +86,7 @@ class CardSession:
         self.card_msg_id: str | None = None
         self.card_id: str | None = None
         self.tool_use = ToolUseTracker()
+        self.tool_panel = ToolPanelState()
         self.flush = FlushController(throttle_ms=CARDKIT_MS, loop=loop)
         self.footer: dict[str, Any] = {}
         self.sequence = 1

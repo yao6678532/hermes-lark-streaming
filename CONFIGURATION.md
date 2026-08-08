@@ -97,13 +97,13 @@ lark:
 | 启用流式卡片 | `streaming.enabled` | bool | `false` | 重启 gateway | 是否启用插件流式卡片；关闭时交回 Hermes 原生发送。 |
 | reasoning 组织方式 | `streaming.reasoning_mode` | `segmented` / `merged` | `segmented` | 重启 gateway | `segmented` 按事件顺序保留多个 reasoning 段；`merged` 在完成卡片中合并 reasoning。 |
 | 是否显示 reasoning | `display.platforms.feishu.show_reasoning` | bool | `false` | 运行时重新读取 | 只控制 reasoning 是否展示，不改变 `reasoning_mode`。也兼容 `display.show_reasoning` 作为全局 fallback。 |
-| 是否显示工具调用 UI | `display.platforms.feishu.show_tool_use` | bool | `true` | 运行时重新读取 | `false` 只隐藏工具调用面板；Hermes tools 仍会正常执行。也兼容 `display.show_tool_use` 作为 fallback。 |
+| 是否显示工具调用 UI | `display.platforms.feishu.show_tool_use` | bool | `true` | 运行时重新读取 | 控制统一 Tool Panel 是否显示；`false` 只隐藏面板，不影响 Hermes tools 真实执行。也兼容 `display.show_tool_use` 作为 fallback。 |
 | Clarify presentation | `display.platforms.feishu.clarify_style` | `text` / `card` | `text` | 运行时重新读取 | `text` 使用 Hermes 原生文本交互；`card` 使用 Feishu Clarify Card；非法值 fallback 到 `text`。 |
 | Approval presentation | `display.platforms.feishu.confirmation_style` | `hermes` / `openclaw` | `hermes` | 运行时重新读取 | `hermes` 保留 Hermes 原生 approval presentation；`openclaw` 使用插件 Approval Card presentation。Hermes approval state / resolver 仍是真实 source of truth；非法值 fallback 到 `hermes`。 |
 | Working 显示位置 | `streaming.progress_mode` | `text` / `card` | `text` | 重启 gateway | `text` 保持 Hermes 原生 long-running heartbeat 独立文本消息；`card` 在活动 streaming card 能安全接管时显示在卡片底部 progress/loading 区域。插件不解析 `Working` 字符串、不启动本地 heartbeat ticker，也不存在 `streaming.progress_interval` 或 `streaming.heartbeat_interval`。 |
 | Hermes heartbeat 周期 | `agent.gateway_notify_interval` | number，单位秒 | 由当前 Hermes 版本决定 | 重启 gateway | **Hermes-owned configuration**。控制 Hermes Gateway long-running heartbeat 周期，不是插件 timer；`streaming.progress_mode` 只决定显示位置。profile scoped。 |
 | 卡片宽度 | `streaming.width_mode` | `default` / `compact` / `fill` | `default` | 重启 gateway | 非法值 fallback 到 `default`。 |
-| 完成态面板展开 | `streaming.panel_expanded` | bool | `false` | 重启 gateway | 控制完成卡片中的 reasoning / tool panel 是否保持展开。 |
+| 完成态面板展开 | `streaming.panel_expanded` | bool | `false` | 重启 gateway | 控制完成卡片中的 reasoning / unified Tool Panel 是否保持展开；默认 `false`，因此工具面板完成时折叠。 |
 | 卡片存活检测 | `streaming.card_ttl_sec` | int 秒 | `600` | 重启 gateway | 控制卡片 session 的存活检测时长；代码会将值转换为 int。 |
 | 卡片 header | `streaming.header.enabled` | bool | `false` | 重启 gateway | 控制 streaming / completed / error header；状态会自动使用蓝、绿、红主题。 |
 | answer body 文字大小 | `streaming.body.text_size` | CardKit text size 字符串 | `normal_v2` | 重启 gateway | 传给 answer markdown 的 `text_size`；插件只在缺失或空值时回退到 `normal_v2`。 |
@@ -162,6 +162,8 @@ lark:
 - `streaming.header.*`
 - `streaming.body.*`
 - `streaming.footer.*`
+
+Streaming 过程中，统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

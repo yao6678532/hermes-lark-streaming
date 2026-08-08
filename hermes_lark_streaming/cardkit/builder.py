@@ -126,9 +126,10 @@ def _build_tool_panel(
         tpl_en, tpl_zh = _T["steps"]
         en_parts.append(tpl_en.format(len(steps), "s" if len(steps) > 1 else ""))
         zh_parts.append(tpl_zh.format(len(steps), ""))
-    if elapsed_ms > 0:
-        en_parts.append(f"({_format_elapsed(elapsed_ms)})")
-        zh_parts.append(f"({_format_elapsed(elapsed_ms)})")
+        failed_count = sum(step.get("status") == "error" for step in steps)
+        if failed_count:
+            en_parts.append(f"{failed_count} failed")
+            zh_parts.append(f"{failed_count} 个失败")
 
     children: list[dict] = []
     for s in steps:
@@ -138,8 +139,8 @@ def _build_tool_panel(
         expanded=expanded,
         title_el={
             "tag": "plain_text",
-            "content": f"🛠️ {' · '.join(en_parts)}",
-            "i18n_content": _i18n(f"🛠️ {' · '.join(en_parts)}", f"🛠️ {' · '.join(zh_parts)}"),
+            "content": " · ".join(en_parts),
+            "i18n_content": _i18n(" · ".join(en_parts), " · ".join(zh_parts)),
             "text_color": "grey",
             "text_size": "notation",
         },
@@ -165,7 +166,15 @@ def _build_tool_step_title(step: ToolDisplayStep) -> dict:
     status = step.get("status", "running")
     status_info = _tool_status_info(status)
     title = step.get("title", step.get("name", "tool"))
-    content = f"**{_escape_md(title)}** · <font color='{status_info['color']}'>{status_info['label']}</font>"
+    elapsed_ms = step.get("elapsed_ms", 0) or 0
+    if status == "success":
+        label = _format_elapsed(elapsed_ms) if elapsed_ms > 0 else _T["done_label"][0]
+        content = f"**{_escape_md(title)}** · {label}"
+    else:
+        label = status_info["label"]
+        if status == "error" and elapsed_ms > 0:
+            label = f"{label} · {_format_elapsed(elapsed_ms)}"
+        content = f"**{_escape_md(title)}** · <font color='{status_info['color']}'>{label}</font>"
     return {
         "tag": "div",
         "icon": {
@@ -231,9 +240,9 @@ def _build_tool_step_output(step: ToolDisplayStep) -> dict | None:
 
 def _tool_status_info(status: str) -> dict[str, str]:
     return {
-        "running": {"label": "Running", "color": "turquoise"},
-        "success": {"label": "Succeeded", "color": "green"},
-        "error": {"label": "Failed", "color": "red"},
+        "running": {"label": _T["running"][0], "color": "turquoise"},
+        "success": {"label": _T["done_label"][0], "color": "grey"},
+        "error": {"label": _T["failed"][0], "color": "red"},
     }.get(status, {"label": status.capitalize(), "color": "grey"})
 
 
@@ -520,6 +529,14 @@ def build_complete_card(
             )
         )
 
+    tool_rendered = False
+    tool_segments = [seg for seg in segments if seg.type == SegmentType.TOOL]
+    tool_start = min((seg.tool_offset for seg in tool_segments), default=0)
+    tool_end = max(
+        (seg.tool_end_offset if seg.tool_end_offset else len(all_tool_steps) for seg in tool_segments),
+        default=0,
+    )
+
     for seg in segments:
         if seg.type == SegmentType.REASONING:
             if merged_mode:
@@ -532,11 +549,18 @@ def build_complete_card(
         elif seg.type == SegmentType.TOOL:
             if not show_tool_use:
                 continue
-            start = seg.tool_offset
-            end = seg.tool_end_offset if seg.tool_end_offset else len(all_tool_steps)
-            steps = all_tool_steps[start:end]
+            if tool_rendered:
+                continue
+            tool_rendered = True
+            steps = all_tool_steps[tool_start:tool_end]
             if steps:
-                elements.append(_build_tool_panel(steps, expanded=panel_expanded, element_id=None))
+                elements.append(
+                    _build_tool_panel(
+                        steps,
+                        expanded=panel_expanded,
+                        element_id=TOOL_PANEL_ELEMENT_ID,
+                    )
+                )
         elif seg.type == SegmentType.ANSWER and seg.text:
             has_answer = True
             content = _downgrade_tables(optimize_markdown_style(seg.text))

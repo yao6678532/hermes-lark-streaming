@@ -20,12 +20,15 @@ _T: dict[str, tuple[str, str]] = {
     "processing": ("Processing...", "处理中..."),
     "processing_prefix": ("💭 Processing...", "💭 处理中..."),
     "tool_use": ("Tool use", "工具执行"),
+    "running": ("Running", "运行中"),
+    "done": ("Done.", "完成。"),
+    "failed": ("Failed", "失败"),
     "tool_pending": ("🛠️ Tool use pending", "🛠️ 等待工具执行"),
     "steps": ("{} step{}", "{} 步"),
     "thought": ("Thought", "思考"),
     "thinking_panel": ("Thinking", "思考中"),
     "thought_for": ("Thought for {}", "思考了 {}"),
-    "done": ("Done.", "完成。"),
+    "done_label": ("Done", "已完成"),
 }
 
 

@@ -357,7 +357,27 @@ class TestBuildToolPanel:
     def test_with_elapsed(self) -> None:
         panel = _build_tool_panel([_STEP_RUNNING], elapsed_ms=3000)
         title = panel["header"]["title"]["content"]
-        assert "3.0s" in title
+        assert "3.0s" not in title
+
+    def test_header_reports_failed_steps_without_status_emoji(self) -> None:
+        panel = _build_tool_panel([
+            _STEP_SUCCESS,
+            {**_STEP_RUNNING, "status": "error", "elapsed_ms": 1200},
+        ])
+        title = panel["header"]["title"]
+        assert title["content"] == "Tool use · 2 steps · 1 failed"
+        assert title["i18n_content"]["zh_cn"] == "工具执行 · 2 步 · 1 个失败"
+        assert "🛠️" not in title["content"]
+
+    def test_step_status_uses_duration_done_and_failed_labels(self) -> None:
+        running = _build_tool_panel([_STEP_RUNNING])
+        success = _build_tool_panel([_STEP_SUCCESS])
+        failed = _build_tool_panel([{**_STEP_RUNNING, "status": "error", "elapsed_ms": 1200}])
+        assert "Running" in str(running["elements"])
+        assert "0.1s" in str(success["elements"])
+        assert "Succeeded" not in str(success["elements"])
+        assert "Failed" in str(failed["elements"])
+        assert "1.2s" in str(failed["elements"])
 
 
 # --- Footer ---
@@ -714,6 +734,37 @@ class TestBuildSegmentCompleteCard:
         tool_elements = [e for e in card["body"]["elements"] if e.get("tag") == "collapsible_panel"]
         assert len(tool_elements) == 1
         assert len(tool_elements[0].get("elements", [])) == 2  # steps[1:3]
+
+    def test_multiple_tool_segments_render_one_unified_panel(self) -> None:
+        card = build_complete_card(
+            segments=[
+                _seg("reasoning", "plan"),
+                _seg("tool", tool_offset=0, tool_end_offset=1),
+                _seg("answer", "interim"),
+                _seg("tool", tool_offset=1, tool_end_offset=2),
+                _seg("answer", "final"),
+            ],
+            all_tool_steps=[_STEP_SUCCESS, _STEP_RUNNING],
+        )
+        panels = [
+            element for element in card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        ]
+        assert len(panels) == 1
+        assert len(panels[0]["elements"]) == 2
+        assert panels[0]["expanded"] is False
+
+    def test_panel_expanded_override_is_respected_in_complete_card(self) -> None:
+        card = build_complete_card(
+            segments=[_seg("tool", tool_offset=0, tool_end_offset=1)],
+            all_tool_steps=[_STEP_SUCCESS],
+            panel_expanded=True,
+        )
+        panel = next(
+            element for element in card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        assert panel["expanded"] is True
 
     def test_three_round_ordering(self) -> None:
         card = build_complete_card(

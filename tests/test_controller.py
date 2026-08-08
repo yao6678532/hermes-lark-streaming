@@ -18,6 +18,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    TOOL_PANEL_ELEMENT_ID,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
@@ -1090,6 +1091,123 @@ class TestDoCreateCard:
 
 
 class TestDoFlush:
+    @staticmethod
+    def _tool_actions(ctrl: StreamCardController) -> list[dict]:
+        return [
+            action
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            if action.get("params", {}).get("element_id") == TOOL_PANEL_ELEMENT_ID
+            or any(
+                element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+                for element in action.get("params", {}).get("elements", [])
+            )
+        ]
+
+    @pytest.mark.asyncio
+    async def test_tool_events_share_one_fixed_panel_and_follow_live_expansion(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_unified_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_unified_tools"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+
+        adds = [
+            element
+            for action in self._tool_actions(ctrl)
+            for element in action.get("params", {}).get("elements", [])
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        ]
+        assert len(adds) == 1
+        assert adds[0]["expanded"] is True
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+            assert ctrl.on_answer(message_id=session.message_id, text="answer")
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert partials[-1]["params"]["partial_element"]["expanded"] is False
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="exec", status="started", detail="pytest"
+            )
+        await ctrl._do_flush(session)
+        partials = [
+            action for action in self._tool_actions(ctrl)
+            if action["action"] == "partial_update_element"
+        ]
+        assert partials[-1]["params"]["partial_element"]["expanded"] is True
+        assert len(adds) == 1
+        assert [seg.type for seg in session.segment_state.segments] == ["tool", "answer", "tool"]
+
+    @pytest.mark.asyncio
+    async def test_show_tool_use_false_keeps_tracker_and_hides_panel(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = _make_session("msg_hidden_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_hidden_tools"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="completed", detail="ok"
+            )
+        await ctrl._do_flush(session)
+
+        assert len(session.tool_use.build_display_steps()) == 1
+        assert not self._tool_actions(ctrl)
+        assert session.segment_state.segments[0].type == "tool"
+
+    @pytest.mark.asyncio
+    async def test_missing_fixed_tool_panel_is_recreated_without_failing_session(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_missing_tool_panel")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_missing_tool_panel"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+        ctrl._client.cardkit_batch_update = AsyncMock(
+            side_effect=[
+                FeishuAPIError(
+                    f"cardkit_batch_update: code=300313, msg=ErrMsg: not find elementID : {TOOL_PANEL_ELEMENT_ID};",
+                    300313,
+                ),
+                None,
+            ]
+        )
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id, tool_name="read", status="started", detail="a.py"
+            )
+        await ctrl._do_flush(session)
+        assert session.tool_panel.created is False
+        assert session.tool_panel.dirty is True
+        assert session.state == SessionState.STREAMING
+
+        await ctrl._do_flush(session)
+        assert session.tool_panel.created is True
+        assert session.tool_panel.dirty is False
+        assert ctrl._client.cardkit_batch_update.await_count == 2
+
     @pytest.mark.asyncio
     async def test_three_step_pipeline(self) -> None:
         """step1 创建元素 → step2 刷文本 → step3 创建 tool 面板."""

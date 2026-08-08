@@ -253,6 +253,24 @@ class ToolUseTracker:
             return 0.0
         return (time.time() - self._session.started_at) * 1000
 
+    @property
+    def has_running(self) -> bool:
+        """Whether at least one real Hermes tool call is still running."""
+        return bool(
+            self._session
+            and any(step.status == ToolStatus.RUNNING for step in self._session.steps)
+        )
+
+    @property
+    def step_count(self) -> int:
+        return len(self._session.steps) if self._session else 0
+
+    @property
+    def error_count(self) -> int:
+        if self._session is None:
+            return 0
+        return sum(step.status == ToolStatus.ERROR for step in self._session.steps)
+
     def record_start(self, name: str, detail: str = "") -> None:
         if self._session is None:
             self._session = ToolSession(started_at=time.time())
@@ -305,8 +323,6 @@ class ToolUseTracker:
         for s in self._session.steps:
             desc = _resolve_tool_descriptor(s.name)
             base_title = desc["title"] if desc else _humanize_tool_name(s.name)
-            if s.elapsed_ms > 0:
-                base_title = f"{base_title} ({_format_duration_label(s.elapsed_ms)})"
             sanitizer = desc.get("sanitizer") if desc else None
             detail = _sanitize_detail(s.detail, sanitizer)
             steps.append(
