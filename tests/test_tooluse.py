@@ -16,7 +16,9 @@ from hermes_lark_streaming.streaming.tooluse import (
     _humanize_tool_name,
     _resolve_tool_descriptor,
     _sanitize_detail,
+    compact_command_detail,
     redact_inline_secrets,
+    tool_detail_for_display,
 )
 
 
@@ -124,6 +126,70 @@ class TestBasenameOnly:
     )
     def test_returns_basename(self, path: str, expected: str) -> None:
         assert _basename_only(path) == expected
+
+
+class TestCompactCommandDetail:
+    @pytest.mark.parametrize(
+        ("detail", "expected"),
+        [
+            (
+                "python3 anysearch_cli.py batch_search --queries '[{\"query\":\"白海豚 台风 上海\"}]'",
+                "anysearch_cli.py batch_search",
+            ),
+            ("date '+%Y-%m-%d %H:%M:%S %Z'", "date"),
+            ("python -m pytest tests/test_controller.py -q", "python -m pytest"),
+            ("python3 -c 'print(\"payload\")'", "python3"),
+            ("git status --short", "git status"),
+            ("git diff --stat yao-custom...HEAD", "git diff"),
+            ("git -C /tmp/repo status --short", "git status"),
+            ("bash /tmp/deploy.sh --environment production", "deploy.sh"),
+            ("FOO=bar python3 /tmp/script.py serve --port 8080", "script.py serve"),
+            ("node /tmp/server.js serve --port 3000", "server.js serve"),
+        ],
+    )
+    def test_semantically_compacts_command(self, detail: str, expected: str) -> None:
+        assert compact_command_detail(detail) == expected
+
+    def test_malformed_quotes_fail_closed(self) -> None:
+        assert compact_command_detail('python3 script.py --query "unfinished') == ""
+
+    def test_terminal_tool_uses_command_compaction(self) -> None:
+        step = {
+            "name": "terminal",
+            "title": "Terminal",
+            "status": "running",
+            "detail": "python3 script.py batch_search --queries '[payload]'",
+            "output": "",
+            "error": "",
+            "icon": "tool",
+            "elapsed_ms": 0,
+            "result_block": None,
+            "error_block": None,
+        }
+        assert tool_detail_for_display(step, mode="compact") == "script.py batch_search"
+
+    def test_unicode_filename_and_subcommand_are_preserved(self) -> None:
+        result = compact_command_detail('python3 天气查询.py batch_search --query "上海 台风"')
+        assert result == "天气查询.py batch_search"
+        assert "�" not in result
+
+    def test_compact_uses_sanitized_detail(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start(
+            "exec",
+            "API_KEY=supersecret python3 /Users/yao/.hermes/anysearch_cli.py "
+            "batch_search --token secretvalue --queries '[{\"query\":\"上海\"}]'",
+        )
+        step = tracker.build_display_steps()[0]
+        assert step["detail"] == (
+            "API_KEY=[redacted] python3 anysearch_cli.py batch_search "
+            "--token [redacted] --queries '[{\"query\":\"上海\"}]'"
+        )
+        compact = tool_detail_for_display(step, mode="compact")
+        assert compact == "anysearch_cli.py batch_search"
+        assert "supersecret" not in compact
+        assert "secretvalue" not in compact
+        assert "/Users/yao" not in compact
 
 
 class TestFormatDurationLabel:

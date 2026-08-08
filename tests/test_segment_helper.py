@@ -32,6 +32,14 @@ def _step(*, detail: str = "", result: bool = False, error: bool = False) -> Too
     }
 
 
+def _command_step(detail: str) -> ToolDisplayStep:
+    return {
+        **_step(detail=detail),
+        "name": "exec",
+        "title": "Run command",
+    }
+
+
 def test_estimate_segment_elements_for_basic_types() -> None:
     reasoning = Segment(SegmentType.REASONING, "reasoning")
     answer = Segment(SegmentType.ANSWER, "answer")
@@ -52,6 +60,18 @@ def test_estimate_tool_elements_counts_optional_detail_and_output_blocks() -> No
     ]
 
     assert estimate_tool_elements(0, len(steps), steps) == 21
+
+
+def test_estimator_uses_effective_detail_policy() -> None:
+    step = _command_step("python3 script.py batch_search --queries '[long payload]'")
+    full = estimate_tool_elements(0, 1, [step])
+    compact = estimate_tool_elements(0, 1, [step], tool_detail_mode="compact")
+    hidden = estimate_tool_elements(0, 1, [step], show_tool_detail=False)
+    malformed = _command_step('python3 script.py --query "unfinished')
+
+    assert full == compact == 8
+    assert hidden == 6
+    assert estimate_tool_elements(0, 1, [malformed], tool_detail_mode="compact") == 6
 
 
 def test_tool_segment_end_uses_open_segment_step_count() -> None:

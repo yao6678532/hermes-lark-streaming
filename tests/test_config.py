@@ -386,6 +386,64 @@ class TestShowToolUse:
         assert cfg.show_tool_use is False
 
 
+class TestToolDetailPresentation:
+    def _make_config(self, raw: dict[str, Any]) -> Config:
+        cfg = Config()
+        cfg._reload = lambda: raw  # type: ignore[assignment]
+        return cfg
+
+    def test_defaults_preserve_full_detail(self) -> None:
+        cfg = self._make_config({})
+        assert cfg.show_tool_detail is True
+        assert cfg.tool_detail_mode == "full"
+
+    def test_platform_override(self) -> None:
+        cfg = self._make_config(
+            {
+                "display": {
+                    "platforms": {
+                        "feishu": {
+                            "show_tool_detail": False,
+                            "tool_detail_mode": "compact",
+                        }
+                    }
+                }
+            }
+        )
+        assert cfg.show_tool_detail is False
+        assert cfg.tool_detail_mode == "compact"
+
+    def test_global_fallback(self) -> None:
+        cfg = self._make_config(
+            {"display": {"show_tool_detail": False, "tool_detail_mode": "compact"}}
+        )
+        assert cfg.show_tool_detail is False
+        assert cfg.tool_detail_mode == "compact"
+
+    @pytest.mark.parametrize("value", ["verbose", "short", "abc", "", None])
+    def test_invalid_mode_falls_back_to_full(self, value: Any) -> None:
+        cfg = self._make_config({"display": {"tool_detail_mode": value}})
+        assert cfg.tool_detail_mode == "full"
+
+    def test_platform_mode_takes_priority_over_global(self) -> None:
+        cfg = self._make_config(
+            {
+                "display": {
+                    "tool_detail_mode": "compact",
+                    "platforms": {"feishu": {"tool_detail_mode": "full"}},
+                }
+            }
+        )
+        assert cfg.tool_detail_mode == "full"
+
+    def test_properties_reload_each_read(self) -> None:
+        raw: dict[str, Any] = {"display": {"platforms": {"feishu": {}}}}
+        cfg = self._make_config(raw)
+        assert cfg.show_tool_detail is True
+        raw["display"]["platforms"]["feishu"]["show_tool_detail"] = False
+        assert cfg.show_tool_detail is False
+
+
 class TestPlatformCfg:
     def test_env_takes_priority(self) -> None:
         cfg = _make_config({"feishu": {"app_id": "config_id", "app_secret": "config_secret"}})

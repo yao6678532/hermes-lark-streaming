@@ -404,6 +404,9 @@ class StreamingController:
         segments = segment_state.segments
         all_steps = session.tool_use.build_display_steps()
         merged_mode = self._cfg.reasoning_mode == "merged"
+        show_tool_use = self._cfg.show_tool_use
+        show_tool_detail = self._cfg.show_tool_detail
+        tool_detail_mode = self._cfg.tool_detail_mode
 
         await self._flush_progress(session)
 
@@ -428,7 +431,7 @@ class StreamingController:
                 continue
 
             if seg.type == SegmentType.TOOL:
-                if not self._cfg.show_tool_use:
+                if not show_tool_use:
                     seg.created = True
                     seg.dirty = False
                     continue
@@ -444,7 +447,13 @@ class StreamingController:
                     continue
                 start, end = tool_range
                 steps = all_steps[start:end]
-                panel_estimate = estimate_tool_elements(start, end, all_steps)
+                panel_estimate = estimate_tool_elements(
+                    start,
+                    end,
+                    all_steps,
+                    show_tool_detail=show_tool_detail,
+                    tool_detail_mode=tool_detail_mode,
+                )
                 if (
                     not session.tool_panel.created
                     and not session.tool_panel.dirty
@@ -483,6 +492,8 @@ class StreamingController:
                             new_el_estimates=new_el_estimates,
                             tool_panel_segments=tool_panel_segments,
                             pending_delta=new_el_total,
+                            show_tool_detail=show_tool_detail,
+                            tool_detail_mode=tool_detail_mode,
                         )
                         if rollover == "failed":
                             return
@@ -520,6 +531,8 @@ class StreamingController:
                             new_el_ids,
                             new_el_estimates,
                             tool_panel_segments,
+                            show_tool_detail=show_tool_detail,
+                            tool_detail_mode=tool_detail_mode,
                         )
                         if not split_ok:
                             return
@@ -543,6 +556,8 @@ class StreamingController:
                             build_tool_update_action(
                                 steps=steps,
                                 expanded=self._tool_panel_expanded(session),
+                                show_tool_detail=show_tool_detail,
+                                tool_detail_mode=tool_detail_mode,
                             )
                         )
                     else:
@@ -550,6 +565,8 @@ class StreamingController:
                             build_add_tool_panel_action(
                                 steps,
                                 expanded=self._tool_panel_expanded(session),
+                                show_tool_detail=show_tool_detail,
+                                tool_detail_mode=tool_detail_mode,
                             )
                         )
                     tool_panel_segments = [
@@ -567,14 +584,26 @@ class StreamingController:
                 continue
 
             if not seg.created:
-                estimated = estimate_segment_elements(seg, all_steps)
+                estimated = estimate_segment_elements(
+                    seg,
+                    all_steps,
+                    show_tool_detail=show_tool_detail,
+                    tool_detail_mode=tool_detail_mode,
+                )
                 if (
                     session.element_count + new_el_total + estimated + FOOTER_RESERVE > ELEMENT_THRESHOLD
                     and session.element_count + new_el_total > 1
                     and not session.split_disabled
                 ):
                     split_ok = await self._do_split_card(
-                        session, i, actions, new_el_ids, new_el_estimates, tool_panel_segments,
+                        session,
+                        i,
+                        actions,
+                        new_el_ids,
+                        new_el_estimates,
+                        tool_panel_segments,
+                        show_tool_detail=show_tool_detail,
+                        tool_detail_mode=tool_detail_mode,
                     )
                     if not split_ok:
                         return
@@ -588,7 +617,13 @@ class StreamingController:
                 new_el_estimates[seg.el_id] = estimated
                 new_el_total += estimated
                 actions.append(
-                    build_add_segment_action(seg, all_steps, text_size=self._cfg.body_text_size)
+                    build_add_segment_action(
+                        seg,
+                        all_steps,
+                        text_size=self._cfg.body_text_size,
+                        show_tool_detail=show_tool_detail,
+                        tool_detail_mode=tool_detail_mode,
+                    )
                 )
             elif seg.type == SegmentType.REASONING and seg.elapsed_ms > 0 and not seg.reasoning_finalized:
                 _logger.info(
@@ -831,6 +866,8 @@ class StreamingController:
         new_el_estimates: dict[str, int],
         tool_panel_segments: list[Segment],
         pending_delta: int = 0,
+        show_tool_detail: bool = True,
+        tool_detail_mode: str = "full",
     ) -> str | None:
         """Split a unified panel at a tool step boundary when it outgrows the card."""
         segment_state = session.segment_state
@@ -852,6 +889,8 @@ class StreamingController:
             base_count=base_count,
             seg=seg,
             all_steps=all_steps,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
         )
         split_target_index = split_index + 1
         if split_offset is None:
@@ -872,6 +911,8 @@ class StreamingController:
                     active_start,
                     candidate_end,
                     all_steps,
+                    show_tool_detail=show_tool_detail,
+                    tool_detail_mode=tool_detail_mode,
                 )
                 if base_count + candidate_estimate + FOOTER_RESERVE <= ELEMENT_THRESHOLD:
                     fitting_boundary = (candidate_index, candidate_end)
@@ -883,16 +924,26 @@ class StreamingController:
         panel_steps = all_steps[active_start:split_offset]
         if not panel_steps:
             return None
-        panel_estimate = estimate_tool_elements(active_start, split_offset, all_steps)
+        panel_estimate = estimate_tool_elements(
+            active_start,
+            split_offset,
+            all_steps,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
+        )
         panel_action = (
             build_tool_update_action(
                 steps=panel_steps,
                 expanded=self._tool_panel_expanded(session),
+                show_tool_detail=show_tool_detail,
+                tool_detail_mode=tool_detail_mode,
             )
             if session.tool_panel.created
             else build_add_tool_panel_action(
                 panel_steps,
                 expanded=self._tool_panel_expanded(session),
+                show_tool_detail=show_tool_detail,
+                tool_detail_mode=tool_detail_mode,
             )
         )
         actions.append(panel_action)
@@ -917,6 +968,8 @@ class StreamingController:
             new_el_estimates,
             tool_panel_segments,
             tool_panel_snapshot=tool_panel_snapshot,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
         )
         return "split" if split_ok else "failed"
 
@@ -930,6 +983,8 @@ class StreamingController:
         updated_tool_segs: list[Segment],
         *,
         tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
+        show_tool_detail: bool = True,
+        tool_detail_mode: str = "full",
     ) -> bool:
         """拆卡：先 flush pending actions，封旧卡，创建新卡。返回 False 表示失败需中断 flush."""
         assert self._client is not None
@@ -981,6 +1036,8 @@ class StreamingController:
             header_enabled=False,
             body_text_size=self._cfg.body_text_size,
             show_tool_use=self._cfg.show_tool_use,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=seal_merged_text,
             merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
@@ -1081,6 +1138,8 @@ class StreamingController:
         is_error = session.state == SessionState.FAILED
         is_aborted = session.state == SessionState.ABORTED
         all_tool_steps = session.tool_use.build_display_steps()
+        show_tool_detail = self._cfg.show_tool_detail
+        tool_detail_mode = self._cfg.tool_detail_mode
 
         if segment_state is not None:
             segment_state.finalize_segments(len(all_tool_steps))
@@ -1110,6 +1169,8 @@ class StreamingController:
             header_enabled=self._cfg.header_enabled,
             body_text_size=self._cfg.body_text_size,
             show_tool_use=self._cfg.show_tool_use,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=(
                 session.merged_reasoning.text

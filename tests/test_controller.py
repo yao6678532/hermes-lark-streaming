@@ -494,6 +494,8 @@ def _configure_merged(
     *,
     show_reasoning: bool = True,
     show_tool_use: bool = True,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
 ) -> None:
     ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
     ctrl._cfg._reload = lambda: {  # type: ignore[assignment]
@@ -502,6 +504,8 @@ def _configure_merged(
                 "feishu": {
                     "show_reasoning": show_reasoning,
                     "show_tool_use": show_tool_use,
+                    "show_tool_detail": show_tool_detail,
+                    "tool_detail_mode": tool_detail_mode,
                 }
             }
         }
@@ -513,6 +517,8 @@ def _configure_progress(
     *,
     show_reasoning: bool = True,
     show_tool_use: bool = True,
+    show_tool_detail: bool = True,
+    tool_detail_mode: str = "full",
 ) -> None:
     ctrl._cfg._raw["streaming"]["progress_mode"] = "card"
     ctrl._cfg._reload = lambda: {  # type: ignore[assignment]
@@ -521,6 +527,8 @@ def _configure_progress(
                 "feishu": {
                     "show_reasoning": show_reasoning,
                     "show_tool_use": show_tool_use,
+                    "show_tool_detail": show_tool_detail,
+                    "tool_detail_mode": tool_detail_mode,
                 }
             }
         }
@@ -1186,6 +1194,75 @@ class TestDoFlush:
         assert [seg.type for seg in session.segment_state.segments] == [
             "tool", "answer", "tool", "answer",
         ]
+
+    @pytest.mark.asyncio
+    async def test_hidden_detail_keeps_one_panel_and_reduces_estimate(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_detail=False)
+        session = _make_session("msg_hidden_detail")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_hidden_detail"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="exec",
+                status="started",
+                detail="python3 /tmp/anysearch_cli.py batch_search --queries '[payload]'",
+            )
+        await ctrl._do_flush(session)
+
+        adds = [
+            element
+            for action in self._tool_actions(ctrl)
+            for element in action.get("params", {}).get("elements", [])
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        ]
+        assert len(adds) == 1
+        assert "Run command" in str(adds[0])
+        assert "anysearch_cli.py" not in str(adds[0])
+        assert session.tool_panel.element_estimate == 6
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="exec",
+                status="completed",
+                detail="ignored",
+            )
+        await ctrl._do_flush(session)
+        assert "anysearch_cli.py" not in str(self._tool_actions(ctrl)[-1])
+
+    @pytest.mark.asyncio
+    async def test_compact_detail_is_used_by_controller_panel(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, tool_detail_mode="compact")
+        session = _make_session("msg_compact_detail")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_compact_detail"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="exec",
+                status="started",
+                detail="python3 /tmp/anysearch_cli.py batch_search --queries '[payload]'",
+            )
+        await ctrl._do_flush(session)
+
+        add = next(
+            element
+            for action in self._tool_actions(ctrl)
+            for element in action.get("params", {}).get("elements", [])
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        assert "anysearch_cli.py batch_search" in str(add)
+        assert "--queries" not in str(add)
+        assert session.tool_panel.element_estimate == 8
 
     @pytest.mark.asyncio
     async def test_answer_deltas_collapse_tool_panel_only_once(self) -> None:
