@@ -174,6 +174,29 @@ class StreamingController:
             session.merged_reasoning.pause()
 
     @staticmethod
+    def _active_card_has_answer(session: CardSession) -> bool:
+        """Return whether the current physical card already has answer text."""
+        segment_state = session.segment_state
+        if segment_state is None:
+            return False
+        return any(
+            seg.type == SegmentType.ANSWER and seg.text.strip()
+            for seg in segment_state.segments[session.split_index:]
+        )
+
+    def _append_answer_segment(self, session: CardSession, text: str) -> bool:
+        """Append answer text and mark the tool panel only on first-card answer."""
+        segment_state = session.segment_state
+        if segment_state is None or not text:
+            return False
+
+        had_answer = self._active_card_has_answer(session)
+        segment_state.on_answer_delta(text)
+        if not had_answer:
+            session.tool_panel.note_answer_started()
+        return True
+
+    @staticmethod
     def _consume_merged_reasoning_segments(session: CardSession) -> None:
         """Mark chronology segments consumed only after the fixed UI is current."""
         if not session.merged_reasoning.created or session.merged_reasoning.dirty:
@@ -263,8 +286,7 @@ class StreamingController:
             if not text:
                 return False
             self._pause_merged_reasoning(session)
-            segment_state.on_answer_delta(text)
-            session.tool_panel.note_answer_started()
+            self._append_answer_segment(session, text)
             self._schedule_flush(session)
             return True
 
@@ -282,8 +304,7 @@ class StreamingController:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
             self._pause_merged_reasoning(session)
-            segment_state.on_answer_delta(answer)
-            session.tool_panel.note_answer_started()
+            self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
         self._schedule_flush(session)

@@ -450,8 +450,7 @@ class StreamCardController(StreamingController):
             return False
 
         self._pause_merged_reasoning(session)
-        session.segment_state.on_answer_delta(answer_text)
-        session.tool_panel.note_answer_started()
+        self._append_answer_segment(session, answer_text)
         self._schedule_flush(session)
         return True
 
