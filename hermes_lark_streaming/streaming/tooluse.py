@@ -161,6 +161,11 @@ def _append_safe_subcommand(result: list[str], tokens: list[str], index: int) ->
         result.append(tokens[index])
 
 
+def _is_shell_command_string_option(token: str) -> bool:
+    """Return whether a shell short-option token includes the ``c`` flag."""
+    return token.startswith("-") and not token.startswith("--") and "c" in token[1:]
+
+
 def compact_command_detail(detail: str) -> str:
     """Semantically compact a sanitized command without exposing its payload.
 
@@ -200,8 +205,23 @@ def compact_command_detail(detail: str) -> str:
         _append_safe_subcommand(result, tokens, script_index + 1)
         return " ".join(result)
 
-    if executable_lower in {"bash", "sh", "zsh", "node"}:
-        if any(option in tokens[1:] for option in {"-c", "--command", "-e", "--eval"}):
+    if executable_lower in {"bash", "sh", "zsh"}:
+        if any(_is_shell_command_string_option(option) for option in tokens[1:]):
+            return executable
+        if "--command" in tokens[1:]:
+            return executable
+        script_index = next(
+            (index for index, token in enumerate(tokens[1:], 1) if not token.startswith("-")),
+            None,
+        )
+        if script_index is None:
+            return executable
+        result = [_executable_basename(tokens[script_index])]
+        _append_safe_subcommand(result, tokens, script_index + 1)
+        return " ".join(result)
+
+    if executable_lower == "node":
+        if any(option in tokens[1:] for option in {"-e", "--eval"}):
             return executable
         script_index = next(
             (index for index, token in enumerate(tokens[1:], 1) if not token.startswith("-")),

@@ -153,6 +153,28 @@ class TestCompactCommandDetail:
     def test_malformed_quotes_fail_closed(self) -> None:
         assert compact_command_detail('python3 script.py --query "unfinished') == ""
 
+    @pytest.mark.parametrize(
+        ("detail", "expected"),
+        [
+            (
+                'bash -lc "python3 anysearch_cli.py batch_search --queries \'[huge payload]\'"',
+                "bash",
+            ),
+            ('zsh -lc "curl https://example.com/?token=secret"', "zsh"),
+            ('sh -c "echo hello"', "sh"),
+            ('bash -xc "curl https://example.com/?token=secret"', "bash"),
+        ],
+    )
+    def test_shell_combined_c_option_hides_command_string(
+        self, detail: str, expected: str
+    ) -> None:
+        result = compact_command_detail(detail)
+        assert result == expected
+        assert "--queries" not in result
+        assert "curl" not in result
+        assert "example.com" not in result
+        assert "secret" not in result
+
     def test_terminal_tool_uses_command_compaction(self) -> None:
         step = {
             "name": "terminal",
@@ -167,6 +189,23 @@ class TestCompactCommandDetail:
             "error_block": None,
         }
         assert tool_detail_for_display(step, mode="compact") == "script.py batch_search"
+
+    def test_terminal_full_mode_keeps_sanitized_detail(self) -> None:
+        tracker = ToolUseTracker()
+        tracker.record_start(
+            "terminal",
+            "API_KEY=supersecret python3 /Users/yao/.hermes/scripts/deploy.py "
+            "--token secretvalue",
+        )
+        step = tracker.build_display_steps()[0]
+
+        assert step["detail"] == (
+            "API_KEY=[redacted] python3 deploy.py --token [redacted]"
+        )
+        assert tool_detail_for_display(step, mode="full") == step["detail"]
+        assert "supersecret" not in tool_detail_for_display(step, mode="full")
+        assert "secretvalue" not in tool_detail_for_display(step, mode="full")
+        assert "/Users/yao" not in tool_detail_for_display(step, mode="full")
 
     def test_unicode_filename_and_subcommand_are_preserved(self) -> None:
         result = compact_command_detail('python3 天气查询.py batch_search --query "上海 台风"')
