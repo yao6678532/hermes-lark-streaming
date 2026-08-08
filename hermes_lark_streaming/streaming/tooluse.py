@@ -131,7 +131,14 @@ def _basename_only(text: str) -> str:
 
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=.*$")
 _SAFE_COMMAND_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$")
+_PYTHON_MODULE_RE = re.compile(
+    r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"
+)
 _SHELL_OPERATORS = frozenset({"&&", "||", "|", ";", ">", ">>", "<", "<<"})
+_PYTHON_FLAG_OPTIONS = frozenset(
+    {"-B", "-d", "-E", "-i", "-I", "-O", "-OO", "-P", "-q", "-s", "-S", "-u", "-v", "-V", "-x"}
+)
+_PYTHON_VALUE_OPTIONS = frozenset({"-W", "-X", "--check-hash-based-pycs"})
 
 
 def _safe_command_token(token: str) -> bool:
@@ -166,6 +173,44 @@ def _is_shell_command_string_option(token: str) -> bool:
     return token.startswith("-") and not token.startswith("--") and "c" in token[1:]
 
 
+def _compact_python_command(tokens: list[str]) -> str:
+    """Compact Python argv while keeping interpreter options separate from script argv."""
+    executable = tokens[0]
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "-m":
+            if index + 1 >= len(tokens):
+                return executable
+            module = tokens[index + 1]
+            if not _PYTHON_MODULE_RE.fullmatch(module):
+                return executable
+            return f"{executable} -m {module}"
+        if token == "-c":
+            return executable
+        if token == "--":
+            index += 1
+            break
+        if token in _PYTHON_FLAG_OPTIONS:
+            index += 1
+            continue
+        if token in _PYTHON_VALUE_OPTIONS:
+            if index + 1 >= len(tokens):
+                return executable
+            index += 2
+            continue
+        if token.startswith("-"):
+            return executable
+        result = [_executable_basename(token)]
+        _append_safe_subcommand(result, tokens, index + 1)
+        return " ".join(result)
+    if index < len(tokens):
+        result = [_executable_basename(tokens[index])]
+        _append_safe_subcommand(result, tokens, index + 1)
+        return " ".join(result)
+    return executable
+
+
 def compact_command_detail(detail: str) -> str:
     """Semantically compact a sanitized command without exposing its payload.
 
@@ -188,22 +233,7 @@ def compact_command_detail(detail: str) -> str:
     executable_lower = executable.lower()
     result: list[str]
     if executable_lower in {"python", "python3"} or re.fullmatch(r"python3\.\d+", executable_lower):
-        if "-m" in tokens[1:]:
-            module_index = tokens.index("-m", 1)
-            if module_index + 1 < len(tokens):
-                return " ".join([executable, "-m", tokens[module_index + 1]])
-            return executable
-        if "-c" in tokens[1:]:
-            return executable
-        script_index = next(
-            (index for index, token in enumerate(tokens[1:], 1) if not token.startswith("-")),
-            None,
-        )
-        if script_index is None:
-            return executable
-        result = [_executable_basename(tokens[script_index])]
-        _append_safe_subcommand(result, tokens, script_index + 1)
-        return " ".join(result)
+        return _compact_python_command(tokens)
 
     if executable_lower in {"bash", "sh", "zsh"}:
         if any(_is_shell_command_string_option(option) for option in tokens[1:]):

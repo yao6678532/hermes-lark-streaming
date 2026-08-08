@@ -156,6 +156,23 @@ class TestCompactCommandDetail:
     @pytest.mark.parametrize(
         ("detail", "expected"),
         [
+            ('python3 script.py -m "private payload"', "script.py"),
+            ('python3 script.py batch_search -m \'{"secret":"payload"}\'', "script.py batch_search"),
+            ('python3 script.py -c "private payload"', "script.py"),
+        ],
+    )
+    def test_python_script_options_are_not_reinterpreted(
+        self, detail: str, expected: str
+    ) -> None:
+        result = compact_command_detail(detail)
+        assert result == expected
+        assert "private payload" not in result
+        assert '{"secret"' not in result
+        assert "payload" not in result
+
+    @pytest.mark.parametrize(
+        ("detail", "expected"),
+        [
             (
                 'bash -lc "python3 anysearch_cli.py batch_search --queries \'[huge payload]\'"',
                 "bash",
