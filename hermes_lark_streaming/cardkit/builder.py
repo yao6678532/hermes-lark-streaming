@@ -372,14 +372,11 @@ def _build_run_details_elements(
         fields = [["status", "elapsed", "context", "model"]]
 
     data = footer_data or {}
-    summary_parts_en: list[str] = []
-    summary_parts_zh: list[str] = []
-    for field in ("elapsed", "model"):
-        en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
-        if en:
-            summary_parts_en.append(en)
-        if zh:
-            summary_parts_zh.append(zh)
+    summary_parts_en, summary_parts_zh = _build_footer_summary(
+        data,
+        is_error=is_error,
+        is_aborted=is_aborted,
+    )
 
     en_lines: list[str] = []
     zh_lines: list[str] = []
@@ -395,7 +392,7 @@ def _build_run_details_elements(
             # Run Details always uses explicit field labels.  Keep
             # footer.show_label accepted for config compatibility, but do not
             # duplicate labels already supplied by this presentation.
-            en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
+            en, zh = _render_run_details_field(field, data, is_error, is_aborted)
             if en:
                 label_en, label_zh = _footer_field_label(field)
                 en_parts.append(f"{label_en} {en}" if label_en else en)
@@ -413,12 +410,8 @@ def _build_run_details_elements(
         en_content = f"<font color='red'>{en_content}</font>"
         zh_content = f"<font color='red'>{zh_content}</font>"
 
-    title_en = _T["run_details"][0]
-    title_zh = _T["run_details"][1]
-    if summary_parts_en:
-        title_en += " · " + " · ".join(summary_parts_en)
-    if summary_parts_zh:
-        title_zh += " · " + " · ".join(summary_parts_zh)
+    title_en = _join_compact_footer_parts(summary_parts_en)
+    title_zh = _join_compact_footer_parts(summary_parts_zh)
 
     panel = _collapsible_panel(
         expanded=False,
@@ -439,6 +432,84 @@ def _build_run_details_elements(
         ],
     )
     return [{"tag": "hr"}, panel]
+
+
+def _build_footer_summary(
+    data: dict,
+    *,
+    is_error: bool,
+    is_aborted: bool,
+) -> tuple[list[str], list[str]]:
+    """Build the fixed compact summary independently of footer.fields."""
+    en_parts: list[str] = []
+    zh_parts: list[str] = []
+
+    for field in ("status", "elapsed", "model"):
+        en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
+        if en:
+            en_parts.append(en)
+        if zh:
+            zh_parts.append(zh)
+
+    quota_en, quota_zh = _render_footer_field("gpt_quota", data, is_error, is_aborted, False)
+    if quota_en:
+        en_parts.append(quota_en)
+        if quota_zh:
+            zh_parts.append(quota_zh)
+    else:
+        context_en, context_zh = _compact_context_summary(
+            data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+        )
+        if context_en:
+            en_parts.append(context_en)
+        if context_zh:
+            zh_parts.append(context_zh)
+
+    return en_parts, zh_parts
+
+
+def _compact_context_summary(
+    data: dict,
+    *,
+    is_error: bool,
+    is_aborted: bool,
+) -> tuple[str | None, str | None]:
+    """Reuse the footer context formatter while omitting its summary percentage."""
+    en, zh = _render_footer_field("context", data, is_error, is_aborted, False)
+    if not en:
+        return None, None
+
+    def compact(value: str) -> str:
+        value = value.split(" (", 1)[0]
+        return re.sub(r"\.0(?=[KM])", "", value)
+
+    return compact(en), compact(zh or en)
+
+
+def _join_compact_footer_parts(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    if parts[0] == "✅" and len(parts) > 1:
+        return parts[0] + " " + " · ".join(parts[1:])
+    return " · ".join(parts)
+
+
+def _render_run_details_field(
+    name: str,
+    data: dict,
+    is_error: bool,
+    is_aborted: bool,
+) -> tuple[str | None, str | None]:
+    """Render detail values without changing legacy footer semantics."""
+    if name == "status":
+        if is_error:
+            return _T["status_error"]
+        if is_aborted:
+            return _T["status_stopped"]
+        return _T["status_completed"]
+    return _render_footer_field(name, data, is_error, is_aborted, False)
 
 
 def _footer_field_label(name: str) -> tuple[str, str]:

@@ -38,7 +38,8 @@ def _run_details_panel(card: dict) -> dict:
         element
         for element in card["body"]["elements"]
         if element.get("tag") == "collapsible_panel"
-        and "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+        and "💭" not in element.get("header", {}).get("title", {}).get("content", "")
+        and element.get("element_id") is None
     )
 
 
@@ -981,7 +982,7 @@ class TestDoCreateCard:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert "Status ✅" in details_text
+        assert "Status ✅ Completed" in details_text
         assert "Elapsed 26.5s" in details_text
         assert "GPT Quota 5h 80%" in details_text
         assert "Model gpt-5" in details_text
@@ -2194,7 +2195,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert "Status ✅" in details_text
+        assert "Status ✅ Completed" in details_text
         assert "Elapsed 26.5s" in details_text
         assert "GPT Quota 5h 80%" in details_text
         assert "Model gpt-5" in details_text
@@ -2309,7 +2310,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert "Status ✅" in details_text
+        assert "Status ✅ Completed" in details_text
         assert "Elapsed 26.5s" in details_text
         assert "GPT Quota 5h 80%" in details_text
         assert "Model gpt-5" in details_text

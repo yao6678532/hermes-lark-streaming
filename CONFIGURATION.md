@@ -172,7 +172,7 @@ lark:
 
 Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。Run Details 只在最终 physical card 完成时显示，split card 的中间 seal card 不重复显示。
 
-Run Details 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`。其 summary 只显示 `运行详情 · {elapsed} · {model}`（英文为 `Run Details · {elapsed} · {model}`），缺失值不会产生多余分隔符；展开后沿用 `footer.fields` 与现有 footer metadata。它不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
+终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota}`，没有 quota 时以 compact context 作为 fallback；缺失值不会产生多余分隔符。展开后沿用 `footer.fields` 与现有 footer metadata；它不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

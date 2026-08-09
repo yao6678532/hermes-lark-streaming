@@ -21,7 +21,7 @@ Inspired by [openclaw-lark](https://github.com/larksuite/openclaw-lark) and [her
 - **Tool use tracking** — Live tool call status with standard icons, result/error blocks
 - **CardKit v2.0** — Uses Feishu CardKit streaming API; card creation failures yield to the Hermes Gateway default reply
 - **Completion card** — Final card with token usage, duration, and context info
-- **Card style** — Configurable card header, terminal Run Details toggle, and body text size
+- **Card style** — Configurable card header, terminal compact footer summary toggle, and body text size
 - **Message guard** — Auto-terminates updates when message is deleted/recalled
 - **Image resolution** — Detects markdown image references, downloads and re-uploads as Feishu img_key
 - **Abort handling** — Gracefully handles `/stop` command and message interrupts with aborted state card and automatic new session
@@ -118,7 +118,7 @@ display:
       show_tool_use: true
 ```
 
-`streaming.footer.enabled` continues to control terminal Run Details, while `streaming.footer.fields` controls the fields shown when expanded. Run Details is collapsed by default, is independent of `panel_expanded`, and is not dynamically rendered during streaming; Reasoning Panel and Tool Panel behavior is unchanged. See [CONFIGURATION.md](CONFIGURATION.md) for the full configuration reference.
+`streaming.footer.enabled` continues to control the terminal compact footer summary, while `streaming.footer.fields` controls the fields shown after clicking the right-side arrow. The collapsed summary stays close to the legacy footer, for example `✅ 2m 2s · gpt-5.6-luna · 5h 96%`; details are collapsed by default, independent of `panel_expanded`, and not dynamically rendered during streaming. Reasoning Panel and Tool Panel behavior is unchanged. See [CONFIGURATION.md](CONFIGURATION.md) for the full configuration reference.
 
 ---
 

@@ -436,6 +436,7 @@ class TestBuildFooterElements:
         assert len(result) >= 2
         assert self._panel(result)["expanded"] is False
         assert "Status ✅" in self._content(result)
+        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == "状态 ✅ 已完成"
 
     def test_summary_uses_elapsed_and_model(self) -> None:
         result = _build_footer_elements(
@@ -443,15 +444,17 @@ class TestBuildFooterElements:
             fields=[["status", "elapsed", "model"]],
         )
         panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == "Run Details · 26.5s · gpt-5"
-        assert panel["header"]["title"]["i18n_content"]["zh_cn"] == "运行详情 · 26.5s · gpt-5"
+        assert panel["header"]["title"]["content"] == "✅ 26.5s · gpt-5"
+        assert panel["header"]["title"]["i18n_content"]["zh_cn"] == "✅ 26.5s · gpt-5"
+        assert "Run Details" not in panel["header"]["title"]["content"]
+        assert "运行详情" not in panel["header"]["title"]["i18n_content"]["zh_cn"]
 
     @pytest.mark.parametrize(
         ("data", "expected"),
         [
-            ({"model": "gpt-5"}, "Run Details · gpt-5"),
-            ({"duration": 26.5}, "Run Details · 26.5s"),
-            ({}, "Run Details"),
+            ({"model": "gpt-5"}, "✅ gpt-5"),
+            ({"duration": 26.5}, "✅ 26.5s"),
+            ({}, "✅"),
         ],
     )
     def test_summary_omits_missing_core_parts(self, data: dict, expected: str) -> None:
@@ -468,16 +471,36 @@ class TestBuildFooterElements:
             fields=[["status", "context", "gpt_quota"]],
         )
         content = self._content(result)
-        assert content == "Status ✅ · GPT Quota 5h 80%"
+        panel = self._panel(result)
+        assert panel["header"]["title"]["content"] == "✅ 5h 80%"
+        assert content == "Status ✅ Completed · GPT Quota 5h 80%"
         assert "50.0K" not in content
+
+    def test_context_is_summary_fallback_without_quota(self) -> None:
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "deepseek-v3",
+                "context_used": 50000,
+                "context_max": 128000,
+            },
+            fields=[["status", "elapsed", "model"]],
+        )
+        panel = self._panel(result)
+        assert panel["header"]["title"]["content"] == "✅ 2m 2s · deepseek-v3 · 50K/128K"
+        assert "Context" not in self._content(result)
 
     def test_status_error(self) -> None:
         result = _build_footer_elements({}, is_error=True)
-        assert "red" in self._content(result)
+        assert self._content(result) == "<font color='red'>Status ❌ Error</font>"
+        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == (
+            "<font color='red'>状态 ❌ 出错</font>"
+        )
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({}, is_aborted=True)
-        assert "Stopped" in self._content(result)
+        assert self._content(result) == "Status 🛑 Stopped"
+        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == "状态 🛑 已停止"
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
@@ -524,6 +547,21 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert content == "Model gpt"
         assert "Balance" not in content
+
+    def test_summary_is_independent_from_footer_fields(self) -> None:
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "gpt-5.6-luna",
+                "gpt_quota": "5h 96%",
+                "input_tokens": 12400,
+                "output_tokens": 2100,
+            },
+            fields=[["tokens"]],
+        )
+        panel = self._panel(result)
+        assert panel["header"]["title"]["content"] == "✅ 2m 2s · gpt-5.6-luna · 5h 96%"
+        assert self._content(result) == "Tokens ↑ 12.4K ↓ 2.1K"
 
     def test_no_matching_fields(self) -> None:
         assert _build_footer_elements({}, fields=[["tokens"]]) == []
@@ -834,7 +872,8 @@ class TestBuildSegmentCompleteCard:
             element
             for element in card["body"]["elements"]
             if element.get("tag") == "collapsible_panel"
-            and "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+            and "💭" not in element.get("header", {}).get("title", {}).get("content", "")
+            and element.get("element_id") is None
         )
         reasoning = next(
             element
@@ -855,7 +894,8 @@ class TestBuildSegmentCompleteCard:
         assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
         assert any(
             e.get("tag") == "collapsible_panel"
-            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
             for e in card["body"]["elements"]
         )
 
@@ -1133,7 +1173,8 @@ class TestCompleteCardFooter:
             e
             for e in card["body"]["elements"]
             if e.get("tag") == "collapsible_panel"
-            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
         )
         assert details["expanded"] is False
 
@@ -1147,6 +1188,7 @@ class TestCompleteCardFooter:
         assert "hr" not in tags
         assert not any(
             e.get("tag") == "collapsible_panel"
-            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
             for e in card["body"]["elements"]
         )
