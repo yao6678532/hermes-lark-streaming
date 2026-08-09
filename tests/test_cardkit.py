@@ -13,6 +13,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _build_header,
     _build_reasoning_panel,
     _build_tool_panel,
+    _build_tool_step_title,
     _compact,
     _escape_md,
     _format_elapsed,
@@ -378,6 +379,23 @@ class TestBuildToolPanel:
         assert "Succeeded" not in str(success["elements"])
         assert "Failed" in str(failed["elements"])
         assert "1.2s" in str(failed["elements"])
+
+    @pytest.mark.parametrize(
+        ("status", "elapsed_ms", "color", "label"),
+        [
+            ("running", 0, "blue", "Running"),
+            ("success", 1200, "grey", "1.2s"),
+            ("success", 0, "grey", "Done"),
+            ("error", 1200, "red", "Failed · 1.2s"),
+        ],
+    )
+    def test_step_status_colors_icon_and_status_text(
+        self, status: str, elapsed_ms: int, color: str, label: str
+    ) -> None:
+        title = _build_tool_step_title({**_STEP_RUNNING, "status": status, "elapsed_ms": elapsed_ms})
+
+        assert title["icon"]["color"] == color
+        assert f"<font color='{color}'>{label}</font>" in title["text"]["content"]
 
     def test_detail_visibility_and_compact_mode_keep_title_and_output(self) -> None:
         step = {

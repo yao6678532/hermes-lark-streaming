@@ -341,13 +341,13 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["glob"], "icon": "folder_outlined", "title": "Search files", "sanitizer": "path"},
     {
         "aliases": ["exec", "bash", "command", "run"],
-        "icon": "setting_outlined",
+        "icon": "platform_outlined",
         "title": "Run command",
         "sanitizer": "command",
     },
     {
         "aliases": ["terminal"],
-        "icon": "setting-inter_outlined",
+        "icon": "platform_outlined",
         "title": "Terminal",
         "sanitizer": "command",
     },

@@ -258,6 +258,13 @@ class TestFormatDurationLabel:
 
 
 class TestResolveToolDescriptor:
+    @pytest.mark.parametrize("name", ["exec", "bash", "command", "run", "terminal"])
+    def test_command_tools_use_platform_icon_and_command_sanitizer(self, name: str) -> None:
+        desc = _resolve_tool_descriptor(name)
+        assert desc is not None
+        assert desc["icon"] == "platform_outlined"
+        assert desc["sanitizer"] == "command"
+
     def test_known_tool(self) -> None:
         desc = _resolve_tool_descriptor("read")
         assert desc is not None
