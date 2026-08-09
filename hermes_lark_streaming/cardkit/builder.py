@@ -369,7 +369,7 @@ def _build_run_details_elements(
 ) -> list[dict]:
     """Build the collapsed terminal Run Details panel from footer metadata."""
     if fields is None:
-        fields = [["status", "elapsed", "context", "model"]]
+        fields = [["tokens", "context", "balance"]]
 
     data = footer_data or {}
     summary_parts_en, summary_parts_zh = _build_footer_summary(
@@ -377,17 +377,19 @@ def _build_run_details_elements(
         is_error=is_error,
         is_aborted=is_aborted,
     )
+    summary_fields = _footer_summary_field_names(
+        data,
+        is_error=is_error,
+        is_aborted=is_aborted,
+    )
 
     en_lines: list[str] = []
     zh_lines: list[str] = []
-    # GPT quota is more useful than context in the footer. Keep context for
-    # non-GPT models (e.g. DeepSeek) where gpt_quota is empty/hidden.
-    hide_context = bool(data.get("gpt_quota"))
     for row in fields:
         en_parts: list[str] = []
         zh_parts: list[str] = []
         for field in row:
-            if hide_context and field == "context":
+            if field in summary_fields:
                 continue
             # Run Details always uses explicit field labels.  Keep
             # footer.show_label accepted for config compatibility, but do not
@@ -401,17 +403,23 @@ def _build_run_details_elements(
             en_lines.append(" · ".join(en_parts))
             zh_lines.append(" · ".join(zh_parts))
 
-    if not en_lines:
-        return []
-
-    en_content = "\n".join(en_lines)
-    zh_content = "\n".join(zh_lines)
-    if is_error:
-        en_content = f"<font color='red'>{en_content}</font>"
-        zh_content = f"<font color='red'>{zh_content}</font>"
-
     title_en = _join_compact_footer_parts(summary_parts_en)
     title_zh = _join_compact_footer_parts(summary_parts_zh)
+    detail_elements: list[dict] = []
+    if en_lines:
+        en_content = "\n".join(en_lines)
+        zh_content = "\n".join(zh_lines)
+        if is_error:
+            en_content = f"<font color='red'>{en_content}</font>"
+            zh_content = f"<font color='red'>{zh_content}</font>"
+        detail_elements.append(
+            {
+                "tag": "markdown",
+                "content": en_content,
+                "i18n_content": _i18n(en_content, zh_content),
+                "text_size": text_size,
+            }
+        )
 
     panel = _collapsible_panel(
         expanded=False,
@@ -422,14 +430,7 @@ def _build_run_details_elements(
             "text_color": "grey",
             "text_size": text_size,
         },
-        elements=[
-            {
-                "tag": "markdown",
-                "content": en_content,
-                "i18n_content": _i18n(en_content, zh_content),
-                "text_size": text_size,
-            }
-        ],
+        elements=detail_elements,
     )
     return [{"tag": "hr"}, panel]
 
@@ -468,6 +469,33 @@ def _build_footer_summary(
             zh_parts.append(context_zh)
 
     return en_parts, zh_parts
+
+
+def _footer_summary_field_names(
+    data: dict,
+    *,
+    is_error: bool,
+    is_aborted: bool,
+) -> set[str]:
+    """Return footer fields already represented by the compact summary."""
+    fields: set[str] = set()
+    for field in ("status", "elapsed", "model"):
+        en, _ = _render_footer_field(field, data, is_error, is_aborted, False)
+        if en:
+            fields.add(field)
+
+    quota_en, _ = _render_footer_field("gpt_quota", data, is_error, is_aborted, False)
+    if quota_en:
+        fields.add("gpt_quota")
+    else:
+        context_en, _ = _compact_context_summary(
+            data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+        )
+        if context_en:
+            fields.add("context")
+    return fields
 
 
 def _compact_context_summary(

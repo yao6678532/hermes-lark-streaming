@@ -429,15 +429,16 @@ class TestBuildFooterElements:
 
     @classmethod
     def _content(cls, result: list[dict]) -> str:
-        return cls._panel(result)["elements"][0]["content"]
+        elements = cls._panel(result)["elements"]
+        return elements[0]["content"] if elements else ""
 
     def test_empty_data_renders_default_status(self) -> None:
-        # 默认字段包含 "status"，总是会渲染到折叠详情中
+        # 默认字段只包含额外 metadata；状态由 compact summary 展示。
         result = _build_footer_elements({})
         assert len(result) >= 2
         assert self._panel(result)["expanded"] is False
-        assert "Status ✅" in self._content(result)
-        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == "状态 ✅ 已完成"
+        assert self._panel(result)["header"]["title"]["content"] == "✅"
+        assert self._panel(result)["elements"] == []
 
     def test_summary_uses_elapsed_and_model(self) -> None:
         result = _build_footer_elements(
@@ -462,7 +463,7 @@ class TestBuildFooterElements:
         result = _build_footer_elements(data, fields=[["status"]])
         assert self._panel(result)["header"]["title"]["content"] == expected
 
-    def test_gpt_quota_hides_context(self) -> None:
+    def test_gpt_quota_keeps_context_available_in_detail(self) -> None:
         result = _build_footer_elements(
             {
                 "context_used": 50000,
@@ -474,8 +475,7 @@ class TestBuildFooterElements:
         content = self._content(result)
         panel = self._panel(result)
         assert panel["header"]["title"]["content"] == "✅ 5h 80%"
-        assert content == "Status ✅ Completed · GPT Quota 5h 80%"
-        assert "50.0K" not in content
+        assert content == "Context 50.0K/200.0K (25%)"
 
     def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
         quota = "<font color='green'>5h 95%</font> ↻6d16h"
@@ -504,34 +504,35 @@ class TestBuildFooterElements:
         )
         panel = self._panel(result)
         assert panel["header"]["title"]["content"] == "✅ 2m 2s · deepseek-v3 · 50K/128K"
-        assert "Context" not in self._content(result)
+        assert self._panel(result)["elements"] == []
 
     def test_status_error(self) -> None:
-        result = _build_footer_elements({}, is_error=True)
-        assert self._content(result) == "<font color='red'>Status ❌ Error</font>"
-        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == (
-            "<font color='red'>状态 ❌ 出错</font>"
-        )
+        result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
+        assert self._panel(result)["header"]["title"]["content"] == "❌ Error"
+        assert self._content(result) == "<font color='red'>Tokens ↑ 1 ↓ 0</font>"
 
     def test_status_aborted(self) -> None:
-        result = _build_footer_elements({}, is_aborted=True)
-        assert self._content(result) == "Status 🛑 Stopped"
-        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == "状态 🛑 已停止"
+        result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
+        assert self._panel(result)["header"]["title"]["content"] == "🛑 Stopped"
+        assert self._content(result) == "Tokens ↑ 0 ↓ 1"
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
-        assert self._content(result) == "Elapsed 12.5s"
+        assert self._panel(result)["header"]["title"]["content"] == "✅ 12.5s"
+        assert self._content(result) == ""
 
     def test_model_displayed(self) -> None:
         result = _build_footer_elements({"model": "claude-3"}, fields=[["model"]])
-        assert self._content(result) == "Model claude-3"
+        assert self._panel(result)["header"]["title"]["content"] == "✅ claude-3"
+        assert self._content(result) == ""
 
     def test_context_displayed(self) -> None:
         result = _build_footer_elements(
             {"context_used": 50000, "context_max": 200000},
             fields=[["context"]],
         )
-        assert self._content(result) == "Context 50.0K/200.0K (25%)"
+        assert self._panel(result)["header"]["title"]["content"] == "✅ 50K/200K"
+        assert self._content(result) == ""
 
     def test_tokens_displayed(self) -> None:
         result = _build_footer_elements(
@@ -546,14 +547,14 @@ class TestBuildFooterElements:
             fields=[["elapsed"]],
             show_label=True,
         )
-        assert self._content(result) == "Elapsed 5.0s"
+        assert self._content(result) == ""
 
     def test_multi_row_fields(self) -> None:
         result = _build_footer_elements(
             {"duration": 5, "model": "gpt"},
             fields=[["elapsed"], ["model"]],
         )
-        assert "\n" in self._content(result)
+        assert self._content(result) == ""
 
     def test_field_subset_only_renders_selected_fields(self) -> None:
         result = _build_footer_elements(
@@ -561,8 +562,7 @@ class TestBuildFooterElements:
             fields=[["model"]],
         )
         content = self._content(result)
-        assert content == "Model gpt"
-        assert "Balance" not in content
+        assert content == ""
 
     def test_summary_is_independent_from_footer_fields(self) -> None:
         result = _build_footer_elements(
@@ -579,11 +579,35 @@ class TestBuildFooterElements:
         assert panel["header"]["title"]["content"] == "✅ 2m 2s · gpt-5.6-luna · 5h 96%"
         assert self._content(result) == "Tokens ↑ 12.4K ↓ 2.1K"
 
+    def test_default_details_keep_only_extra_metadata(self) -> None:
+        result = _build_footer_elements(
+            {
+                "duration": 4.4,
+                "model": "gpt-5.6-luna",
+                "gpt_quota": "5h 95% ↻6d15h",
+                "input_tokens": 12400,
+                "output_tokens": 1800,
+                "context_used": 70500,
+                "context_max": 272000,
+                "balance": "¥4.97",
+            }
+        )
+        content = self._content(result)
+        assert content == "Tokens ↑ 12.4K ↓ 1.8K · Context 70.5K/272.0K (25%) · Balance ¥4.97"
+        assert "Status" not in content
+        assert "Elapsed" not in content
+        assert "Model" not in content
+        assert "GPT Quota" not in content
+
     def test_no_matching_fields(self) -> None:
-        assert _build_footer_elements({}, fields=[["tokens"]]) == []
+        result = _build_footer_elements({}, fields=[["tokens"]])
+        assert self._panel(result)["header"]["title"]["content"] == "✅"
+        assert self._panel(result)["elements"] == []
 
     def test_empty_fields_preserve_existing_no_matching_semantics(self) -> None:
-        assert _build_footer_elements({"model": "gpt"}, fields=[]) == []
+        result = _build_footer_elements({"model": "gpt"}, fields=[])
+        assert self._panel(result)["header"]["title"]["content"] == "✅ gpt"
+        assert self._panel(result)["elements"] == []
 
     def test_run_details_failure_falls_back_to_legacy_footer(self) -> None:
         with patch(

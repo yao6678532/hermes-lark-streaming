@@ -109,7 +109,7 @@ streaming:
     enabled: true
     text_size: notation
     fields:
-      - [status, elapsed, context, model]
+      - [tokens, context, balance]
     show_label: false
   panel_expanded: false
 display:

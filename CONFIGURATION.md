@@ -45,7 +45,7 @@ streaming:
     enabled: true               # 默认 true
     text_size: notation         # 默认 notation
     fields:
-      - [status, elapsed, context, model]
+      - [tokens, context, balance]
     show_label: false           # 默认 false
 
 display:
@@ -113,7 +113,7 @@ lark:
 | answer body 文字大小 | `streaming.body.text_size` | CardKit text size 字符串 | `normal_v2` | 重启 gateway | 传给 answer markdown 的 `text_size`；插件只在缺失或空值时回退到 `normal_v2`。 |
 | 完成态 Run Details | `streaming.footer.enabled` | bool | `true` | 重启 gateway | 控制完成卡片中默认折叠的 Run Details；保持 `footer` 配置名兼容。 |
 | Run Details 文字大小 | `streaming.footer.text_size` | CardKit text size 字符串 | `notation` | 重启 gateway | 传给 Run Details 标题与展开内容；插件只在缺失或空值时回退到 `notation`。 |
-| Run Details 字段布局 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[status, elapsed, context, model]]` | 重启 gateway | 每个子数组是一行，控制展开内容。支持字段见下表；空值、缺失或非 list 使用默认布局。 |
+| Run Details 字段布局 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[tokens, context, balance]]` | 重启 gateway | 每个子数组是一行，控制展开内容。支持字段见下表；空值、缺失或非 list 使用默认布局。 |
 | Run Details 标签兼容项 | `streaming.footer.show_label` | bool | `false` | 重启 gateway | 保留旧配置项；Run Details 展开内容始终使用清晰的字段标签。 |
 
 ### `footer.fields` 支持的字段
@@ -144,7 +144,7 @@ lark:
 - `width_mode` 缺失、为空或非法时为 `default`。
 - `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled`、`show_tool_use` 和 `show_tool_detail` 缺失时均为 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
 - `body.text_size` 缺失或空值时为 `normal_v2`；`footer.text_size` 缺失或空值时为 `notation`。这两个 text size 字符串不是插件枚举，非法的 CardKit 值不会由插件额外改写。
-- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[status, elapsed, context, model]]`；一维字段 list 会自动包装为一行。直接传入空字段 list 时保持既有 builder 语义，不渲染详情。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
+- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[tokens, context, balance]]`；一维字段 list 会自动包装为一行。详情 presentation 会自动过滤已出现在 compact summary 中的字段。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
 - `card_ttl_sec` 缺失时为 `600`。代码会调用 `int()`，因此不可转换的非数字值不是 fallback，而会在读取时失败。
 
 ## 热加载 vs Gateway restart
