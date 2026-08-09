@@ -369,7 +369,7 @@ def _build_run_details_elements(
 ) -> list[dict]:
     """Build the collapsed terminal Run Details panel from footer metadata."""
     if fields is None:
-        fields = [["tokens", "context", "balance"]]
+        fields = [["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]]
 
     data = footer_data or {}
     summary_parts_en, summary_parts_zh = _build_footer_summary(
@@ -385,23 +385,20 @@ def _build_run_details_elements(
 
     en_lines: list[str] = []
     zh_lines: list[str] = []
+    rendered_fields: set[str] = set()
     for row in fields:
-        en_parts: list[str] = []
-        zh_parts: list[str] = []
         for field in row:
-            if field in summary_fields:
+            if field in summary_fields or field in rendered_fields:
                 continue
+            rendered_fields.add(field)
             # Run Details always uses explicit field labels.  Keep
             # footer.show_label accepted for config compatibility, but do not
             # duplicate labels already supplied by this presentation.
             en, zh = _render_run_details_field(field, data, is_error, is_aborted)
             if en:
                 label_en, label_zh = _footer_field_label(field)
-                en_parts.append(f"{label_en} {en}" if label_en else en)
-                zh_parts.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
-        if en_parts:
-            en_lines.append(" · ".join(en_parts))
-            zh_lines.append(" · ".join(zh_parts))
+                en_lines.append(f"{label_en} {en}" if label_en else en)
+                zh_lines.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
 
     title_en = _join_compact_footer_parts(summary_parts_en)
     title_zh = _join_compact_footer_parts(summary_parts_zh)
@@ -417,6 +414,7 @@ def _build_run_details_elements(
                 "tag": "markdown",
                 "content": en_content,
                 "i18n_content": _i18n(en_content, zh_content),
+                "text_color": "grey",
                 "text_size": text_size,
             }
         )
@@ -504,16 +502,13 @@ def _compact_context_summary(
     is_error: bool,
     is_aborted: bool,
 ) -> tuple[str | None, str | None]:
-    """Reuse the footer context formatter while omitting its summary percentage."""
-    en, zh = _render_footer_field("context", data, is_error, is_aborted, False)
-    if not en:
+    """Render context compactly for the summary without its percentage."""
+    used = _positive_int(data.get("context_used"))
+    max_c = _positive_int(data.get("context_max"))
+    if not max_c:
         return None, None
-
-    def compact(value: str) -> str:
-        value = value.split(" (", 1)[0]
-        return re.sub(r"\.0(?=[KM])", "", value)
-
-    return compact(en), compact(zh or en)
+    value = f"{_compact_summary_number(used)}/{_compact_summary_number(max_c)}"
+    return value, value
 
 
 def _join_compact_footer_parts(parts: list[str]) -> str:
@@ -565,7 +560,7 @@ def _build_legacy_footer_elements(
     data = footer_data or {}
     en_lines: list[str] = []
     zh_lines: list[str] = []
-    hide_context = bool(data.get("gpt_quota"))
+    hide_context = bool(data.get("gpt_quota_remaining") or data.get("gpt_quota"))
     for row in fields:
         en_parts: list[str] = []
         zh_parts: list[str] = []
@@ -635,19 +630,24 @@ def _render_footer_field(
         return v, v
 
     if name == "tokens":
-        input_t = data.get("input_tokens", 0) or 0
-        output_t = data.get("output_tokens", 0) or 0
-        if input_t or output_t:
-            v = f"↑ {_compact(input_t)} ↓ {_compact(output_t)}"
+        input_t = _positive_int(data.get("input_tokens"))
+        output_t = _positive_int(data.get("output_tokens"))
+        parts = []
+        if input_t:
+            parts.append(f"↑ {_compact(input_t)}")
+        if output_t:
+            parts.append(f"↓ {_compact(output_t)}")
+        if parts:
+            v = " · ".join(parts)
             return v, v
         return None, None
 
     if name == "context":
-        used = data.get("context_used", 0) or 0
-        max_c = data.get("context_max", 0) or 0
+        used = _positive_int(data.get("context_used"))
+        max_c = _positive_int(data.get("context_max"))
         if max_c:
             pct = int(used / max_c * 100)
-            val = f"{_compact(used)}/{_compact(max_c)} ({pct}%)"
+            val = f"{_compact(used)} / {_compact(max_c)} · {pct}%"
             if show_label:
                 return _T["context"][0].format(val), _T["context"][1].format(val)
             return val, val
@@ -658,10 +658,67 @@ def _render_footer_field(
         return v, v
 
     if name == "gpt_quota":
-        v = data.get("gpt_quota") or None
+        v = data.get("gpt_quota_remaining") or data.get("gpt_quota") or None
         return v, v
 
+    if name == "quota_reset":
+        v = data.get("gpt_quota_reset") or None
+        return v, v
+
+    if name == "cache":
+        cache_read = _positive_int(data.get("cache_read_tokens"))
+        cache_write = _positive_int(data.get("cache_write_tokens"))
+        prompt_tokens = _positive_int(
+            data.get("cache_prompt_tokens") or data.get("input_tokens")
+        )
+        if not cache_read and not cache_write:
+            return None, None
+
+        en_parts: list[str] = []
+        zh_parts: list[str] = []
+        if cache_read:
+            if prompt_tokens:
+                hit_pct = round(cache_read / prompt_tokens * 100)
+                hit = f"{_compact(cache_read)} / {_compact(prompt_tokens)} · {hit_pct}%"
+                en_parts.append(f"Hit {hit}")
+                zh_parts.append(f"命中 {hit}")
+            else:
+                en_parts.append(f"Read {_compact(cache_read)}")
+                zh_parts.append(f"读取 {_compact(cache_read)}")
+        if cache_write:
+            en_parts.append(f"Write {_compact(cache_write)}")
+            zh_parts.append(f"写入 {_compact(cache_write)}")
+        return " · ".join(en_parts), " · ".join(zh_parts)
+
+    if name == "reasoning":
+        value = _positive_int(data.get("reasoning_tokens"))
+        if value:
+            rendered = _compact(value)
+            return rendered, rendered
+        return None, None
+
+    if name == "api_calls":
+        value = _positive_int(data.get("api_calls"))
+        if value:
+            rendered = str(value)
+            return rendered, rendered
+        return None, None
+
     return None, None
+
+
+def _positive_int(value: object) -> int:
+    if not isinstance(value, (str, int, float)):
+        return 0
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _compact_summary_number(n: int) -> str:
+    return re.sub(r"\.0(?=[KM])", "", _compact(n))
 
 
 def _compact(n: int) -> str:

@@ -40,6 +40,7 @@ _HOOK_NAMES = [
     "CLARIFY_SEND",
     "CLARIFY_ACTION",
     "PROGRESS",
+    "USAGE",
 ]
 MARKERS: list[tuple[str, str]] = [(f"# {PREFIX}_{n}_BEGIN", f"# {PREFIX}_{n}_END") for n in _HOOK_NAMES]
 
@@ -60,6 +61,7 @@ MK_BG_DELIVER, MK_BG_DELIVER_END = MARKERS[13]
 MK_CLARIFY_SEND, MK_CLARIFY_SEND_END = MARKERS[14]
 MK_CLARIFY_ACTION, MK_CLARIFY_ACTION_END = MARKERS[15]
 MK_PROGRESS, MK_PROGRESS_END = MARKERS[16]
+MK_USAGE, MK_USAGE_END = MARKERS[17]
 
 _BACKUP_SUFFIX = ".hermes_lark.bak"
 
@@ -271,6 +273,31 @@ def _start_hook(indent: str) -> str:
     )
 
 
+def _usage_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_USAGE,
+        MK_USAGE_END,
+        [
+            "try:",
+            "    try:",
+            "        _lark_usage_message_id = ctx.event_message_id",
+            "        _lark_usage_source = ctx.source",
+            "    except NameError:",
+            "        _lark_usage_message_id = event_message_id",
+            "        _lark_usage_source = source",
+            "    if _lark_usage_source.platform.value.lower() in ('feishu', 'lark'):",
+            "        from hermes_lark_streaming.patch import on_turn_usage",
+            "        on_turn_usage(",
+            "            message_id=_lark_usage_message_id,",
+            "            usage=getattr(_agent, '_last_turn_usage', None),",
+            "            api_calls=result.get('api_calls', 0) if isinstance(result, dict) else 0,",
+            "        )",
+            *_hook_exception_lines("usage"),
+        ],
+    )
+
+
 def _complete_hook(indent: str) -> str:
     return _make_hook(
         indent,
@@ -286,10 +313,6 @@ def _complete_hook(indent: str) -> str:
             "        is_error=bool(agent_result.get('failed')),",
             "        duration=_response_time,",
             "        model=agent_result.get('model', ''),",
-            "        tokens={",
-            "            'input_tokens': agent_result.get('input_tokens', 0),",
-            "            'output_tokens': agent_result.get('output_tokens', 0),",
-            "        },",
             "        context={",
             "            'used_tokens': agent_result.get('last_prompt_tokens', 0),",
             "            'max_tokens': agent_result.get('context_length', 0),",
@@ -897,6 +920,10 @@ class Patcher:
             raise PatcherError(
                 "Cannot find long-running progress anchor in run.py — Hermes version may be incompatible"
             )
+        if _find_turn_usage_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find current-turn usage anchor in run.py — Hermes version may be incompatible"
+            )
 
     def apply(self) -> None:
         if self.is_fully_patched():
@@ -952,6 +979,7 @@ class Patcher:
             ("clarify_send", "clarify_send", _find_clarify_send_site(tree, lines)),
             ("clarify_action", "clarify_action", _find_clarify_action_site(tree, lines)),
             ("progress", "progress", _find_long_running_progress_site(tree, lines)),
+            ("usage", "current-turn usage", _find_turn_usage_site(tree, lines)),
         ]
         hook_defs.extend(
             ("answer", f"answer callback {index}", loc)
@@ -986,6 +1014,7 @@ class Patcher:
             "clarify_send": _clarify_send_hook,
             "clarify_action": _clarify_action_hook,
             "progress": _progress_hook,
+            "usage": _usage_hook,
         }
         for idx, indent, fn_name in sites:
             hook = _HOOK_FNS[fn_name](indent)
@@ -1035,6 +1064,34 @@ def _find_handle_message_source_site(tree: ast.Module, lines: list[str]) -> tupl
                 ):
                     lineno = stmt.end_lineno or stmt.lineno
                     return lineno, _safe_indent(lines, stmt.lineno - 1)
+    return None
+
+
+def _find_turn_usage_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    for index, line in enumerate(lines):
+        if line.strip() == "_agent = ctx.agent_holder[0]":
+            return index + 1, _safe_indent(lines, index)
+    for index, line in enumerate(lines):
+        if line.strip() != "_agent = agent_holder[0]":
+            continue
+        nearby = "".join(lines[max(0, index - 12) : index])
+        if "Extract actual token counts" in nearby:
+            return index + 1, _safe_indent(lines, index)
+    for stmt in ast.walk(tree):
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "_agent"
+            and isinstance(stmt.value, ast.Subscript)
+            and isinstance(stmt.value.value, ast.Attribute)
+            and stmt.value.value.attr == "agent_holder"
+            and isinstance(stmt.value.value.value, ast.Name)
+            and stmt.value.value.value.id == "ctx"
+        ):
+            continue
+        lineno = stmt.end_lineno or stmt.lineno
+        return lineno, _safe_indent(lines, stmt.lineno - 1)
     return None
 
 

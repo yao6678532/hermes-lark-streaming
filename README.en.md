@@ -109,7 +109,7 @@ streaming:
     enabled: true
     text_size: notation
     fields:
-      - [tokens, context, balance]
+      - [tokens, context, quota_reset, cache, reasoning, balance]
     show_label: false
   panel_expanded: false
 display:
@@ -118,7 +118,7 @@ display:
       show_tool_use: true
 ```
 
-`streaming.footer.enabled` continues to control the terminal compact footer summary, while `streaming.footer.fields` controls the fields shown after clicking the right-side arrow. The collapsed summary stays close to the legacy footer, for example `✅ 2m 2s · gpt-5.6-luna · 5h 96%`; details are collapsed by default, independent of `panel_expanded`, and not dynamically rendered during streaming. Reasoning Panel and Tool Panel behavior is unchanged. See [CONFIGURATION.md](CONFIGURATION.md) for the full configuration reference.
+`streaming.footer.enabled` continues to control the terminal compact footer summary, while `streaming.footer.fields` selects the vertically rendered details shown after clicking the right-side arrow. The collapsed summary keeps only high-value metadata, for example `✅ 2m 2s · gpt-5.6-luna · 96%`; GPT quota remaining stays in the summary and its reset time moves to the details. Tokens, Cache, and Reasoning usage come from Hermes' canonical metadata for the current turn. Missing provider metadata is skipped automatically and session-cumulative counters are not substituted. Details are collapsed by default, independent of `panel_expanded`, and are not dynamically rendered during streaming. Reasoning Panel and Tool Panel behavior is unchanged. See [CONFIGURATION.md](CONFIGURATION.md) for the full configuration reference.
 
 ---
 

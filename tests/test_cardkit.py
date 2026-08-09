@@ -464,33 +464,39 @@ class TestBuildFooterElements:
         assert self._panel(result)["header"]["title"]["content"] == expected
 
     def test_gpt_quota_keeps_context_available_in_detail(self) -> None:
+        remaining = "<font color='green'>80%</font>"
         result = _build_footer_elements(
             {
                 "context_used": 50000,
                 "context_max": 200000,
-                "gpt_quota": "5h 80%",
+                "gpt_quota_remaining": remaining,
+                "gpt_quota_reset": "↻6d15h",
             },
-            fields=[["status", "context", "gpt_quota"]],
+            fields=[["status", "context", "gpt_quota", "quota_reset"]],
         )
         content = self._content(result)
         panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == "✅ 5h 80%"
-        assert content == "Context 50.0K/200.0K (25%)"
+        assert panel["header"]["title"]["content"] == f"✅ {remaining}"
+        assert "↻6d15h" not in panel["header"]["title"]["content"]
+        assert content == "Context 50.0K / 200.0K · 25%\nQuota Reset ↻6d15h"
 
     def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
-        quota = "<font color='green'>5h 95%</font> ↻6d16h"
+        quota = "<font color='green'>95%</font>"
         result = _build_footer_elements(
             {
                 "duration": 122,
                 "model": "gpt-5.6-luna",
-                "gpt_quota": quota,
+                "gpt_quota_remaining": quota,
+                "gpt_quota_reset": "↻6d16h",
             },
-            fields=[["gpt_quota"]],
+            fields=[["gpt_quota", "quota_reset"]],
         )
         title = self._panel(result)["header"]["title"]
         assert title["tag"] == "markdown"
         assert title["content"] == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
         assert quota in title["content"]
+        assert "↻6d16h" not in title["content"]
+        assert self._content(result) == "Quota Reset ↻6d16h"
 
     def test_context_is_summary_fallback_without_quota(self) -> None:
         result = _build_footer_elements(
@@ -509,12 +515,12 @@ class TestBuildFooterElements:
     def test_status_error(self) -> None:
         result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
         assert self._panel(result)["header"]["title"]["content"] == "❌ Error"
-        assert self._content(result) == "<font color='red'>Tokens ↑ 1 ↓ 0</font>"
+        assert self._content(result) == "<font color='red'>Tokens ↑ 1</font>"
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
         assert self._panel(result)["header"]["title"]["content"] == "🛑 Stopped"
-        assert self._content(result) == "Tokens ↑ 0 ↓ 1"
+        assert self._content(result) == "Tokens ↓ 1"
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
@@ -539,7 +545,83 @@ class TestBuildFooterElements:
             {"input_tokens": 1000, "output_tokens": 500},
             fields=[["tokens"]],
         )
-        assert self._content(result) == "Tokens ↑ 1.0K ↓ 500"
+        assert self._content(result) == "Tokens ↑ 1.0K · ↓ 500"
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            ({"input_tokens": 1200}, "Tokens ↑ 1.2K"),
+            ({"output_tokens": 800}, "Tokens ↓ 800"),
+        ],
+    )
+    def test_tokens_omit_missing_direction(self, data: dict, expected: str) -> None:
+        result = _build_footer_elements(data, fields=[["tokens"]])
+        assert self._content(result) == expected
+
+    def test_tokens_with_no_usage_are_hidden(self) -> None:
+        result = _build_footer_elements({}, fields=[["tokens"]])
+        assert self._panel(result)["elements"] == []
+
+    def test_cache_hit_uses_current_prompt_denominator(self) -> None:
+        result = _build_footer_elements(
+            {
+                "input_tokens": 70_500,
+                "cache_prompt_tokens": 70_500,
+                "cache_read_tokens": 52_300,
+            },
+            fields=[["cache"]],
+        )
+        assert self._content(result) == "Cache Hit 52.3K / 70.5K · 74%"
+        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == (
+            "缓存 命中 52.3K / 70.5K · 74%"
+        )
+
+    @pytest.mark.parametrize(
+        "data",
+        [{}, {"cache_read_tokens": 0, "cache_write_tokens": 0}],
+    )
+    def test_cache_is_hidden_without_positive_usage(self, data: dict) -> None:
+        result = _build_footer_elements(data, fields=[["cache"]])
+        assert self._panel(result)["elements"] == []
+
+    def test_cache_does_not_divide_by_zero(self) -> None:
+        result = _build_footer_elements(
+            {"cache_read_tokens": 1000, "cache_prompt_tokens": 0},
+            fields=[["cache"]],
+        )
+        assert self._content(result) == "Cache Read 1.0K"
+
+    def test_reasoning_tokens_are_optional(self) -> None:
+        shown = _build_footer_elements(
+            {"reasoning_tokens": 1600},
+            fields=[["reasoning"]],
+        )
+        hidden = _build_footer_elements({}, fields=[["reasoning"]])
+        assert self._content(shown) == "Reasoning 1.6K"
+        assert self._panel(hidden)["elements"] == []
+
+    def test_detail_fields_are_vertical_and_share_footer_style(self) -> None:
+        result = _build_footer_elements(
+            {
+                "input_tokens": 1000,
+                "context_used": 500,
+                "context_max": 2000,
+                "balance": "¥4.97",
+            },
+            fields=[["tokens", "context", "balance"]],
+            text_size="normal_v2",
+        )
+        panel = self._panel(result)
+        detail = panel["elements"][0]
+        assert detail["content"].splitlines() == [
+            "Tokens ↑ 1.0K",
+            "Balance ¥4.97",
+        ]
+        assert " · Context" not in detail["content"]
+        assert panel["header"]["title"]["text_size"] == "normal_v2"
+        assert detail["text_size"] == "normal_v2"
+        assert panel["header"]["title"]["text_color"] == "grey"
+        assert detail["text_color"] == "grey"
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -569,35 +651,51 @@ class TestBuildFooterElements:
             {
                 "duration": 122,
                 "model": "gpt-5.6-luna",
-                "gpt_quota": "5h 96%",
+                "gpt_quota_remaining": "<font color='green'>96%</font>",
                 "input_tokens": 12400,
                 "output_tokens": 2100,
             },
             fields=[["tokens"]],
         )
         panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == "✅ 2m 2s · gpt-5.6-luna · 5h 96%"
-        assert self._content(result) == "Tokens ↑ 12.4K ↓ 2.1K"
+        assert panel["header"]["title"]["content"] == (
+            "✅ 2m 2s · gpt-5.6-luna · <font color='green'>96%</font>"
+        )
+        assert self._content(result) == "Tokens ↑ 12.4K · ↓ 2.1K"
 
     def test_default_details_keep_only_extra_metadata(self) -> None:
         result = _build_footer_elements(
             {
                 "duration": 4.4,
                 "model": "gpt-5.6-luna",
-                "gpt_quota": "5h 95% ↻6d15h",
+                "gpt_quota_remaining": "<font color='green'>95%</font>",
+                "gpt_quota_reset": "↻6d15h",
                 "input_tokens": 12400,
                 "output_tokens": 1800,
                 "context_used": 70500,
                 "context_max": 272000,
+                "cache_read_tokens": 10200,
+                "cache_write_tokens": 1100,
+                "cache_prompt_tokens": 12400,
+                "reasoning_tokens": 3600,
                 "balance": "¥4.97",
             }
         )
         content = self._content(result)
-        assert content == "Tokens ↑ 12.4K ↓ 1.8K · Context 70.5K/272.0K (25%) · Balance ¥4.97"
+        assert content.splitlines() == [
+            "Tokens ↑ 12.4K · ↓ 1.8K",
+            "Context 70.5K / 272.0K · 25%",
+            "Quota Reset ↻6d15h",
+            "Cache Hit 10.2K / 12.4K · 82% · Write 1.1K",
+            "Reasoning 3.6K",
+            "Balance ¥4.97",
+        ]
         assert "Status" not in content
         assert "Elapsed" not in content
         assert "Model" not in content
         assert "GPT Quota" not in content
+        assert self._panel(result)["elements"][0]["text_color"] == "grey"
+        assert self._panel(result)["elements"][0]["text_size"] == "notation"
 
     def test_no_matching_fields(self) -> None:
         result = _build_footer_elements({}, fields=[["tokens"]])

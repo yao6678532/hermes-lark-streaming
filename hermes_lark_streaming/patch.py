@@ -302,6 +302,22 @@ def on_message_started(
     )
 
 
+@_safe_hook()
+def on_turn_usage(
+    *,
+    ctrl: Any,
+    message_id: str,
+    usage: dict[str, Any] | None = None,
+    api_calls: object = 0,
+) -> None:
+    """Forward Hermes' canonical current-turn usage to the active card."""
+    ctrl.on_turn_usage(
+        message_id=message_id,
+        usage=usage,
+        api_calls=api_calls,
+    )
+
+
 @_safe_hook(default_return=False)
 async def on_message_completed_wait(
     *,
@@ -347,10 +363,6 @@ async def on_queued_followup_boundary(*, ctrl: Any, message_id: str, result: dic
             is_error=bool(result.get("failed")),
             duration=0.0,
             model=result.get("model", ""),
-            tokens={
-                "input_tokens": result.get("input_tokens", 0),
-                "output_tokens": result.get("output_tokens", 0),
-            },
             context={
                 "used_tokens": result.get("last_prompt_tokens", 0),
                 "max_tokens": result.get("context_length", 0),

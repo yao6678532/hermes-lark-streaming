@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import nullcontext
 from contextvars import ContextVar
+from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -105,7 +106,95 @@ def test_enabled_retries_unsuccessful_unscoped_fallback() -> None:
 
 def test_gpt_quota_lookup_failure_is_fail_open() -> None:
     with patch.dict(sys.modules, {"agent.credential_pool": None}):
-        assert controller_module._fetch_gpt_quota_footer("gpt-5-codex") == ""
+        assert controller_module._fetch_gpt_quota_footer("gpt-5-codex") == {}
+
+
+def test_gpt_quota_source_separates_remaining_and_reset() -> None:
+    credential_pool = ModuleType("agent.credential_pool")
+    credential_pool.load_pool = MagicMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            select=lambda: SimpleNamespace(
+                access_token="token",
+                base_url="https://chatgpt.com/backend-api/codex",
+                extra={"account_id": "account"},
+            )
+        )
+    )
+    response = MagicMock()
+    response.json.return_value = {
+        "rate_limit": {
+            "primary_window": {
+                "used_percent": 5,
+                "reset_at": datetime.now(UTC) + timedelta(days=6, hours=15, minutes=1),
+            }
+        }
+    }
+
+    with patch.dict(sys.modules, {"agent.credential_pool": credential_pool}), patch(
+        "httpx.get", return_value=response
+    ):
+        quota = controller_module._fetch_gpt_quota_footer("gpt-5.6-luna")
+
+    assert quota == {
+        "remaining": "<font color='green'>95%</font>",
+        "reset": "↻6d15h",
+    }
+    response.raise_for_status.assert_called_once_with()
+
+
+def test_current_turn_usage_maps_canonical_metadata_without_session_totals() -> None:
+    data = controller_module._turn_usage_footer_data(
+        {
+            "prompt_tokens": 70_500,
+            "input_tokens": 18_200,
+            "output_tokens": 2_100,
+            "cache_read_tokens": 52_300,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 1_600,
+            "session_input_tokens": 999_999,
+        },
+        api_calls=3,
+    )
+
+    assert data == {
+        "input_tokens": 70_500,
+        "cache_prompt_tokens": 70_500,
+        "output_tokens": 2_100,
+        "cache_read_tokens": 52_300,
+        "reasoning_tokens": 1_600,
+        "api_calls": 3,
+    }
+    assert 999_999 not in data.values()
+
+
+def test_on_turn_usage_stores_only_positive_current_turn_metadata() -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        ctrl = StreamCardController()
+        ctrl._cfg = MagicMock()
+        ctrl._cfg.enabled = True
+        ctrl._cfg.feishu_app_id = "app"
+        ctrl._cfg.env_app_id = ""
+        session = CardSession("usage-message", "chat", loop)
+        ctrl._sessions[session.message_id] = session
+
+        ctrl.on_turn_usage(
+            message_id=session.message_id,
+            usage={
+                "prompt_tokens": 1_200,
+                "output_tokens": 0,
+                "cache_read_tokens": 200,
+                "reasoning_tokens": None,
+            },
+        )
+
+        assert session.footer == {
+            "input_tokens": 1_200,
+            "cache_prompt_tokens": 1_200,
+            "cache_read_tokens": 200,
+        }
+    finally:
+        loop.close()
 
 
 def test_reasoning_hook_forwards_api_mode() -> None:
@@ -630,6 +719,52 @@ class TestAwaitedCompletion:
 
         assert session.state == SessionState.FAILED
 
+    @pytest.mark.asyncio
+    async def test_completion_merges_turn_usage_with_structured_quota(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_usage_complete", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_usage_complete"
+        session.card_msg_id = "card_msg_usage_complete"
+        session.footer = {
+            "input_tokens": 12_400,
+            "output_tokens": 1_800,
+            "cache_read_tokens": 10_200,
+            "reasoning_tokens": 3_600,
+        }
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(
+            ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True
+        ), patch(
+            "hermes_lark_streaming.controller._fetch_gpt_quota_footer",
+            return_value={
+                "remaining": "<font color='green'>95%</font>",
+                "reset": "↻6d15h",
+            },
+        ):
+            assert await ctrl.on_completed_wait(
+                message_id=session.message_id,
+                answer="answer",
+                duration=4.4,
+                model="gpt-5.6-luna",
+                context={"used_tokens": 70_500, "max_tokens": 272_000},
+            ) is True
+
+        assert session.footer == {
+            "duration": 4.4,
+            "model": "gpt-5.6-luna",
+            "input_tokens": 12_400,
+            "output_tokens": 1_800,
+            "cache_read_tokens": 10_200,
+            "reasoning_tokens": 3_600,
+            "context_used": 70_500,
+            "context_max": 272_000,
+            "balance": "",
+            "gpt_quota_remaining": "<font color='green'>95%</font>",
+            "gpt_quota_reset": "↻6d15h",
+        }
+
 
 @pytest.mark.asyncio
 async def test_create_card_replies_to_anchor_id() -> None:
@@ -982,7 +1117,7 @@ class TestDoCreateCard:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K/200.0K (25%)"
+        assert details_text == "Context 50.0K / 200.0K · 25%"
 
     @pytest.mark.asyncio
     async def test_applies_width_mode_to_streaming_card(self) -> None:
@@ -2191,7 +2326,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K/200.0K (25%)"
+        assert details_text == "Context 50.0K / 200.0K · 25%"
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
@@ -2302,7 +2437,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K/200.0K (25%)"
+        assert details_text == "Context 50.0K / 200.0K · 25%"
 
     @pytest.mark.asyncio
     async def test_chat_completions_reasoning_deltas_append_in_merged_presentation(self) -> None:

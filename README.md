@@ -109,7 +109,7 @@ streaming:
     enabled: true
     text_size: notation
     fields:
-      - [tokens, context, balance]
+      - [tokens, context, quota_reset, cache, reasoning, balance]
     show_label: false
   panel_expanded: false
 display:
@@ -118,7 +118,7 @@ display:
       show_tool_use: true
 ```
 
-`streaming.footer.enabled` 继续控制终态 compact footer summary 的显示，`streaming.footer.fields` 控制点击右侧箭头后展开的字段。折叠摘要接近旧 footer，例如 `✅ 2m 2s · gpt-5.6-luna · 5h 96%`；详情默认折叠，不受 `panel_expanded` 控制，也不会在 streaming 阶段动态更新。Reasoning Panel 与 Tool Panel 的行为保持不变。详细配置见 [CONFIGURATION.md](CONFIGURATION.md)。
+`streaming.footer.enabled` 继续控制终态 compact footer summary 的显示，`streaming.footer.fields` 控制点击右侧箭头后纵向展示的详情字段。折叠摘要只保留高价值信息，例如 `✅ 2m 2s · gpt-5.6-luna · 96%`；GPT quota 的剩余额度在 summary，刷新时间在 detail。Tokens、Cache、Reasoning 等 usage 来自 Hermes 当前 turn 的 canonical provider metadata，provider 未返回的数据会自动跳过，不会使用 session 累计值冒充。详情默认折叠，不受 `panel_expanded` 控制，也不会在 streaming 阶段动态更新。Reasoning Panel 与 Tool Panel 的行为保持不变。详细配置见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ---
 

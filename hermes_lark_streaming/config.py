@@ -256,7 +256,7 @@ class Config:
 
     @staticmethod
     def _default_footer_fields() -> list[list[str]]:
-        return [["tokens", "context", "balance"]]
+        return [["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]]
 
     @property
     def env_app_id(self) -> str:

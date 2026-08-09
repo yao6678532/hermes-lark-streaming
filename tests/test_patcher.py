@@ -38,6 +38,7 @@ from hermes_lark_streaming.patcher import (
     _stop_hook,
     _thinking_hook,
     _tool_hook,
+    _usage_hook,
 )
 from hermes_lark_streaming.streaming.session import CardSession
 
@@ -195,6 +196,17 @@ def _build_complete_hook_runner():
     )
     exec(compile(source, "<complete-hook-test>", "exec"), namespace)
     return namespace["complete"]
+
+
+def _build_usage_hook_runner():
+    namespace: dict = {}
+    source = (
+        "def collect(ctx, _agent, result):\n"
+        f"{_usage_hook('    ')}"
+        "    return 'done'\n"
+    )
+    exec(compile(source, "<usage-hook-test>", "exec"), namespace)
+    return namespace["collect"]
 
 
 def _build_followup_complete_hook_runner():
@@ -749,6 +761,7 @@ async def test_generated_complete_hook_keeps_footer_in_card_without_native_resen
         )
 
     assert on_completed.await_args.kwargs["answer"] == "answer\n\nruntime footer"
+    assert "tokens" not in on_completed.await_args.kwargs
     assert result["already_sent"] is True
     assert response == "answer\n\nruntime footer"
     assert footer == ""
@@ -775,6 +788,33 @@ async def test_generated_complete_hook_suppresses_native_error_after_error_card(
     assert on_completed.await_args.kwargs["is_error"] is True
     assert result["failed"] is True
     assert response == ""
+
+
+def test_generated_usage_hook_forwards_only_current_turn_canonical_usage() -> None:
+    collect = _build_usage_hook_runner()
+    usage = {
+        "prompt_tokens": 12_400,
+        "output_tokens": 1_800,
+        "cache_read_tokens": 10_200,
+        "reasoning_tokens": 3_600,
+    }
+    ctx = SimpleNamespace(
+        event_message_id="message",
+        source=SimpleNamespace(platform=SimpleNamespace(value="feishu")),
+    )
+    agent = SimpleNamespace(
+        _last_turn_usage=usage,
+        session_input_tokens=999_999,
+    )
+
+    with patch("hermes_lark_streaming.patch.on_turn_usage") as on_turn_usage:
+        assert collect(ctx, agent, {"api_calls": 2}) == "done"
+
+    on_turn_usage.assert_called_once_with(
+        message_id="message",
+        usage=usage,
+        api_calls=2,
+    )
 
 
 @pytest.mark.asyncio
@@ -852,6 +892,9 @@ class TestApplyRemove:
         assert "on_message_completed_wait(" in content
         assert "on_message_needs_text_fallback" in content
         assert "_lark_card_sent = await on_message_completed_wait(" in content
+        assert "# HERMES_LARK_USAGE_BEGIN" in content
+        assert "usage=getattr(_agent, '_last_turn_usage', None)" in content
+        assert "on_turn_usage(" in content
         assert "agent_result.pop('already_sent', None)" in content
         assert "_lark_completion_id = agent_result.get('_hermes_lark_completion_id') or event.message_id" in content
         assert "message_id=_lark_completion_id" in content

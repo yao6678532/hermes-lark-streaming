@@ -45,7 +45,7 @@ streaming:
     enabled: true               # 默认 true
     text_size: notation         # 默认 notation
     fields:
-      - [tokens, context, balance]
+      - [tokens, context, quota_reset, cache, reasoning, balance]
     show_label: false           # 默认 false
 
 display:
@@ -113,7 +113,7 @@ lark:
 | answer body 文字大小 | `streaming.body.text_size` | CardKit text size 字符串 | `normal_v2` | 重启 gateway | 传给 answer markdown 的 `text_size`；插件只在缺失或空值时回退到 `normal_v2`。 |
 | 完成态 Run Details | `streaming.footer.enabled` | bool | `true` | 重启 gateway | 控制完成卡片中默认折叠的 Run Details；保持 `footer` 配置名兼容。 |
 | Run Details 文字大小 | `streaming.footer.text_size` | CardKit text size 字符串 | `notation` | 重启 gateway | 传给 Run Details 标题与展开内容；插件只在缺失或空值时回退到 `notation`。 |
-| Run Details 字段布局 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[tokens, context, balance]]` | 重启 gateway | 每个子数组是一行，控制展开内容。支持字段见下表；空值、缺失或非 list 使用默认布局。 |
+| Run Details 字段选择 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[tokens, context, quota_reset, cache, reasoning, balance]]` | 重启 gateway | 控制展开内容的候选字段；有值且未出现在 summary 的字段按配置顺序纵向逐行显示。空值、缺失或非 list 使用默认值。 |
 | Run Details 标签兼容项 | `streaming.footer.show_label` | bool | `false` | 重启 gateway | 保留旧配置项；Run Details 展开内容始终使用清晰的字段标签。 |
 
 ### `footer.fields` 支持的字段
@@ -125,12 +125,16 @@ lark:
 | `status` | 完成、错误或中止状态。 |
 | `elapsed` | 本次运行时长。 |
 | `model` | 使用的模型名。 |
-| `tokens` | 输入 / 输出 token 数。 |
+| `tokens` | Hermes 当前 turn canonical usage 的 prompt / output token 数；不读取 session 累计值。 |
 | `context` | 已用 / 最大 context window 及百分比。 |
 | `balance` | Hermes runtime 提供的余额字符串（若有）。 |
-| `gpt_quota` | Hermes / credential pool 提供的 GPT/Codex quota 字符串（若有）。 |
+| `gpt_quota` | GPT/Codex 剩余额度；固定进入 summary，因此不会在 detail 重复。保留名称兼容。 |
+| `quota_reset` | GPT/Codex quota 刷新倒计时；由 credential-pool quota 数据源与剩余额度分开提供。 |
+| `cache` | 当前 turn canonical usage 的 cache read/write；有 read 与 prompt 总量时显示命中率。DeepSeek 原生 `prompt_cache_hit_tokens` 会由 Hermes 规范化为 cache read。 |
+| `reasoning` | 当前 turn canonical usage 的 reasoning tokens。 |
+| `api_calls` | Hermes 报告的本次 turn API / agent round 数。 |
 
-未知字段不会渲染。GPT/Codex quota 是运行时数据展示，不属于本次配置改造；它也不代表新增了 quota 配置项。
+未知字段不会渲染。空值、0 值和 provider 未返回的 usage 会自动跳过。当前没有可靠的 per-turn cost 数据源，因此不支持 `cost`；并非所有 provider 都提供 cache 或 reasoning usage。
 
 ## 默认值与非法值 fallback
 
@@ -144,7 +148,7 @@ lark:
 - `width_mode` 缺失、为空或非法时为 `default`。
 - `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled`、`show_tool_use` 和 `show_tool_detail` 缺失时均为 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
 - `body.text_size` 缺失或空值时为 `normal_v2`；`footer.text_size` 缺失或空值时为 `notation`。这两个 text size 字符串不是插件枚举，非法的 CardKit 值不会由插件额外改写。
-- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[tokens, context, balance]]`；一维字段 list 会自动包装为一行。详情 presentation 会自动过滤已出现在 compact summary 中的字段。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
+- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[tokens, context, quota_reset, cache, reasoning, balance]]`；一维字段 list 会自动包装。详情 presentation 会自动过滤已出现在 compact summary 中的字段，并将每个逻辑字段纵向独立显示。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
 - `card_ttl_sec` 缺失时为 `600`。代码会调用 `int()`，因此不可转换的非数字值不是 fallback，而会在读取时失败。
 
 ## 热加载 vs Gateway restart
@@ -172,7 +176,9 @@ lark:
 
 Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。Run Details 只在最终 physical card 完成时显示，split card 的中间 seal card 不重复显示。
 
-终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota}`，没有 quota 时以 compact context 作为 fallback；缺失值不会产生多余分隔符。展开后沿用 `footer.fields` 与现有 footer metadata；它不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
+终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota_remaining}`，例如 `✅ 4.4s · gpt-5.6-luna · 95%`；quota reset 只进入 detail。没有 quota 时以 compact context 作为 fallback，例如 `✅ 1.4s · deepseek-v4-flash · 70.5K/1M`。缺失值不会产生多余分隔符。
+
+展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 来自 Hermes `_last_turn_usage` 的当前-turn canonical provider metadata；DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。该信号是当前 turn 最后一个可靠 provider response 的 usage，不会回退到缓存 Agent 的 `session_*` 累计计数。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 
