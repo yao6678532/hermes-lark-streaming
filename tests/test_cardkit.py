@@ -381,21 +381,21 @@ class TestBuildToolPanel:
         assert "1.2s" in str(failed["elements"])
 
     @pytest.mark.parametrize(
-        ("status", "elapsed_ms", "color", "label"),
+        ("status", "elapsed_ms", "icon_color", "text_color", "label"),
         [
-            ("running", 0, "blue", "Running"),
-            ("success", 1200, "grey", "1.2s"),
-            ("success", 0, "grey", "Done"),
-            ("error", 1200, "red", "Failed · 1.2s"),
+            ("running", 0, "grey", "grey", "Running"),
+            ("success", 1200, "grey", "green", "1.2s"),
+            ("success", 0, "grey", "green", "Done"),
+            ("error", 1200, "grey", "red", "Failed · 1.2s"),
         ],
     )
     def test_step_status_colors_icon_and_status_text(
-        self, status: str, elapsed_ms: int, color: str, label: str
+        self, status: str, elapsed_ms: int, icon_color: str, text_color: str, label: str
     ) -> None:
         title = _build_tool_step_title({**_STEP_RUNNING, "status": status, "elapsed_ms": elapsed_ms})
 
-        assert title["icon"]["color"] == color
-        assert f"<font color='{color}'>{label}</font>" in title["text"]["content"]
+        assert title["icon"]["color"] == icon_color
+        assert f"<font color='{text_color}'>{label}</font>" in title["text"]["content"]
 
     def test_detail_visibility_and_compact_mode_keep_title_and_output(self) -> None:
         step = {

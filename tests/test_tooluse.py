@@ -258,12 +258,27 @@ class TestFormatDurationLabel:
 
 
 class TestResolveToolDescriptor:
-    @pytest.mark.parametrize("name", ["exec", "bash", "command", "run", "terminal"])
-    def test_command_tools_use_platform_icon_and_command_sanitizer(self, name: str) -> None:
+    @pytest.mark.parametrize(
+        ("name", "icon", "sanitizer"),
+        [
+            ("skill", "setting-inter_outlined", None),
+            ("exec", "platform_outlined", "command"),
+            ("bash", "platform_outlined", "command"),
+            ("command", "platform_outlined", "command"),
+            ("run", "platform_outlined", "command"),
+            ("terminal", "platform_outlined", "command"),
+            ("browser", "internet_outlined", None),
+            ("playwright", "internet_outlined", None),
+            ("navigate", "internet_outlined", None),
+        ],
+    )
+    def test_visual_tool_mapping(self, name: str, icon: str, sanitizer: str | None) -> None:
         desc = _resolve_tool_descriptor(name)
         assert desc is not None
-        assert desc["icon"] == "platform_outlined"
-        assert desc["sanitizer"] == "command"
+        assert desc["icon"] == icon
+        assert desc.get("sanitizer") == sanitizer
+        if name in {"browser", "playwright", "navigate"}:
+            assert desc["no_result"] is True
 
     def test_known_tool(self) -> None:
         desc = _resolve_tool_descriptor("read")

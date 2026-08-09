@@ -186,7 +186,6 @@ def _build_tool_step_title(step: ToolDisplayStep) -> dict:
     elapsed_ms = step.get("elapsed_ms", 0) or 0
     if status == "success":
         label = _format_elapsed(elapsed_ms) if elapsed_ms > 0 else _T["done_label"][0]
-        content = f"**{_escape_md(title)}** · {label}"
     else:
         label = status_info["label"]
         if status == "error" and elapsed_ms > 0:
@@ -197,7 +196,7 @@ def _build_tool_step_title(step: ToolDisplayStep) -> dict:
         "icon": {
             "tag": "standard_icon",
             "token": step.get("icon", "tool_02"),
-            "color": status_info["color"],
+            "color": "grey",
         },
         "text": {
             "tag": "lark_md",
@@ -266,8 +265,8 @@ def _build_tool_step_output(step: ToolDisplayStep) -> dict | None:
 
 def _tool_status_info(status: str) -> dict[str, str]:
     return {
-        "running": {"label": _T["running"][0], "color": "blue"},
-        "success": {"label": _T["done_label"][0], "color": "grey"},
+        "running": {"label": _T["running"][0], "color": "grey"},
+        "success": {"label": _T["done_label"][0], "color": "green"},
         "error": {"label": _T["failed"][0], "color": "red"},
     }.get(status, {"label": status.capitalize(), "color": "grey"})
 
