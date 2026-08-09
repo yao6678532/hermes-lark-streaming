@@ -427,17 +427,35 @@ class TestBuildFooterElements:
         assert panel["tag"] == "collapsible_panel"
         return panel
 
+    @staticmethod
+    def _unwrap_grey(value: str) -> str:
+        prefix = "<font color='grey'>"
+        suffix = "</font>"
+        if value.startswith(prefix) and value.endswith(suffix):
+            return value[len(prefix) : -len(suffix)]
+        return value
+
+    @classmethod
+    def _title(cls, result: list[dict]) -> dict:
+        title = cls._panel(result)["header"]["title"].copy()
+        title["content"] = cls._unwrap_grey(title["content"])
+        title["i18n_content"] = {
+            locale: cls._unwrap_grey(content)
+            for locale, content in title["i18n_content"].items()
+        }
+        return title
+
     @classmethod
     def _content(cls, result: list[dict]) -> str:
         elements = cls._panel(result)["elements"]
-        return elements[0]["content"] if elements else ""
+        return cls._unwrap_grey(elements[0]["content"]) if elements else ""
 
     def test_empty_data_renders_default_status(self) -> None:
         # 默认字段只包含额外 metadata；状态由 compact summary 展示。
         result = _build_footer_elements({})
         assert len(result) >= 2
         assert self._panel(result)["expanded"] is False
-        assert self._panel(result)["header"]["title"]["content"] == "✅"
+        assert self._title(result)["content"] == "✅"
         assert self._panel(result)["elements"] == []
 
     def test_summary_uses_elapsed_and_model(self) -> None:
@@ -445,11 +463,11 @@ class TestBuildFooterElements:
             {"duration": 26.5, "model": "gpt-5"},
             fields=[["status", "elapsed", "model"]],
         )
-        panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == "✅ 26.5s · gpt-5"
-        assert panel["header"]["title"]["i18n_content"]["zh_cn"] == "✅ 26.5s · gpt-5"
-        assert "Run Details" not in panel["header"]["title"]["content"]
-        assert "运行详情" not in panel["header"]["title"]["i18n_content"]["zh_cn"]
+        title = self._title(result)
+        assert title["content"] == "✅ 26.5s · gpt-5"
+        assert title["i18n_content"]["zh_cn"] == "✅ 26.5s · gpt-5"
+        assert "Run Details" not in title["content"]
+        assert "运行详情" not in title["i18n_content"]["zh_cn"]
 
     @pytest.mark.parametrize(
         ("data", "expected"),
@@ -461,7 +479,7 @@ class TestBuildFooterElements:
     )
     def test_summary_omits_missing_core_parts(self, data: dict, expected: str) -> None:
         result = _build_footer_elements(data, fields=[["status"]])
-        assert self._panel(result)["header"]["title"]["content"] == expected
+        assert self._title(result)["content"] == expected
 
     def test_gpt_quota_keeps_context_available_in_detail(self) -> None:
         remaining = "<font color='green'>80%</font>"
@@ -475,9 +493,9 @@ class TestBuildFooterElements:
             fields=[["status", "context", "gpt_quota", "quota_reset"]],
         )
         content = self._content(result)
-        panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == f"✅ {remaining}"
-        assert "↻6d15h" not in panel["header"]["title"]["content"]
+        title = self._title(result)
+        assert title["content"] == f"✅ {remaining}"
+        assert "↻6d15h" not in title["content"]
         assert content == "Context 50.0K / 200.0K · 25%\nQuota Reset ↻6d15h"
 
     def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
@@ -493,7 +511,7 @@ class TestBuildFooterElements:
         )
         title = self._panel(result)["header"]["title"]
         assert title["tag"] == "markdown"
-        assert title["content"] == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
+        assert self._unwrap_grey(title["content"]) == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
         assert quota in title["content"]
         assert "↻6d16h" not in title["content"]
         assert self._content(result) == "Quota Reset ↻6d16h"
@@ -508,28 +526,27 @@ class TestBuildFooterElements:
             },
             fields=[["status", "elapsed", "model"]],
         )
-        panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == "✅ 2m 2s · deepseek-v3 · 50K/128K"
+        assert self._title(result)["content"] == "✅ 2m 2s · deepseek-v3 · 50K/128K"
         assert self._panel(result)["elements"] == []
 
     def test_status_error(self) -> None:
         result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
-        assert self._panel(result)["header"]["title"]["content"] == "❌ Error"
+        assert self._title(result)["content"] == "❌ Error"
         assert self._content(result) == "<font color='red'>Tokens ↑ 1</font>"
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
-        assert self._panel(result)["header"]["title"]["content"] == "🛑 Stopped"
+        assert self._title(result)["content"] == "🛑 Stopped"
         assert self._content(result) == "Tokens ↓ 1"
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
-        assert self._panel(result)["header"]["title"]["content"] == "✅ 12.5s"
+        assert self._title(result)["content"] == "✅ 12.5s"
         assert self._content(result) == ""
 
     def test_model_displayed(self) -> None:
         result = _build_footer_elements({"model": "claude-3"}, fields=[["model"]])
-        assert self._panel(result)["header"]["title"]["content"] == "✅ claude-3"
+        assert self._title(result)["content"] == "✅ claude-3"
         assert self._content(result) == ""
 
     def test_context_displayed(self) -> None:
@@ -537,7 +554,7 @@ class TestBuildFooterElements:
             {"context_used": 50000, "context_max": 200000},
             fields=[["context"]],
         )
-        assert self._panel(result)["header"]["title"]["content"] == "✅ 50K/200K"
+        assert self._title(result)["content"] == "✅ 50K/200K"
         assert self._content(result) == ""
 
     def test_tokens_displayed(self) -> None:
@@ -572,7 +589,7 @@ class TestBuildFooterElements:
             fields=[["cache"]],
         )
         assert self._content(result) == "Cache Hit 52.3K / 70.5K · 74%"
-        assert self._panel(result)["elements"][0]["i18n_content"]["zh_cn"] == (
+        assert self._unwrap_grey(self._panel(result)["elements"][0]["i18n_content"]["zh_cn"]) == (
             "缓存 命中 52.3K / 70.5K · 74%"
         )
 
@@ -613,15 +630,17 @@ class TestBuildFooterElements:
         )
         panel = self._panel(result)
         detail = panel["elements"][0]
-        assert detail["content"].splitlines() == [
+        assert self._content(result).splitlines() == [
             "Tokens ↑ 1.0K",
             "Balance ¥4.97",
         ]
         assert " · Context" not in detail["content"]
         assert panel["header"]["title"]["text_size"] == "normal_v2"
         assert detail["text_size"] == "normal_v2"
-        assert panel["header"]["title"]["text_color"] == "grey"
-        assert detail["text_color"] == "grey"
+        assert panel["header"]["title"]["content"].startswith("<font color='grey'>")
+        assert detail["content"].startswith("<font color='grey'>")
+        assert "text_color" not in panel["header"]["title"]
+        assert "text_color" not in detail
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -657,8 +676,7 @@ class TestBuildFooterElements:
             },
             fields=[["tokens"]],
         )
-        panel = self._panel(result)
-        assert panel["header"]["title"]["content"] == (
+        assert self._title(result)["content"] == (
             "✅ 2m 2s · gpt-5.6-luna · <font color='green'>96%</font>"
         )
         assert self._content(result) == "Tokens ↑ 12.4K · ↓ 2.1K"
@@ -694,17 +712,17 @@ class TestBuildFooterElements:
         assert "Elapsed" not in content
         assert "Model" not in content
         assert "GPT Quota" not in content
-        assert self._panel(result)["elements"][0]["text_color"] == "grey"
+        assert self._panel(result)["elements"][0]["content"].startswith("<font color='grey'>")
         assert self._panel(result)["elements"][0]["text_size"] == "notation"
 
     def test_no_matching_fields(self) -> None:
         result = _build_footer_elements({}, fields=[["tokens"]])
-        assert self._panel(result)["header"]["title"]["content"] == "✅"
+        assert self._title(result)["content"] == "✅"
         assert self._panel(result)["elements"] == []
 
     def test_empty_fields_preserve_existing_no_matching_semantics(self) -> None:
         result = _build_footer_elements({"model": "gpt"}, fields=[])
-        assert self._panel(result)["header"]["title"]["content"] == "✅ gpt"
+        assert self._title(result)["content"] == "✅ gpt"
         assert self._panel(result)["elements"] == []
 
     def test_run_details_failure_falls_back_to_legacy_footer(self) -> None:

@@ -1117,7 +1117,7 @@ class TestDoCreateCard:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K / 200.0K · 25%"
+        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
 
     @pytest.mark.asyncio
     async def test_applies_width_mode_to_streaming_card(self) -> None:
@@ -2326,7 +2326,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K / 200.0K · 25%"
+        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
@@ -2437,7 +2437,7 @@ class TestMergedReasoning:
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = details["elements"][0]["content"]
-        assert details_text == "Context 50.0K / 200.0K · 25%"
+        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
 
     @pytest.mark.asyncio
     async def test_chat_completions_reasoning_deltas_append_in_merged_presentation(self) -> None:

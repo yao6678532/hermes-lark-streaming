@@ -412,10 +412,14 @@ def _build_run_details_elements(
         detail_elements.append(
             {
                 "tag": "markdown",
-                "content": en_content,
-                "i18n_content": _i18n(en_content, zh_content),
-                "text_color": "grey",
+                "content": _run_details_grey_text(en_content),
+                "i18n_content": _i18n(
+                    _run_details_grey_text(en_content),
+                    _run_details_grey_text(zh_content),
+                ),
+                "text_align": "left",
                 "text_size": text_size,
+                "margin": "0px 0px 0px 0px",
             }
         )
 
@@ -423,14 +427,26 @@ def _build_run_details_elements(
         expanded=False,
         title_el={
             "tag": "markdown",
-            "content": title_en,
-            "i18n_content": _i18n(title_en, title_zh),
-            "text_color": "grey",
+            "content": _run_details_grey_text(title_en),
+            "i18n_content": _i18n(
+                _run_details_grey_text(title_en),
+                _run_details_grey_text(title_zh),
+            ),
             "text_size": text_size,
         },
         elements=detail_elements,
     )
     return [{"tag": "hr"}, panel]
+
+
+def _run_details_grey_text(content: str) -> str:
+    """Apply the grey Run Details style to markdown content.
+
+    CardKit's ``text_color`` property is ignored for markdown elements.  Use
+    the supported markdown font markup instead; nested quota/error colors keep
+    their existing semantic presentation.
+    """
+    return f"<font color='grey'>{content}</font>" if content else content
 
 
 def _build_footer_summary(
