@@ -111,10 +111,10 @@ lark:
 | 卡片存活检测 | `streaming.card_ttl_sec` | int 秒 | `600` | 重启 gateway | 控制卡片 session 的存活检测时长；代码会将值转换为 int。 |
 | 卡片 header | `streaming.header.enabled` | bool | `false` | 重启 gateway | 控制 streaming / completed / error header；状态会自动使用蓝、绿、红主题。 |
 | answer body 文字大小 | `streaming.body.text_size` | CardKit text size 字符串 | `normal_v2` | 重启 gateway | 传给 answer markdown 的 `text_size`；插件只在缺失或空值时回退到 `normal_v2`。 |
-| 完成态 footer | `streaming.footer.enabled` | bool | `true` | 重启 gateway | 控制完成卡片 footer metadata bar。 |
-| footer 文字大小 | `streaming.footer.text_size` | CardKit text size 字符串 | `notation` | 重启 gateway | 传给 footer markdown；插件只在缺失或空值时回退到 `notation`。 |
-| footer 字段布局 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[status, elapsed, context, model]]` | 重启 gateway | 每个子数组是一行。支持字段见下表；空值、缺失或非 list 使用默认布局。 |
-| footer 标签 | `streaming.footer.show_label` | bool | `false` | 重启 gateway | 是否显示 `Elapsed`、`Context` 等标签；status / model 等字段仍按 builder 实际渲染。 |
+| 完成态 Run Details | `streaming.footer.enabled` | bool | `true` | 重启 gateway | 控制完成卡片中默认折叠的 Run Details；保持 `footer` 配置名兼容。 |
+| Run Details 文字大小 | `streaming.footer.text_size` | CardKit text size 字符串 | `notation` | 重启 gateway | 传给 Run Details 标题与展开内容；插件只在缺失或空值时回退到 `notation`。 |
+| Run Details 字段布局 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[status, elapsed, context, model]]` | 重启 gateway | 每个子数组是一行，控制展开内容。支持字段见下表；空值、缺失或非 list 使用默认布局。 |
+| Run Details 标签兼容项 | `streaming.footer.show_label` | bool | `false` | 重启 gateway | 保留旧配置项；Run Details 展开内容始终使用清晰的字段标签。 |
 
 ### `footer.fields` 支持的字段
 
@@ -144,7 +144,7 @@ lark:
 - `width_mode` 缺失、为空或非法时为 `default`。
 - `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled`、`show_tool_use` 和 `show_tool_detail` 缺失时均为 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
 - `body.text_size` 缺失或空值时为 `normal_v2`；`footer.text_size` 缺失或空值时为 `notation`。这两个 text size 字符串不是插件枚举，非法的 CardKit 值不会由插件额外改写。
-- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[status, elapsed, context, model]]`；一维字段 list 会自动包装为一行。`footer.show_label` 在字段缺失时为 `false`，footer 应保持 mapping 结构。
+- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[status, elapsed, context, model]]`；一维字段 list 会自动包装为一行。直接传入空字段 list 时保持既有 builder 语义，不渲染详情。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
 - `card_ttl_sec` 缺失时为 `600`。代码会调用 `int()`，因此不可转换的非数字值不是 fallback，而会在读取时失败。
 
 ## 热加载 vs Gateway restart
@@ -170,7 +170,9 @@ lark:
 - `streaming.body.*`
 - `streaming.footer.*`
 
-Streaming 过程中，统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。
+Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。Run Details 只在最终 physical card 完成时显示，split card 的中间 seal card 不重复显示。
+
+Run Details 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`。其 summary 只显示 `运行详情 · {elapsed} · {model}`（英文为 `Run Details · {elapsed} · {model}`），缺失值不会产生多余分隔符；展开后沿用 `footer.fields` 与现有 footer metadata。它不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

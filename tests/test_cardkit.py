@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
@@ -418,18 +420,43 @@ class TestBuildToolPanel:
 
 
 class TestBuildFooterElements:
+    @staticmethod
+    def _panel(result: list[dict]) -> dict:
+        panel = result[1]
+        assert panel["tag"] == "collapsible_panel"
+        return panel
+
+    @classmethod
+    def _content(cls, result: list[dict]) -> str:
+        return cls._panel(result)["elements"][0]["content"]
+
     def test_empty_data_renders_default_status(self) -> None:
-        # 默认字段包含 "status"，总是会渲染
+        # 默认字段包含 "status"，总是会渲染到折叠详情中
         result = _build_footer_elements({})
         assert len(result) >= 2
-        assert result[1]["content"] == "✅"
+        assert self._panel(result)["expanded"] is False
+        assert "Status ✅" in self._content(result)
 
-    def test_completed_status_uses_compact_spacing(self) -> None:
+    def test_summary_uses_elapsed_and_model(self) -> None:
         result = _build_footer_elements(
             {"duration": 26.5, "model": "gpt-5"},
             fields=[["status", "elapsed", "model"]],
         )
-        assert result[1]["content"] == "✅ 26.5s · gpt-5"
+        panel = self._panel(result)
+        assert panel["header"]["title"]["content"] == "Run Details · 26.5s · gpt-5"
+        assert panel["header"]["title"]["i18n_content"]["zh_cn"] == "运行详情 · 26.5s · gpt-5"
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            ({"model": "gpt-5"}, "Run Details · gpt-5"),
+            ({"duration": 26.5}, "Run Details · 26.5s"),
+            ({}, "Run Details"),
+        ],
+    )
+    def test_summary_omits_missing_core_parts(self, data: dict, expected: str) -> None:
+        result = _build_footer_elements(data, fields=[["status"]])
+        assert self._panel(result)["header"]["title"]["content"] == expected
 
     def test_gpt_quota_hides_context(self) -> None:
         result = _build_footer_elements(
@@ -440,40 +467,39 @@ class TestBuildFooterElements:
             },
             fields=[["status", "context", "gpt_quota"]],
         )
-        assert result[1]["content"] == "✅ 5h 80%"
-        assert "50.0K" not in result[1]["content"]
+        content = self._content(result)
+        assert content == "Status ✅ · GPT Quota 5h 80%"
+        assert "50.0K" not in content
 
     def test_status_error(self) -> None:
         result = _build_footer_elements({}, is_error=True)
-        assert "red" in result[1]["content"]
+        assert "red" in self._content(result)
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({}, is_aborted=True)
-        assert "Stopped" in result[1]["content"]
+        assert "Stopped" in self._content(result)
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
-        assert "12.5s" in result[1]["content"]
+        assert self._content(result) == "Elapsed 12.5s"
 
     def test_model_displayed(self) -> None:
         result = _build_footer_elements({"model": "claude-3"}, fields=[["model"]])
-        assert "claude-3" in result[1]["content"]
+        assert self._content(result) == "Model claude-3"
 
     def test_context_displayed(self) -> None:
         result = _build_footer_elements(
             {"context_used": 50000, "context_max": 200000},
             fields=[["context"]],
         )
-        assert "50.0K" in result[1]["content"]
-        assert "25%" in result[1]["content"]
+        assert self._content(result) == "Context 50.0K/200.0K (25%)"
 
     def test_tokens_displayed(self) -> None:
         result = _build_footer_elements(
             {"input_tokens": 1000, "output_tokens": 500},
             fields=[["tokens"]],
         )
-        assert "↑" in result[1]["content"]
-        assert "↓" in result[1]["content"]
+        assert self._content(result) == "Tokens ↑ 1.0K ↓ 500"
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -481,17 +507,37 @@ class TestBuildFooterElements:
             fields=[["elapsed"]],
             show_label=True,
         )
-        assert "Elapsed" in result[1]["content"]
+        assert self._content(result) == "Elapsed 5.0s"
 
     def test_multi_row_fields(self) -> None:
         result = _build_footer_elements(
             {"duration": 5, "model": "gpt"},
             fields=[["elapsed"], ["model"]],
         )
-        assert "\n" in result[1]["content"]
+        assert "\n" in self._content(result)
+
+    def test_field_subset_only_renders_selected_fields(self) -> None:
+        result = _build_footer_elements(
+            {"duration": 5, "model": "gpt", "balance": "$2"},
+            fields=[["model"]],
+        )
+        content = self._content(result)
+        assert content == "Model gpt"
+        assert "Balance" not in content
 
     def test_no_matching_fields(self) -> None:
         assert _build_footer_elements({}, fields=[["tokens"]]) == []
+
+    def test_empty_fields_preserve_existing_no_matching_semantics(self) -> None:
+        assert _build_footer_elements({"model": "gpt"}, fields=[]) == []
+
+    def test_run_details_failure_falls_back_to_legacy_footer(self) -> None:
+        with patch(
+            "hermes_lark_streaming.cardkit.builder._build_run_details_elements",
+            side_effect=RuntimeError("presentation failure"),
+        ):
+            result = _build_footer_elements({})
+        assert result[1]["content"] == "✅"
 
 
 # --- 推理面板 ---
@@ -595,6 +641,10 @@ class TestBuildStreamingCardV2:
         assert card["schema"] == "2.0"
         assert card["config"]["streaming_mode"] is True
         assert card["body"]["elements"]
+        assert not any(
+            "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+            for element in card["body"]["elements"]
+        )
 
     def test_with_tool_steps(self) -> None:
         card = build_streaming_card_v2(tool_steps=[_STEP_RUNNING], elapsed_ms=100)
@@ -766,8 +816,48 @@ class TestBuildSegmentCompleteCard:
             all_tool_steps=steps,
         )
         tool_elements = [e for e in card["body"]["elements"] if e.get("tag") == "collapsible_panel"]
+        tool_elements = [e for e in tool_elements if e.get("element_id") == TOOL_PANEL_ELEMENT_ID]
         assert len(tool_elements) == 1
         assert len(tool_elements[0].get("elements", [])) == 2  # steps[1:3]
+
+    @pytest.mark.parametrize("panel_expanded", [False, True])
+    def test_run_details_stays_collapsed_independent_of_panel_expanded(
+        self, panel_expanded: bool
+    ) -> None:
+        card = build_complete_card(
+            segments=[_seg("reasoning", "think"), _seg("answer", "reply")],
+            all_tool_steps=[],
+            footer_data={"duration": 26.5, "model": "gpt-5"},
+            panel_expanded=panel_expanded,
+        )
+        details = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+        )
+        reasoning = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        )
+        assert details["expanded"] is False
+        assert reasoning["expanded"] is panel_expanded
+
+    def test_tool_visibility_does_not_hide_run_details(self) -> None:
+        card = build_complete_card(
+            segments=[_seg("tool", tool_offset=0, tool_end_offset=1), _seg("answer", "hello")],
+            all_tool_steps=[_STEP_SUCCESS],
+            show_tool_use=False,
+            footer_data={"duration": 1.0, "model": "gpt-5"},
+        )
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
+        assert any(
+            e.get("tag") == "collapsible_panel"
+            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+            for e in card["body"]["elements"]
+        )
 
     def test_multiple_tool_segments_render_one_unified_panel(self) -> None:
         card = build_complete_card(
@@ -847,7 +937,7 @@ class TestBuildSegmentCompleteCard:
             segments=[_seg("tool", tool_offset=5, tool_end_offset=5)],
             all_tool_steps=[_STEP_SUCCESS],
         )
-        assert not any(e.get("tag") == "collapsible_panel" for e in card["body"]["elements"])
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
 
     def test_show_tool_use_false_hides_tool_panel(self) -> None:
         """show_tool_use=False → TOOL segment rendered as nothing (无工具面板)."""
@@ -858,7 +948,7 @@ class TestBuildSegmentCompleteCard:
             show_tool_use=False,
         )
         # 无 collapsible_panel（工具面板）
-        assert not any(e.get("tag") == "collapsible_panel" for e in card["body"]["elements"])
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
         # 但 answer 依然在
         assert any(e.get("tag") == "markdown" and "hello" in str(e.get("content", ""))
                    for e in card["body"]["elements"])
@@ -1039,6 +1129,13 @@ class TestCompleteCardFooter:
         )
         tags = [e.get("tag") for e in card["body"]["elements"]]
         assert "hr" in tags
+        details = next(
+            e
+            for e in card["body"]["elements"]
+            if e.get("tag") == "collapsible_panel"
+            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+        )
+        assert details["expanded"] is False
 
     def test_footer_disabled(self) -> None:
         card = build_complete_card(
@@ -1048,3 +1145,8 @@ class TestCompleteCardFooter:
         )
         tags = [e.get("tag") for e in card["body"]["elements"]]
         assert "hr" not in tags
+        assert not any(
+            e.get("tag") == "collapsible_panel"
+            and "Run Details" in e.get("header", {}).get("title", {}).get("content", "")
+            for e in card["body"]["elements"]
+        )

@@ -33,6 +33,15 @@ _COMMENTARY_STAGE_2 = "第 2 阶段\uFF1A继续读取 AGENTS.md\uFF0C确认最�
 _FINAL_ANSWER = "第 3 阶段\uFF1A比较与总结\n项目版本……\n最低 Hermes 版本……\n最终结论……"
 
 
+def _run_details_panel(card: dict) -> dict:
+    return next(
+        element
+        for element in card["body"]["elements"]
+        if element.get("tag") == "collapsible_panel"
+        and "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+    )
+
+
 def _enable(ctrl: StreamCardController) -> None:
     ctrl._cfg._raw = {
         "streaming": {"enabled": True},
@@ -969,8 +978,14 @@ class TestDoCreateCard:
             if element.get("tag") == "markdown"
         )
         assert "commentaryfinal answer" in body_text
-        assert "✅ 26.5s · 5h 80% · gpt-5" in body_text
-        assert "50.0K" not in body_text
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = details["elements"][0]["content"]
+        assert "Status ✅" in details_text
+        assert "Elapsed 26.5s" in details_text
+        assert "GPT Quota 5h 80%" in details_text
+        assert "Model gpt-5" in details_text
+        assert "50.0K" not in details_text
 
     @pytest.mark.asyncio
     async def test_applies_width_mode_to_streaming_card(self) -> None:
@@ -1569,7 +1584,6 @@ class TestDoFlush:
         await ctrl._do_flush(session)
 
         assert calls == [
-            ("batch", "card_tool_pending_old"),
             ("create", ""),
             ("reply", ""),
             ("close", "card_tool_pending_old"),
@@ -1577,11 +1591,11 @@ class TestDoFlush:
             ("batch", "card_tool_pending_next"),
         ]
         assert session.card_id == "card_tool_pending_next"
-        assert session.split_index == 2
-        assert len(session.segment_state.segments) == 3
-        assert session.segment_state.segments[1].tool_end_offset == 1
-        assert session.segment_state.segments[2].tool_offset == 1
-        assert session.segment_state.segments[2].created is True
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 2
+        assert session.segment_state.segments[1].tool_offset == 0
+        assert session.segment_state.segments[1].tool_end_offset == 0
+        assert session.segment_state.segments[1].created is True
 
     @pytest.mark.asyncio
     async def test_oversized_new_tool_segment_splits_across_multiple_cards(self) -> None:
@@ -1624,8 +1638,8 @@ class TestDoFlush:
         assert session.card_msg_id == "msg_tool_page_3"
         assert session.split_index == 2
         assert len(session.segment_state.segments) == 3
-        assert [s.tool_offset for s in session.segment_state.segments] == [0, 58, 116]
-        assert [s.tool_end_offset for s in session.segment_state.segments] == [58, 116, 0]
+        assert [s.tool_offset for s in session.segment_state.segments] == [0, 57, 114]
+        assert [s.tool_end_offset for s in session.segment_state.segments] == [57, 114, 0]
         assert all(s.created for s in session.segment_state.segments)
         assert session.segment_state.segments[-1].element_estimate + session.element_count <= 180
 
@@ -2177,8 +2191,14 @@ class TestMergedReasoning:
             "最终结论……",
         ):
             assert text in body_text
-        assert "✅ 26.5s · 5h 80% · gpt-5" in body_text
-        assert "50.0K" not in body_text
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = details["elements"][0]["content"]
+        assert "Status ✅" in details_text
+        assert "Elapsed 26.5s" in details_text
+        assert "GPT Quota 5h 80%" in details_text
+        assert "Model gpt-5" in details_text
+        assert "50.0K" not in details_text
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
@@ -2286,13 +2306,14 @@ class TestMergedReasoning:
         ]
         assert len(final_reasoning_panels) == 1
         assert final_reasoning_panels[0]["elements"][0]["content"] == "Confirming"
-        footer_contents = [
-            element["content"]
-            for element in complete_card["body"]["elements"]
-            if element.get("tag") == "markdown"
-        ]
-        assert "✅ 26.5s · 5h 80% · gpt-5" in footer_contents
-        assert not any("50.0K" in content for content in footer_contents)
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = details["elements"][0]["content"]
+        assert "Status ✅" in details_text
+        assert "Elapsed 26.5s" in details_text
+        assert "GPT Quota 5h 80%" in details_text
+        assert "Model gpt-5" in details_text
+        assert "50.0K" not in details_text
 
     @pytest.mark.asyncio
     async def test_chat_completions_reasoning_deltas_append_in_merged_presentation(self) -> None:

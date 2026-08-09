@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime
 from typing import Any
@@ -22,6 +23,7 @@ REASONING_TEXT_ELEMENT_ID = "reasoning_text"
 TOOL_PANEL_ELEMENT_ID = "tool_panel"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+_logger = logging.getLogger("hermes_lark_streaming.cardkit")
 
 
 def _collapsible_panel(
@@ -328,14 +330,142 @@ def _build_footer_elements(
     show_label: bool = False,
     text_size: str = "notation",
 ) -> list[dict]:
+    """Build the terminal Run Details presentation.
+
+    The public/internal footer naming is intentionally retained for config and
+    session compatibility.  Only its terminal presentation changes here.
+    """
+    try:
+        return _build_run_details_elements(
+            footer_data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            fields=fields,
+            show_label=show_label,
+            text_size=text_size,
+        )
+    except Exception:
+        # A presentation-only failure must not prevent the answer card from
+        # being delivered.  Keep the old compact footer as a fail-open path.
+        _logger.exception("Run Details build failed; falling back to legacy footer")
+        return _build_legacy_footer_elements(
+            footer_data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            fields=fields,
+            show_label=show_label,
+            text_size=text_size,
+        )
+
+
+def _build_run_details_elements(
+    footer_data: dict | None,
+    *,
+    is_error: bool = False,
+    is_aborted: bool = False,
+    fields: list[list[str]] | None = None,
+    show_label: bool = False,
+    text_size: str = "notation",
+) -> list[dict]:
+    """Build the collapsed terminal Run Details panel from footer metadata."""
+    if fields is None:
+        fields = [["status", "elapsed", "context", "model"]]
+
+    data = footer_data or {}
+    summary_parts_en: list[str] = []
+    summary_parts_zh: list[str] = []
+    for field in ("elapsed", "model"):
+        en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
+        if en:
+            summary_parts_en.append(en)
+        if zh:
+            summary_parts_zh.append(zh)
+
+    en_lines: list[str] = []
+    zh_lines: list[str] = []
+    # GPT quota is more useful than context in the footer. Keep context for
+    # non-GPT models (e.g. DeepSeek) where gpt_quota is empty/hidden.
+    hide_context = bool(data.get("gpt_quota"))
+    for row in fields:
+        en_parts: list[str] = []
+        zh_parts: list[str] = []
+        for field in row:
+            if hide_context and field == "context":
+                continue
+            # Run Details always uses explicit field labels.  Keep
+            # footer.show_label accepted for config compatibility, but do not
+            # duplicate labels already supplied by this presentation.
+            en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
+            if en:
+                label_en, label_zh = _footer_field_label(field)
+                en_parts.append(f"{label_en} {en}" if label_en else en)
+                zh_parts.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
+        if en_parts:
+            en_lines.append(" · ".join(en_parts))
+            zh_lines.append(" · ".join(zh_parts))
+
+    if not en_lines:
+        return []
+
+    en_content = "\n".join(en_lines)
+    zh_content = "\n".join(zh_lines)
+    if is_error:
+        en_content = f"<font color='red'>{en_content}</font>"
+        zh_content = f"<font color='red'>{zh_content}</font>"
+
+    title_en = _T["run_details"][0]
+    title_zh = _T["run_details"][1]
+    if summary_parts_en:
+        title_en += " · " + " · ".join(summary_parts_en)
+    if summary_parts_zh:
+        title_zh += " · " + " · ".join(summary_parts_zh)
+
+    panel = _collapsible_panel(
+        expanded=False,
+        title_el={
+            "tag": "plain_text",
+            "content": title_en,
+            "i18n_content": _i18n(title_en, title_zh),
+            "text_color": "grey",
+            "text_size": text_size,
+        },
+        elements=[
+            {
+                "tag": "markdown",
+                "content": en_content,
+                "i18n_content": _i18n(en_content, zh_content),
+                "text_size": text_size,
+            }
+        ],
+    )
+    return [{"tag": "hr"}, panel]
+
+
+def _footer_field_label(name: str) -> tuple[str, str]:
+    """Return the existing/localized label for a supported footer field."""
+    if name == "elapsed":
+        return _T["elapsed"][0].format("").strip(), _T["elapsed"][1].format("").strip()
+    if name == "context":
+        return _T["context"][0].format("").strip(), _T["context"][1].format("").strip()
+    return _T.get(f"{name}_label", ("", ""))
+
+
+def _build_legacy_footer_elements(
+    footer_data: dict | None,
+    *,
+    is_error: bool = False,
+    is_aborted: bool = False,
+    fields: list[list[str]] | None = None,
+    show_label: bool = False,
+    text_size: str = "notation",
+) -> list[dict]:
+    """Fail-open compatibility presentation for unexpected Run Details errors."""
     if fields is None:
         fields = [["status", "elapsed", "context", "model"]]
 
     data = footer_data or {}
     en_lines: list[str] = []
     zh_lines: list[str] = []
-    # GPT quota is more useful than context in the footer. Keep context for
-    # non-GPT models (e.g. DeepSeek) where gpt_quota is empty/hidden.
     hide_context = bool(data.get("gpt_quota"))
     for row in fields:
         en_parts: list[str] = []
@@ -349,8 +479,6 @@ def _build_footer_elements(
                 if zh:
                     zh_parts.append(zh)
         if en_parts:
-            # Keep completed footer compact: "✅ 26.5s · model ..." instead of
-            # "✅ · 26.5s · model ...". Error/stopped statuses keep separators.
             if en_parts[0] == "✅" and len(en_parts) > 1:
                 en_lines.append(en_parts[0] + " " + " · ".join(en_parts[1:]))
             else:
@@ -362,13 +490,11 @@ def _build_footer_elements(
 
     if not en_lines:
         return []
-
     en_content = "\n".join(en_lines)
     zh_content = "\n".join(zh_lines)
     if is_error:
         en_content = f"<font color='red'>{en_content}</font>"
         zh_content = f"<font color='red'>{zh_content}</font>"
-
     return [
         {"tag": "hr"},
         {

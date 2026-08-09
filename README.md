@@ -21,7 +21,7 @@
 - **工具调用** — 实时展示工具调用状态和进度，含标准图标和结果/错误块
 - **CardKit v2.0** — 使用飞书 CardKit 流式 API；卡片创建失败时交回 Hermes Gateway 默认回复
 - **终态卡片** — 完成后展示完整结果，含 token 用量、耗时、上下文信息
-- **卡片样式** — 可配置卡片 header、footer 显示开关及正文字字大小
+- **卡片样式** — 可配置卡片 header、完成态 Run Details 显示开关及正文字字大小
 - **消息保护** — 消息被删除/撤回后自动终止更新，避免无效 API 调用
 - **图片解析** — 自动识别 markdown 图片引用，下载上传后替换为飞书 img_key
 - **中断处理** — 处理 `/stop` 命令和消息打断，展示中断状态卡片并自动开启新会话
@@ -118,7 +118,7 @@ display:
       show_tool_use: true
 ```
 
-详细的默认值、fallback、Profile 作用域、凭据来源、热加载边界以及 `footer.fields` 支持字段见 [CONFIGURATION.md](CONFIGURATION.md)。
+`streaming.footer.enabled` 继续控制终态 Run Details 的显示，`streaming.footer.fields` 控制展开后的字段。Run Details 默认折叠，不受 `panel_expanded` 控制，也不会在 streaming 阶段动态更新；Reasoning Panel 与 Tool Panel 的行为保持不变。详细配置见 [CONFIGURATION.md](CONFIGURATION.md)。
 
 ---
 
