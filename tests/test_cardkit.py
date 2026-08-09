@@ -350,6 +350,7 @@ class TestBuildToolPanel:
     def test_empty_steps(self) -> None:
         panel = _build_tool_panel([])
         assert panel["element_id"] == TOOL_PANEL_ELEMENT_ID
+        assert panel["header"]["title"]["tag"] == "plain_text"
         assert "Tool use" in panel["header"]["title"]["content"]
 
     def test_with_steps(self) -> None:
@@ -475,6 +476,21 @@ class TestBuildFooterElements:
         assert panel["header"]["title"]["content"] == "✅ 5h 80%"
         assert content == "Status ✅ Completed · GPT Quota 5h 80%"
         assert "50.0K" not in content
+
+    def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
+        quota = "<font color='green'>5h 95%</font> ↻6d16h"
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "gpt-5.6-luna",
+                "gpt_quota": quota,
+            },
+            fields=[["gpt_quota"]],
+        )
+        title = self._panel(result)["header"]["title"]
+        assert title["tag"] == "markdown"
+        assert title["content"] == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
+        assert quota in title["content"]
 
     def test_context_is_summary_fallback_without_quota(self) -> None:
         result = _build_footer_elements(

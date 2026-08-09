@@ -416,7 +416,7 @@ def _build_run_details_elements(
     panel = _collapsible_panel(
         expanded=False,
         title_el={
-            "tag": "plain_text",
+            "tag": "markdown",
             "content": title_en,
             "i18n_content": _i18n(title_en, title_zh),
             "text_color": "grey",
