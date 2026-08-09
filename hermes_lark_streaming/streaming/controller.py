@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future as ConcurrentFuture
 from typing import TYPE_CHECKING, Any
 
 from ..cardkit.builder import (
@@ -61,6 +62,13 @@ _logger = logging.getLogger("hermes_lark_streaming")
 _ACTIVITY_REASONING_API_MODES = frozenset({"codex_responses", "codex_app_server"})
 _NATIVE_REASONING_SOURCE = "native_reasoning"
 _INTERIM_COMMENTARY_SOURCE = "interim_commentary"
+_ACTIVITY_CLEAR_GRACE_SEC = 1.5
+_TOOL_ACTIVITY_KINDS = frozenset({
+    ActivityKind.EXECUTING_COMMAND,
+    ActivityKind.SEARCHING,
+    ActivityKind.READING,
+    ActivityKind.USING_TOOL,
+})
 
 
 async def _resolve_answer_images(
@@ -87,7 +95,9 @@ class StreamingController:
     _ensure_init: Callable[..., Coroutine[Any, Any, None]]
     _cleanup: Callable[[str], None]
     _cleanup_session: Callable[[CardSession], None]
+    _fire_and_forget: Callable[..., asyncio.Future[Any] | ConcurrentFuture[Any] | None]
     _flush_deferred_background_reviews: Callable[[CardSession], None]
+    _get_active_session: Callable[[str], CardSession | None]
 
     def _schedule_flush(self, session: CardSession) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
@@ -124,7 +134,75 @@ class StreamingController:
         """Record card-only activity without changing text-mode semantics."""
         if self._cfg.progress_mode != "card":
             return False
+        if activity is not None:
+            self._cancel_activity_clear(session)
         return session.progress.note_activity(activity)
+
+    @staticmethod
+    def _cancel_activity_clear(session: CardSession) -> None:
+        """Cancel a session-owned one-shot clear without assuming test doubles."""
+        cancel = getattr(session, "cancel_activity_clear", None)
+        if callable(cancel):
+            cancel()
+
+    def _schedule_activity_clear(self, session: CardSession) -> None:
+        """Keep a short-lived tool activity visible, then clear it once."""
+        if self._cfg.progress_mode != "card":
+            return
+        expected_activity = session.progress.activity
+        if expected_activity not in _TOOL_ACTIVITY_KINDS:
+            return
+        pending = session.activity_clear_task
+        if pending is not None and not pending.done():
+            return
+        if not session._loop.is_running():
+            _logger.debug("activity clear loop unavailable: msg=%s", session.message_id[:12])
+            if self._note_activity(session, None):
+                self._schedule_flush(session)
+            return
+
+        self._cancel_activity_clear(session)
+        generation = session.activity_clear_generation
+        clear_coro = self._clear_activity_after_grace(session, expected_activity, generation)
+        task = self._fire_and_forget(
+            clear_coro,
+            session._loop,
+        )
+        if task is None:
+            clear_coro.close()
+            _logger.debug("activity clear scheduling failed: msg=%s", session.message_id[:12])
+            if self._note_activity(session, None):
+                self._schedule_flush(session)
+            return
+        session.activity_clear_task = task
+
+    async def _clear_activity_after_grace(
+        self,
+        session: CardSession,
+        expected_activity: ActivityKind,
+        generation: int,
+    ) -> None:
+        """One-shot delayed clear with generation and lifecycle stale protection."""
+        try:
+            await asyncio.sleep(_ACTIVITY_CLEAR_GRACE_SEC)
+            if (
+                generation != session.activity_clear_generation
+                or session.state.is_terminal
+                or self._get_active_session(session.message_id) is not session
+                or self._cfg.progress_mode != "card"
+                or session.tool_use.active_activity is not None
+                or session.progress.activity != expected_activity
+            ):
+                return
+            if self._note_activity(session, None):
+                self._schedule_flush(session)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            _logger.debug("activity delayed clear failed", exc_info=True)
+        finally:
+            if generation == session.activity_clear_generation:
+                session.activity_clear_task = None
 
     def _record_reasoning(self, session: CardSession, text: str, *, activity: bool) -> None:
         """Preserve chronology while applying the source's presentation semantics."""
@@ -1147,6 +1225,7 @@ class StreamingController:
             self._cleanup_session(session)
 
     async def _do_complete_card_inner(self, session: CardSession) -> bool:
+        self._cancel_activity_clear(session)
         if session.guard.should_skip("_do_complete_card"):
             return False
 

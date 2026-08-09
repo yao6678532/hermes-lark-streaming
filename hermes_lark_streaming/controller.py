@@ -438,7 +438,11 @@ class StreamCardController(StreamingController):
                 error=detail if is_error else "",
                 output="" if is_error else detail,
             )
-            self._note_activity(session, session.tool_use.active_activity)
+            active_activity = session.tool_use.active_activity
+            if active_activity is not None:
+                self._note_activity(session, active_activity)
+            else:
+                self._schedule_activity_clear(session)
 
         session.segment_state.on_tool_event(len(session.tool_use.build_display_steps()))
         session.tool_panel.note_tool_event()
@@ -475,6 +479,7 @@ class StreamCardController(StreamingController):
             return
 
         progress = getattr(session, "progress", None)
+        self._cancel_activity_clear(session)
         if progress is not None:
             progress.clear()
         session.state = SessionState.ABORTED
@@ -491,6 +496,7 @@ class StreamCardController(StreamingController):
         if session is None or session.state.is_terminal:
             return False
 
+        self._cancel_activity_clear(session)
         session.progress.clear()
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
@@ -514,6 +520,7 @@ class StreamCardController(StreamingController):
         old_session = self._get_active_session(old_message_id)
         session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
+            self._cancel_activity_clear(old_session)
             old_session.progress.clear()
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
@@ -566,6 +573,8 @@ class StreamCardController(StreamingController):
         session = self._completion_session(message_id)
         if session is None:
             return False
+        self._cancel_activity_clear(session)
+        session.progress.clear()
         message_id = session.message_id
 
         if not await self._wait_for_card_creation(session):
@@ -745,6 +754,7 @@ class StreamCardController(StreamingController):
         for k in stale_keys:
             del self._interrupt_map[k]
         progress = getattr(session, "progress", None)
+        self._cancel_activity_clear(session)
         if progress is not None:
             progress.clear()
         session.flush.mark_completed()
@@ -763,6 +773,7 @@ class StreamCardController(StreamingController):
         stale_keys = [key for key, value in self._interrupt_map.items() if value == session.message_id]
         for key in stale_keys:
             del self._interrupt_map[key]
+        self._cancel_activity_clear(session)
         session.progress.clear()
         session.flush.mark_completed()
         if session.image_resolver:
@@ -862,6 +873,7 @@ class StreamCardController(StreamingController):
 
     def _complete_session(self, session: CardSession) -> None:
         """异步完成当前流式卡片."""
+        self._cancel_activity_clear(session)
         session.flush.mark_completed()
         self._fire_and_forget(self._complete_session_after_creation(session), session._loop)
 
@@ -873,6 +885,7 @@ class StreamCardController(StreamingController):
 
     async def _complete_session_wait(self, session: CardSession) -> bool:
         """完成当前流式卡片，并等待最终 API 结果."""
+        self._cancel_activity_clear(session)
         session.progress.clear()
         session.flush.mark_completed()
         return await self._do_complete_card(session)

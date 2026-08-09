@@ -44,6 +44,8 @@ class CardSession:
 
     __slots__ = (
         "_loop",
+        "activity_clear_generation",
+        "activity_clear_task",
         "anchor_id",
         "card_id",
         "card_msg_id",
@@ -78,6 +80,8 @@ class CardSession:
         loop: asyncio.AbstractEventLoop,
     ) -> None:
         self.message_id = message_id
+        self.activity_clear_generation = 0
+        self.activity_clear_task: asyncio.Future[Any] | ConcurrentFuture[Any] | None = None
         self.anchor_id: str | None = None
         self.chat_id = chat_id
         self.session_key: str | None = None
@@ -119,8 +123,17 @@ class CardSession:
         self.card_msg_id = card_msg_id
 
     def mark_failed(self) -> None:
+        self.cancel_activity_clear()
         self.progress.clear()
         self.state = SessionState.FAILED
+
+    def cancel_activity_clear(self) -> None:
+        """Invalidate and cancel the one-shot delayed activity clear, if any."""
+        self.activity_clear_generation += 1
+        task = self.activity_clear_task
+        self.activity_clear_task = None
+        if task is not None and not task.done():
+            task.cancel()
 
     def active_segments(self) -> list[Segment]:
         if self.segment_state is None:

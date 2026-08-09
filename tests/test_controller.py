@@ -471,6 +471,14 @@ def _make_session(msg_id: str = "msg_123") -> CardSession:
     return CardSession(msg_id, "chat_456", loop)
 
 
+def _make_running_session(msg_id: str) -> CardSession:
+    session = CardSession(msg_id, "chat_456", asyncio.get_running_loop())
+    session.state = SessionState.STREAMING
+    session.card_id = f"card_{msg_id}"
+    session.card_msg_id = f"card_msg_{msg_id}"
+    return session
+
+
 def _mock_client() -> AsyncMock:
     client = AsyncMock(spec=FeishuClient)
     client.cardkit_create = AsyncMock(return_value="card_id_abc")
@@ -957,13 +965,13 @@ class TestDoCreateCard:
         assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
 
     @pytest.mark.parametrize("terminal_status", ["completed", "error", "failed"])
-    def test_tool_terminal_event_clears_activity(self, terminal_status: str) -> None:
+    def test_tool_terminal_event_starts_clear_grace(self, terminal_status: str) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl)
         session = _make_session(f"msg_tool_end_{terminal_status}")
         ctrl._sessions[session.message_id] = session
 
-        with patch.object(ctrl, "_schedule_flush"):
+        with patch.object(ctrl, "_schedule_flush"), patch.object(ctrl, "_schedule_activity_clear") as clear:
             ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="web_search",
@@ -977,8 +985,8 @@ class TestDoCreateCard:
                 detail="failed" if terminal_status != "completed" else "done",
             )
 
-        assert session.progress.activity is None
-        assert session.progress.visible is False
+        assert session.progress.activity == ActivityKind.SEARCHING
+        clear.assert_called_once_with(session)
 
     def test_overlapping_tools_restore_latest_remaining_activity(self) -> None:
         ctrl = _setup_ctrl()
@@ -986,7 +994,7 @@ class TestDoCreateCard:
         session = _make_session("msg_tool_overlap_restore")
         ctrl._sessions[session.message_id] = session
 
-        with patch.object(ctrl, "_schedule_flush"):
+        with patch.object(ctrl, "_schedule_flush"), patch.object(ctrl, "_schedule_activity_clear") as clear:
             ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="terminal",
@@ -1011,7 +1019,8 @@ class TestDoCreateCard:
                 status="completed",
             )
 
-        assert session.progress.activity is None
+        assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+        clear.assert_called_once_with(session)
 
     def test_older_tool_end_does_not_clear_newer_running_tool(self) -> None:
         ctrl = _setup_ctrl()
@@ -1133,19 +1142,20 @@ class TestDoCreateCard:
     async def test_tool_end_blanks_status_then_next_heartbeat_restores_progress(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl, show_tool_use=False)
-        session = CardSession("msg_tool_fallback", "chat", asyncio.get_running_loop())
-        session.state = SessionState.STREAMING
-        session.card_id = "card_tool_fallback"
+        session = _make_running_session("msg_tool_fallback")
         ctrl._sessions[session.message_id] = session
 
-        with patch.object(ctrl, "_schedule_flush"):
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
             ctrl.on_tool_update(
                 message_id=session.message_id,
                 tool_name="terminal",
                 status="started",
             )
-        await ctrl._do_flush(session)
-        with patch.object(ctrl, "_schedule_flush"):
+            await ctrl._do_flush(session)
+            ctrl._client.cardkit_batch_update.reset_mock()
             ctrl.on_long_running_progress(
                 message_id=session.message_id,
                 elapsed_seconds=120,
@@ -1156,7 +1166,10 @@ class TestDoCreateCard:
                 tool_name="terminal",
                 status="completed",
             )
-        await ctrl._do_flush(session)
+            assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+            await asyncio.sleep(0.01)
+            assert session.progress.activity is None
+            await ctrl._do_flush(session)
 
         cleared_action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
         assert cleared_action["params"]["partial_element"]["content"] == " "
@@ -1173,6 +1186,199 @@ class TestDoCreateCard:
         assert restored_action["params"]["partial_element"]["i18n_content"]["zh_cn"] == (
             "运行中 · 2 分钟 · 第 6 轮"
         )
+
+    @pytest.mark.asyncio
+    async def test_short_same_activity_burst_cancels_clear_without_new_revision(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_activity_burst")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            revision = session.progress.snapshot().revision
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert session.activity_clear_task is not None
+
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            await asyncio.sleep(0.01)
+            assert session.progress.activity == ActivityKind.SEARCHING
+            assert session.progress.snapshot().revision == revision
+
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            await asyncio.sleep(0.01)
+
+        assert session.progress.activity is None
+        assert session.progress.snapshot().revision == revision + 1
+
+    @pytest.mark.asyncio
+    async def test_new_tool_activity_during_grace_cannot_be_cleared_by_stale_task(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_activity_switch")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="terminal", status="started")
+            await asyncio.sleep(0.01)
+
+        assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+
+    @pytest.mark.asyncio
+    async def test_reasoning_during_tool_clear_grace_cannot_be_cleared_by_stale_task(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_reasoning_grace")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert ctrl.on_reasoning(message_id=session.message_id, text="next step") is True
+            await asyncio.sleep(0.01)
+
+        assert session.progress.activity == ActivityKind.THINKING
+
+    @pytest.mark.asyncio
+    async def test_answer_during_tool_clear_grace_cannot_be_cleared_by_stale_task(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_answer_grace")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+            await asyncio.sleep(0.01)
+
+        assert session.progress.activity == ActivityKind.ANSWERING
+
+    @pytest.mark.asyncio
+    async def test_overlapping_tools_only_start_grace_after_last_tool_ends(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_overlap_grace")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="terminal", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert session.progress.activity == ActivityKind.EXECUTING_COMMAND
+            assert session.activity_clear_task is None
+
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="terminal", status="completed")
+
+        assert session.activity_clear_task is not None
+        session.cancel_activity_clear()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_during_grace_keeps_activity_then_next_heartbeat_restores_fallback(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_heartbeat_grace")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=120,
+                iteration=7,
+            ) is True
+            assert session.progress.snapshot().zh_content == "正在搜索资料"
+
+            await asyncio.sleep(0.01)
+            assert session.progress.activity is None
+            assert session.progress.visible is False
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=180,
+                iteration=8,
+            ) is True
+
+        assert session.progress.snapshot().zh_content == "运行中 · 3 分钟 · 第 8 轮"
+
+    @pytest.mark.asyncio
+    async def test_completion_during_grace_cancels_delayed_clear_without_extra_update(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = _make_running_session("msg_completion_grace")
+        ctrl._sessions[session.message_id] = session
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+            patch.object(ctrl, "_do_complete_card_inner", new_callable=AsyncMock, return_value=True),
+        ):
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=session.message_id, tool_name="browser", status="completed")
+            assert session.activity_clear_task is not None
+            await ctrl._do_complete_card(session)
+            await asyncio.sleep(0.01)
+
+        assert session.activity_clear_task is None
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_abort_and_interrupt_during_grace_cancel_old_clear_task(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        aborted = _make_running_session("msg_abort_grace")
+        ctrl._sessions[aborted.message_id] = aborted
+
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+            patch.object(ctrl, "_complete_session"),
+        ):
+            ctrl.on_tool_update(message_id=aborted.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=aborted.message_id, tool_name="browser", status="completed")
+            ctrl.on_aborted(message_id=aborted.message_id)
+            await asyncio.sleep(0.01)
+
+        assert aborted.activity_clear_task is None
+        assert aborted.progress.activity is None
+
+        old = _make_running_session("msg_interrupt_old")
+        replacement = _make_running_session("msg_interrupt_new")
+        ctrl._sessions[old.message_id] = old
+        ctrl._sessions[replacement.message_id] = replacement
+        with (
+            patch.object(ctrl, "_schedule_flush"),
+            patch("hermes_lark_streaming.streaming.controller._ACTIVITY_CLEAR_GRACE_SEC", 0.001),
+            patch.object(ctrl, "_complete_session"),
+        ):
+            ctrl.on_tool_update(message_id=old.message_id, tool_name="browser", status="started")
+            ctrl.on_tool_update(message_id=old.message_id, tool_name="browser", status="completed")
+            ctrl.on_interrupted(
+                old_message_id=old.message_id,
+                new_message_id=replacement.message_id,
+                chat_id="chat",
+            )
+            await asyncio.sleep(0.01)
+
+        assert old.activity_clear_task is None
+        assert replacement.progress.activity is None
 
     def test_text_progress_mode_does_not_create_activity_state(self) -> None:
         ctrl = _setup_ctrl()
