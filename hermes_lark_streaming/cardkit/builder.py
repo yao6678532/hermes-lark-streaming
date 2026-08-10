@@ -405,8 +405,8 @@ def _build_run_details_elements(
                 en_lines.append(f"{label_en} {en}" if label_en else en)
                 zh_lines.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
 
-    title_en = _join_compact_footer_parts(summary_parts_en)
-    title_zh = _join_compact_footer_parts(summary_parts_zh)
+    title_en = _run_details_black_text(_join_compact_footer_parts(summary_parts_en))
+    title_zh = _run_details_black_text(_join_compact_footer_parts(summary_parts_zh))
     detail_elements: list[dict] = []
     if en_lines:
         en_content = "\n".join(en_lines)
@@ -457,6 +457,18 @@ def _run_details_grey_text(content: str) -> str:
     font_span = re.compile(r"(<font\b[^>]*>.*?</font>)", flags=re.IGNORECASE | re.DOTALL)
     return "".join(
         part if font_span.fullmatch(part) else f"<font color='grey'>{part}</font>"
+        for part in font_span.split(content)
+        if part
+    )
+
+
+def _run_details_black_text(content: str) -> str:
+    """Color only ordinary Summary text black, preserving semantic spans."""
+    if not content:
+        return content
+    font_span = re.compile(r"(<font\b[^>]*>.*?</font>)", flags=re.IGNORECASE | re.DOTALL)
+    return "".join(
+        part if font_span.fullmatch(part) else f"<font color='black'>{part}</font>"
         for part in font_span.split(content)
         if part
     )

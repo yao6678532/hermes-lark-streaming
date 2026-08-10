@@ -468,12 +468,17 @@ class TestBuildFooterElements:
     def _unwrap_grey(value: str) -> str:
         return re.sub(r"<font color='grey'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
 
+    @staticmethod
+    def _unwrap_summary_styles(value: str) -> str:
+        value = re.sub(r"<font color='black'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
+        return re.sub(r"<font color='grey'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
+
     @classmethod
     def _title(cls, result: list[dict]) -> dict:
         title = cls._panel(result)["header"]["title"].copy()
-        title["content"] = cls._unwrap_grey(title["content"])
+        title["content"] = cls._unwrap_summary_styles(title["content"])
         title["i18n_content"] = {
-            locale: cls._unwrap_grey(content)
+            locale: cls._unwrap_summary_styles(content)
             for locale, content in title["i18n_content"].items()
         }
         return title
@@ -505,7 +510,7 @@ class TestBuildFooterElements:
     def test_summary_uses_default_markdown_color(self) -> None:
         result = _build_footer_elements({"duration": 4.4, "model": "gpt-5.6-luna"})
         raw_title = self._panel(result)["header"]["title"]["content"]
-        assert raw_title == "✅ 4.4s · gpt-5.6-luna"
+        assert raw_title == "<font color='black'>✅ 4.4s · gpt-5.6-luna</font>"
         assert not raw_title.startswith("<font color='grey'>")
 
     @pytest.mark.parametrize(
@@ -564,7 +569,9 @@ class TestBuildFooterElements:
         )
         title = self._panel(result)["header"]["title"]
         assert title["tag"] == "markdown"
-        assert self._unwrap_grey(title["content"]) == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
+        assert title["content"] == (
+            f"<font color='black'>✅ 2m 2s · gpt-5.6-luna · </font>{quota}"
+        )
         assert quota in title["content"]
         assert f"<font color='grey'>{quota}" not in title["content"]
         assert not title["content"].startswith("<font color='grey'>")
