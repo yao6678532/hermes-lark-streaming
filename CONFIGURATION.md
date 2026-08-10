@@ -178,7 +178,7 @@ Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active to
 
 终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota_remaining}`，例如 `✅ 4.4s · gpt-5.6-luna · 95%`；quota reset 只进入 detail。没有 quota 时以 compact context 作为 fallback，例如 `✅ 1.4s · deepseek-v4-flash · 70.5K/1M`。缺失值不会产生多余分隔符。
 
-展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 来自 Hermes `_last_turn_usage` 的当前-turn canonical provider metadata；DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。该信号是当前 turn 最后一个可靠 provider response 的 usage，不会回退到缓存 Agent 的 `session_*` 累计计数。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
+展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 通过 Hermes canonical `session_*` usage counters 在单次 `run_conversation` 前后的差值取得，因此覆盖本 turn 内全部 provider calls，却不会把 session 累计值直接展示为本轮 usage；旧 Hermes 缺少这些 counters 时才 fail-open 回退到 `_last_turn_usage` 的最后一个可靠 provider response。DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

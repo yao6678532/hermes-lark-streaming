@@ -38,6 +38,7 @@ from hermes_lark_streaming.patcher import (
     _stop_hook,
     _thinking_hook,
     _tool_hook,
+    _usage_baseline_hook,
     _usage_hook,
 )
 from hermes_lark_streaming.streaming.session import CardSession
@@ -206,6 +207,20 @@ def _build_usage_hook_runner():
         "    return 'done'\n"
     )
     exec(compile(source, "<usage-hook-test>", "exec"), namespace)
+    return namespace["collect"]
+
+
+def _build_usage_pipeline_runner():
+    namespace: dict = {}
+    source = (
+        "def collect(ctx, agent, result, advance):\n"
+        f"{_usage_baseline_hook('    ')}"
+        "    advance(agent)\n"
+        "    _agent = agent\n"
+        f"{_usage_hook('    ')}"
+        "    return 'done'\n"
+    )
+    exec(compile(source, "<usage-pipeline-test>", "exec"), namespace)
     return namespace["collect"]
 
 
@@ -817,6 +832,52 @@ def test_generated_usage_hook_forwards_only_current_turn_canonical_usage() -> No
     )
 
 
+def test_generated_usage_pipeline_forwards_whole_turn_counter_deltas() -> None:
+    collect = _build_usage_pipeline_runner()
+    ctx = SimpleNamespace(
+        event_message_id="message",
+        source=SimpleNamespace(platform=SimpleNamespace(value="feishu")),
+    )
+    agent = SimpleNamespace(
+        _last_turn_usage={
+            "prompt_tokens": 40_000,
+            "output_tokens": 900,
+            "cache_read_tokens": 30_000,
+            "reasoning_tokens": 400,
+        },
+        session_prompt_tokens=100_000,
+        session_input_tokens=30_000,
+        session_output_tokens=5_000,
+        session_cache_read_tokens=70_000,
+        session_cache_write_tokens=0,
+        session_reasoning_tokens=2_000,
+    )
+
+    def advance(current: SimpleNamespace) -> None:
+        current.session_prompt_tokens += 70_500
+        current.session_input_tokens += 18_200
+        current.session_output_tokens += 2_100
+        current.session_cache_read_tokens += 52_300
+        current.session_cache_write_tokens += 0
+        current.session_reasoning_tokens += 1_600
+
+    with patch("hermes_lark_streaming.patch.on_turn_usage") as on_turn_usage:
+        assert collect(ctx, agent, {"api_calls": 3}, advance) == "done"
+
+    on_turn_usage.assert_called_once_with(
+        message_id="message",
+        usage={
+            "prompt_tokens": 70_500,
+            "input_tokens": 18_200,
+            "output_tokens": 2_100,
+            "cache_read_tokens": 52_300,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 1_600,
+        },
+        api_calls=3,
+    )
+
+
 @pytest.mark.asyncio
 async def test_generated_followup_hook_handles_distinct_delivery_result() -> None:
     complete = _build_followup_complete_hook_runner()
@@ -892,8 +953,11 @@ class TestApplyRemove:
         assert "on_message_completed_wait(" in content
         assert "on_message_needs_text_fallback" in content
         assert "_lark_card_sent = await on_message_completed_wait(" in content
+        assert "# HERMES_LARK_USAGE_BASELINE_BEGIN" in content
+        assert "_lark_usage_baseline = capture_turn_usage_baseline(agent)" in content
         assert "# HERMES_LARK_USAGE_BEGIN" in content
-        assert "usage=getattr(_agent, '_last_turn_usage', None)" in content
+        assert "_lark_turn_usage = current_turn_usage(" in content
+        assert "fallback=getattr(_agent, '_last_turn_usage', None)" in content
         assert "on_turn_usage(" in content
         assert "agent_result.pop('already_sent', None)" in content
         assert "_lark_completion_id = agent_result.get('_hermes_lark_completion_id') or event.message_id" in content

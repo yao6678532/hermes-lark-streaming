@@ -40,6 +40,7 @@ _HOOK_NAMES = [
     "CLARIFY_SEND",
     "CLARIFY_ACTION",
     "PROGRESS",
+    "USAGE_BASELINE",
     "USAGE",
 ]
 MARKERS: list[tuple[str, str]] = [(f"# {PREFIX}_{n}_BEGIN", f"# {PREFIX}_{n}_END") for n in _HOOK_NAMES]
@@ -61,7 +62,8 @@ MK_BG_DELIVER, MK_BG_DELIVER_END = MARKERS[13]
 MK_CLARIFY_SEND, MK_CLARIFY_SEND_END = MARKERS[14]
 MK_CLARIFY_ACTION, MK_CLARIFY_ACTION_END = MARKERS[15]
 MK_PROGRESS, MK_PROGRESS_END = MARKERS[16]
-MK_USAGE, MK_USAGE_END = MARKERS[17]
+MK_USAGE_BASELINE, MK_USAGE_BASELINE_END = MARKERS[17]
+MK_USAGE, MK_USAGE_END = MARKERS[18]
 
 _BACKUP_SUFFIX = ".hermes_lark.bak"
 
@@ -287,13 +289,38 @@ def _usage_hook(indent: str) -> str:
             "        _lark_usage_message_id = event_message_id",
             "        _lark_usage_source = source",
             "    if _lark_usage_source.platform.value.lower() in ('feishu', 'lark'):",
-            "        from hermes_lark_streaming.patch import on_turn_usage",
+            "        from hermes_lark_streaming.patch import current_turn_usage, on_turn_usage",
+            "        _lark_turn_usage = current_turn_usage(",
+            "            _agent,",
+            "            baseline=locals().get('_lark_usage_baseline'),",
+            "            fallback=getattr(_agent, '_last_turn_usage', None),",
+            "        )",
             "        on_turn_usage(",
             "            message_id=_lark_usage_message_id,",
-            "            usage=getattr(_agent, '_last_turn_usage', None),",
+            "            usage=_lark_turn_usage,",
             "            api_calls=result.get('api_calls', 0) if isinstance(result, dict) else 0,",
             "        )",
             *_hook_exception_lines("usage"),
+        ],
+    )
+
+
+def _usage_baseline_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_USAGE_BASELINE,
+        MK_USAGE_BASELINE_END,
+        [
+            "_lark_usage_baseline = None",
+            "try:",
+            "    try:",
+            "        _lark_usage_baseline_source = ctx.source",
+            "    except NameError:",
+            "        _lark_usage_baseline_source = source",
+            "    if _lark_usage_baseline_source.platform.value.lower() in ('feishu', 'lark'):",
+            "        from hermes_lark_streaming.patch import capture_turn_usage_baseline",
+            "        _lark_usage_baseline = capture_turn_usage_baseline(agent)",
+            *_hook_exception_lines("usage baseline"),
         ],
     )
 
@@ -924,6 +951,10 @@ class Patcher:
             raise PatcherError(
                 "Cannot find current-turn usage anchor in run.py — Hermes version may be incompatible"
             )
+        if _find_turn_usage_baseline_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find current-turn usage baseline anchor in run.py — Hermes version may be incompatible"
+            )
 
     def apply(self) -> None:
         if self.is_fully_patched():
@@ -979,6 +1010,11 @@ class Patcher:
             ("clarify_send", "clarify_send", _find_clarify_send_site(tree, lines)),
             ("clarify_action", "clarify_action", _find_clarify_action_site(tree, lines)),
             ("progress", "progress", _find_long_running_progress_site(tree, lines)),
+            (
+                "usage_baseline",
+                "current-turn usage baseline",
+                _find_turn_usage_baseline_site(tree, lines),
+            ),
             ("usage", "current-turn usage", _find_turn_usage_site(tree, lines)),
         ]
         hook_defs.extend(
@@ -1014,6 +1050,7 @@ class Patcher:
             "clarify_send": _clarify_send_hook,
             "clarify_action": _clarify_action_hook,
             "progress": _progress_hook,
+            "usage_baseline": _usage_baseline_hook,
             "usage": _usage_hook,
         }
         for idx, indent, fn_name in sites:
@@ -1092,6 +1129,30 @@ def _find_turn_usage_site(tree: ast.Module, lines: list[str]) -> tuple[int, str]
             continue
         lineno = stmt.end_lineno or stmt.lineno
         return lineno, _safe_indent(lines, stmt.lineno - 1)
+    return None
+
+
+def _find_turn_usage_baseline_site(
+    tree: ast.Module,
+    lines: list[str],
+) -> tuple[int, str] | None:
+    for index, line in enumerate(lines):
+        if line.strip().startswith("result = agent.run_conversation("):
+            return index, _safe_indent(lines, index)
+    for stmt in ast.walk(tree):
+        if not (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and stmt.targets[0].id == "result"
+            and isinstance(stmt.value, ast.Call)
+            and isinstance(stmt.value.func, ast.Attribute)
+            and stmt.value.func.attr == "run_conversation"
+            and isinstance(stmt.value.func.value, ast.Name)
+            and stmt.value.func.value.id == "agent"
+        ):
+            continue
+        return stmt.lineno - 1, _safe_indent(lines, stmt.lineno - 1)
     return None
 
 

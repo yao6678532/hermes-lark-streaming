@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from unittest.mock import patch
 
 import pytest
@@ -429,11 +430,7 @@ class TestBuildFooterElements:
 
     @staticmethod
     def _unwrap_grey(value: str) -> str:
-        prefix = "<font color='grey'>"
-        suffix = "</font>"
-        if value.startswith(prefix) and value.endswith(suffix):
-            return value[len(prefix) : -len(suffix)]
-        return value
+        return re.sub(r"<font color='grey'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
 
     @classmethod
     def _title(cls, result: list[dict]) -> dict:
@@ -513,6 +510,7 @@ class TestBuildFooterElements:
         assert title["tag"] == "markdown"
         assert self._unwrap_grey(title["content"]) == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
         assert quota in title["content"]
+        assert f"<font color='grey'>{quota}" not in title["content"]
         assert "↻6d16h" not in title["content"]
         assert self._content(result) == "Quota Reset ↻6d16h"
 
@@ -533,6 +531,9 @@ class TestBuildFooterElements:
         result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
         assert self._title(result)["content"] == "❌ Error"
         assert self._content(result) == "<font color='red'>Tokens ↑ 1</font>"
+        assert "<font color='grey'><font color='red'>" not in self._panel(result)["elements"][0][
+            "content"
+        ]
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])

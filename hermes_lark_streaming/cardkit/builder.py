@@ -443,10 +443,18 @@ def _run_details_grey_text(content: str) -> str:
     """Apply the grey Run Details style to markdown content.
 
     CardKit's ``text_color`` property is ignored for markdown elements.  Use
-    the supported markdown font markup instead; nested quota/error colors keep
-    their existing semantic presentation.
+    the supported markdown font markup instead.  Existing semantic spans (GPT
+    quota and error colors) are kept as siblings so CardKit never has to render
+    unsupported nested ``font`` tags.
     """
-    return f"<font color='grey'>{content}</font>" if content else content
+    if not content:
+        return content
+    font_span = re.compile(r"(<font\b[^>]*>.*?</font>)", flags=re.IGNORECASE | re.DOTALL)
+    return "".join(
+        part if font_span.fullmatch(part) else f"<font color='grey'>{part}</font>"
+        for part in font_span.split(content)
+        if part
+    )
 
 
 def _build_footer_summary(
