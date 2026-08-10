@@ -309,7 +309,7 @@ def tool_detail_for_display(
 
 
 _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
-    {"aliases": ["skill"], "icon": "app-default_outlined", "title": "Load skill", "sanitizer": None},
+    {"aliases": ["skill"], "icon": "setting-inter_outlined", "title": "Load skill", "sanitizer": None},
     {
         "aliases": ["read", "open"],
         "icon": "file-link-text_outlined",
@@ -341,19 +341,19 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
     {"aliases": ["glob"], "icon": "folder_outlined", "title": "Search files", "sanitizer": "path"},
     {
         "aliases": ["exec", "bash", "command", "run"],
-        "icon": "setting_outlined",
+        "icon": "platform_outlined",
         "title": "Run command",
         "sanitizer": "command",
     },
     {
         "aliases": ["terminal"],
-        "icon": "setting-inter_outlined",
+        "icon": "platform_outlined",
         "title": "Terminal",
         "sanitizer": "command",
     },
     {
         "aliases": ["browser", "playwright", "navigate"],
-        "icon": "browser-mac_outlined",
+        "icon": "internet_outlined",
         "title": "Browser",
         "no_result": True,
     },

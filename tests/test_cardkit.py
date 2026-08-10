@@ -16,9 +16,11 @@ from hermes_lark_streaming.cardkit.builder import (
     _build_header,
     _build_reasoning_panel,
     _build_tool_panel,
+    _build_tool_step_title,
     _compact,
     _escape_md,
     _format_elapsed,
+    _format_tool_elapsed,
     _longest_backtick_run,
     build_complete_card,
     build_streaming_card_v2,
@@ -382,6 +384,38 @@ class TestBuildToolPanel:
         assert "Succeeded" not in str(success["elements"])
         assert "Failed" in str(failed["elements"])
         assert "1.2s" in str(failed["elements"])
+
+    @pytest.mark.parametrize(
+        ("status", "elapsed_ms", "icon_color", "text_color", "label"),
+        [
+            ("running", 0, "grey", "grey", "Running"),
+            ("success", 50, "grey", "green", "\uff1c0.1s"),
+            ("success", 99, "grey", "green", "\uff1c0.1s"),
+            ("success", 100, "grey", "green", "0.1s"),
+            ("success", 200, "grey", "green", "0.2s"),
+            ("success", 1200, "grey", "green", "1.2s"),
+            ("success", 0, "grey", "green", "Done"),
+            ("error", 50, "grey", "red", "Failed · \uff1c0.1s"),
+            ("error", 99, "grey", "red", "Failed · \uff1c0.1s"),
+            ("error", 100, "grey", "red", "Failed · 0.1s"),
+            ("error", 200, "grey", "red", "Failed · 0.2s"),
+            ("error", 1200, "grey", "red", "Failed · 1.2s"),
+        ],
+    )
+    def test_step_status_colors_icon_and_status_text(
+        self, status: str, elapsed_ms: int, icon_color: str, text_color: str, label: str
+    ) -> None:
+        title = _build_tool_step_title({**_STEP_RUNNING, "status": status, "elapsed_ms": elapsed_ms})
+
+        assert title["icon"]["color"] == icon_color
+        assert f"<font color='{text_color}'>{label}</font>" in title["text"]["content"]
+
+    @pytest.mark.parametrize(
+        ("elapsed_ms", "expected"),
+        [(50, "\uff1c0.1s"), (99, "\uff1c0.1s"), (100, "0.1s"), (200, "0.2s"), (1200, "1.2s")],
+    )
+    def test_tool_elapsed_formatting_boundaries(self, elapsed_ms: int, expected: str) -> None:
+        assert _format_tool_elapsed(elapsed_ms) == expected
 
     def test_detail_visibility_and_compact_mode_keep_title_and_output(self) -> None:
         step = {
