@@ -20,7 +20,7 @@ _T: dict[str, tuple[str, str]] = {
     "tokens_label": ("Tokens", "Tokens"),
     "balance_label": ("Balance", "余额"),
     "gpt_quota_label": ("GPT Quota", "GPT 配额"),
-    "quota_reset_label": ("Quota Reset", "额度刷新"),
+    "quota_reset_label": ("Quota reset", "额度重置"),
     "cache_label": ("Cache", "缓存"),
     "reasoning_label": ("Reasoning", "推理 Tokens"),
     "api_calls_label": ("API Calls", "API 调用"),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
@@ -20,6 +21,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _compact,
     _escape_md,
     _format_elapsed,
+    _format_quota_reset_at,
     _format_tool_elapsed,
     _longest_backtick_run,
     build_complete_card,
@@ -500,6 +502,12 @@ class TestBuildFooterElements:
         assert "Run Details" not in title["content"]
         assert "运行详情" not in title["i18n_content"]["zh_cn"]
 
+    def test_summary_uses_default_markdown_color(self) -> None:
+        result = _build_footer_elements({"duration": 4.4, "model": "gpt-5.6-luna"})
+        raw_title = self._panel(result)["header"]["title"]["content"]
+        assert raw_title == "✅ 4.4s · gpt-5.6-luna"
+        assert not raw_title.startswith("<font color='grey'>")
+
     @pytest.mark.parametrize(
         ("data", "expected"),
         [
@@ -514,20 +522,34 @@ class TestBuildFooterElements:
 
     def test_gpt_quota_keeps_context_available_in_detail(self) -> None:
         remaining = "<font color='green'>80%</font>"
+        reset_at = datetime.now().astimezone() + timedelta(days=5)
         result = _build_footer_elements(
             {
                 "context_used": 50000,
                 "context_max": 200000,
                 "gpt_quota_remaining": remaining,
-                "gpt_quota_reset": "↻6d15h",
+                "gpt_quota_reset_at": reset_at,
             },
             fields=[["status", "context", "gpt_quota", "quota_reset"]],
         )
         content = self._content(result)
         title = self._title(result)
         assert title["content"] == f"✅ {remaining}"
-        assert "↻6d15h" not in title["content"]
-        assert content == "Context 50.0K / 200.0K · 25%\nQuota Reset ↻6d15h"
+        assert "↻" not in content
+        assert content == (
+            "Context 50.0K / 200.0K · 25%\n"
+            f"Quota reset {_format_quota_reset_at(reset_at)[0]}"
+        )
+
+    def test_malformed_quota_reset_is_fail_open_for_detail(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>95%</font>",
+                "gpt_quota_reset_at": "not-a-timestamp",
+            },
+            fields=[["quota_reset"]],
+        )
+        assert self._panel(result)["elements"] == []
 
     def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
         quota = "<font color='green'>95%</font>"
@@ -536,7 +558,7 @@ class TestBuildFooterElements:
                 "duration": 122,
                 "model": "gpt-5.6-luna",
                 "gpt_quota_remaining": quota,
-                "gpt_quota_reset": "↻6d16h",
+                "gpt_quota_reset_at": "2026-08-16T02:30:00+00:00",
             },
             fields=[["gpt_quota", "quota_reset"]],
         )
@@ -545,8 +567,9 @@ class TestBuildFooterElements:
         assert self._unwrap_grey(title["content"]) == f"✅ 2m 2s · gpt-5.6-luna · {quota}"
         assert quota in title["content"]
         assert f"<font color='grey'>{quota}" not in title["content"]
-        assert "↻6d16h" not in title["content"]
-        assert self._content(result) == "Quota Reset ↻6d16h"
+        assert not title["content"].startswith("<font color='grey'>")
+        assert self._content(result).startswith("Quota reset ")
+        assert "↻" not in self._content(result)
 
     def test_context_is_summary_fallback_without_quota(self) -> None:
         result = _build_footer_elements(
@@ -672,7 +695,7 @@ class TestBuildFooterElements:
         assert " · Context" not in detail["content"]
         assert panel["header"]["title"]["text_size"] == "normal_v2"
         assert detail["text_size"] == "normal_v2"
-        assert panel["header"]["title"]["content"].startswith("<font color='grey'>")
+        assert not panel["header"]["title"]["content"].startswith("<font color='grey'>")
         assert detail["content"].startswith("<font color='grey'>")
         assert "text_color" not in panel["header"]["title"]
         assert "text_color" not in detail
@@ -716,13 +739,34 @@ class TestBuildFooterElements:
         )
         assert self._content(result) == "Tokens ↑ 12.4K · ↓ 2.1K"
 
+    def test_reset_timestamp_formats_local_absolute_time_and_cross_year(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        same_year = local_now.replace(month=8, day=16, hour=10, minute=30)
+        en, zh = _format_quota_reset_at(same_year, now=local_now)
+        assert en == "Aug 16, 10:30"
+        assert zh == "8月16日 10:30"
+
+        next_year = same_year.replace(year=local_now.year + 1)
+        en_next, zh_next = _format_quota_reset_at(next_year, now=local_now)
+        assert str(local_now.year + 1) in en_next
+        assert str(local_now.year + 1) in zh_next
+
+    def test_reset_timestamp_converts_utc_to_local_timezone(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_utc = local_now.astimezone(UTC)
+        en, zh = _format_quota_reset_at(reset_utc, now=local_now)
+        assert en is not None and zh is not None
+        assert local_now.strftime("%H:%M") in en
+        assert local_now.strftime("%H:%M") in zh
+
     def test_default_details_keep_only_extra_metadata(self) -> None:
+        reset_at = datetime.now().astimezone() + timedelta(days=5)
         result = _build_footer_elements(
             {
                 "duration": 4.4,
                 "model": "gpt-5.6-luna",
                 "gpt_quota_remaining": "<font color='green'>95%</font>",
-                "gpt_quota_reset": "↻6d15h",
+                "gpt_quota_reset_at": reset_at,
                 "input_tokens": 12400,
                 "output_tokens": 1800,
                 "context_used": 70500,
@@ -738,7 +782,7 @@ class TestBuildFooterElements:
         assert content.splitlines() == [
             "Tokens ↑ 12.4K · ↓ 1.8K",
             "Context 70.5K / 272.0K · 25%",
-            "Quota Reset ↻6d15h",
+            f"Quota reset {_format_quota_reset_at(reset_at)[0]}",
             "Cache Hit 10.2K / 12.4K · 82% · Write 1.1K",
             "Reasoning 3.6K",
             "Balance ¥4.97",

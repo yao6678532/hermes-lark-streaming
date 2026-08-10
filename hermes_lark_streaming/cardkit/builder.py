@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from ..streaming.progress import ProgressSnapshot
@@ -432,10 +432,10 @@ def _build_run_details_elements(
         expanded=False,
         title_el={
             "tag": "markdown",
-            "content": _run_details_grey_text(title_en),
+            "content": title_en,
             "i18n_content": _i18n(
-                _run_details_grey_text(title_en),
-                _run_details_grey_text(title_zh),
+                title_en,
+                title_zh,
             ),
             "text_size": text_size,
         },
@@ -459,6 +459,50 @@ def _run_details_grey_text(content: str) -> str:
         part if font_span.fullmatch(part) else f"<font color='grey'>{part}</font>"
         for part in font_span.split(content)
         if part
+    )
+
+
+def _parse_reset_at(value: object) -> datetime | None:
+    """Parse a quota timestamp and convert it to the system local timezone."""
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            parsed = datetime.fromtimestamp(float(value), tz=UTC)
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _format_quota_reset_at(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Format a reset timestamp as explicit local absolute time for both locales."""
+    reset_at = _parse_reset_at(value)
+    if reset_at is None:
+        return None, None
+    current = (now or datetime.now().astimezone()).astimezone()
+    clock = f"{reset_at.hour:02d}:{reset_at.minute:02d}"
+    month = (
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )[reset_at.month - 1]
+    if reset_at.year == current.year:
+        return f"{month} {reset_at.day}, {clock}", f"{reset_at.month}月{reset_at.day}日 {clock}"
+    return (
+        f"{month} {reset_at.day}, {reset_at.year} {clock}",
+        f"{reset_at.year}年{reset_at.month}月{reset_at.day}日 {clock}",
     )
 
 
@@ -691,8 +735,15 @@ def _render_footer_field(
         return v, v
 
     if name == "quota_reset":
-        v = data.get("gpt_quota_reset") or None
-        return v, v
+        reset_at = data.get("gpt_quota_reset_at")
+        if reset_at not in (None, ""):
+            return _format_quota_reset_at(reset_at)
+        # Keep compatibility with externally supplied absolute strings, but
+        # never render the retired compact countdown form.
+        legacy = data.get("gpt_quota_reset")
+        if isinstance(legacy, str) and legacy.strip() and not legacy.lstrip().startswith("↻"):
+            return legacy, legacy
+        return None, None
 
     if name == "cache":
         cache_read = _positive_int(data.get("cache_read_tokens"))

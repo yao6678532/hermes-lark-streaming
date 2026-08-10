@@ -32,7 +32,45 @@ _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
 
 
-def _fetch_gpt_quota_footer(model: str) -> dict[str, str]:
+def _quota_color(remaining: int) -> str:
+    if remaining >= 50:
+        return "green"
+    if remaining >= 20:
+        return "orange"
+    return "red"
+
+
+def _weekly_quota_window(rate_limit: object) -> dict[str, Any] | None:
+    """Select the structured seven-day quota window, independent of names."""
+    if not isinstance(rate_limit, dict):
+        return None
+
+    candidates: list[object] = []
+    # Keep the API's conventional order when both windows are weekly, while
+    # making the decision solely from the structured duration metadata.
+    for key in ("primary_window", "secondary_window"):
+        if key in rate_limit:
+            candidates.append(rate_limit[key])
+    for key, value in rate_limit.items():
+        if key not in {"primary_window", "secondary_window"}:
+            candidates.append(value)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        raw_duration = candidate.get("limit_window_seconds")
+        if raw_duration is None:
+            continue
+        try:
+            duration = int(raw_duration) if not isinstance(raw_duration, bool) else 0
+        except (TypeError, ValueError):
+            continue
+        if duration == 604800:
+            return candidate
+    return None
+
+
+def _fetch_gpt_quota_footer(model: str) -> dict[str, Any]:
     """Return structured Codex/GPT quota metadata for the footer.
 
     Uses Hermes' credential pool rather than the singleton Codex auth store, so
@@ -45,42 +83,8 @@ def _fetch_gpt_quota_footer(model: str) -> dict[str, str]:
         return {}
 
     try:
-        from datetime import UTC, datetime
-
         import httpx
         from agent.credential_pool import load_pool  # type: ignore[import-not-found]
-
-        def _format_reset(value: object) -> str:
-            if value in (None, ""):
-                return ""
-            try:
-                if isinstance(value, (int, float)):
-                    reset_at = datetime.fromtimestamp(float(value), tz=UTC)
-                else:
-                    text = str(value).strip()
-                    if text.endswith("Z"):
-                        text = text[:-1] + "+00:00"
-                    reset_at = datetime.fromisoformat(text)
-                    if reset_at.tzinfo is None:
-                        reset_at = reset_at.replace(tzinfo=UTC)
-                seconds = max(0, int((reset_at - datetime.now(UTC)).total_seconds()))
-                minutes = seconds // 60
-                if minutes < 60:
-                    return f"{minutes}m"
-                hours, minutes = divmod(minutes, 60)
-                if hours < 24:
-                    return f"{hours}h{minutes:02d}m"
-                days, hours = divmod(hours, 24)
-                return f"{days}d{hours}h"
-            except Exception:
-                return ""
-
-        def _quota_color(remaining: int) -> str:
-            if remaining >= 50:
-                return "green"
-            if remaining >= 20:
-                return "orange"
-            return "red"
 
         pool = load_pool("openai-codex")
         cred = pool.select()
@@ -106,23 +110,25 @@ def _fetch_gpt_quota_footer(model: str) -> dict[str, str]:
         response.raise_for_status()
         payload = response.json() or {}
         rate_limit = payload.get("rate_limit") or {}
-        if rate_limit.get("limit_reached") is True or rate_limit.get("allowed") is False:
-            return {"remaining": "GPT limited"}
-
-        for key in ("primary_window", "secondary_window"):
-            window = rate_limit.get(key) or {}
-            used = window.get("used_percent")
-            if used is None:
-                continue
-            remaining = max(0, min(100, round(100 - float(used))))
-            metadata = {
-                "remaining": f"<font color='{_quota_color(remaining)}'>{remaining}%</font>"
-            }
-            reset = _format_reset(window.get("reset_at"))
-            if reset:
-                metadata["reset"] = f"↻{reset}"
-            return metadata
-        return {}
+        window = _weekly_quota_window(rate_limit)
+        if window is None:
+            return {}
+        used = window.get("used_percent")
+        if used is None:
+            return {}
+        try:
+            used_percent = float(used)
+        except (TypeError, ValueError):
+            return {}
+        if not 0 <= used_percent <= 100:
+            return {}
+        remaining = max(0, min(100, round(100 - used_percent)))
+        metadata: dict[str, Any] = {
+            "remaining": f"<font color='{_quota_color(remaining)}'>{remaining}%</font>"
+        }
+        if window.get("reset_at") not in (None, ""):
+            metadata["reset_at"] = window["reset_at"]
+        return metadata
     except Exception:
         return {}
 
@@ -910,8 +916,8 @@ class StreamCardController(StreamingController):
             )
         if quota.get("remaining"):
             footer["gpt_quota_remaining"] = quota["remaining"]
-        if quota.get("reset"):
-            footer["gpt_quota_reset"] = quota["reset"]
+        if quota.get("reset_at") not in (None, ""):
+            footer["gpt_quota_reset_at"] = quota["reset_at"]
         session.footer = footer
 
     def _complete_session(self, session: CardSession) -> None:

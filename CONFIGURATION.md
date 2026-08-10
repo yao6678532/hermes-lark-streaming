@@ -129,7 +129,7 @@ lark:
 | `context` | 已用 / 最大 context window 及百分比。 |
 | `balance` | Hermes runtime 提供的余额字符串（若有）。 |
 | `gpt_quota` | GPT/Codex 剩余额度；固定进入 summary，因此不会在 detail 重复。保留名称兼容。 |
-| `quota_reset` | GPT/Codex quota 刷新倒计时；由 credential-pool quota 数据源与剩余额度分开提供。 |
+| `quota_reset` | GPT/Codex weekly quota 的本地绝对重置时间；由同一个 `limit_window_seconds: 604800` window 与剩余额度一起提供。 |
 | `cache` | 当前 turn canonical usage 的 cache read/write；有 read 与 prompt 总量时显示命中率。DeepSeek 原生 `prompt_cache_hit_tokens` 会由 Hermes 规范化为 cache read。 |
 | `reasoning` | 当前 turn canonical usage 的 reasoning tokens。 |
 | `api_calls` | Hermes 报告的本次 turn API / agent round 数。 |
@@ -176,9 +176,9 @@ lark:
 
 Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active tool 时自动展开；进入 answer 且没有 running tool 时自动折叠。answer 后再次开始工具调用会重新展开。一个 physical card 默认只创建一个 Tool Panel；当元素接近 CardKit 阈值时仍会按 tool step 边界拆卡。Run Details 只在最终 physical card 完成时显示，split card 的中间 seal card 不重复显示。
 
-终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota_remaining}`，例如 `✅ 4.4s · gpt-5.6-luna · 95%`；quota reset 只进入 detail。没有 quota 时以 compact context 作为 fallback，例如 `✅ 1.4s · deepseek-v4-flash · 70.5K/1M`。缺失值不会产生多余分隔符。
+终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 使用 CardKit Markdown 默认正文色，按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota_remaining}`，例如 `✅ 4.4s · gpt-5.6-luna · 95%`；GPT quota 百分比保留 green/orange/red 语义色，quota reset 只进入 detail。没有 quota 时以 compact context 作为 fallback，例如 `✅ 1.4s · deepseek-v4-flash · 70.5K/1M`。缺失值不会产生多余分隔符。
 
-展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 通过 Hermes canonical `session_*` usage counters 在单次 `run_conversation` 前后的差值取得，因此覆盖本 turn 内全部 provider calls，却不会把 session 累计值直接展示为本轮 usage；旧 Hermes 缺少这些 counters 时才 fail-open 回退到 `_last_turn_usage` 的最后一个可靠 provider response。DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
+展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 通过 Hermes canonical `session_*` usage counters 在单次 `run_conversation` 前后的差值取得，因此覆盖本 turn 内全部 provider calls，却不会把 session 累计值直接展示为本轮 usage；旧 Hermes 缺少这些 counters 时才 fail-open 回退到 `_last_turn_usage` 的最后一个可靠 provider response。GPT quota 只选择结构化 `limit_window_seconds == 604800` 的 weekly window，remaining 与 `reset_at` 来自同一个 window；reset 使用系统本地时区格式化为绝对日期时间，不再显示倒计时。DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

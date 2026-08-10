@@ -8,7 +8,6 @@ import threading
 import time
 from contextlib import nullcontext
 from contextvars import ContextVar
-from datetime import UTC, datetime, timedelta
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -124,8 +123,14 @@ def test_gpt_quota_source_separates_remaining_and_reset() -> None:
     response.json.return_value = {
         "rate_limit": {
             "primary_window": {
+                "limit_window_seconds": 18_000,
                 "used_percent": 5,
-                "reset_at": datetime.now(UTC) + timedelta(days=6, hours=15, minutes=1),
+                "reset_at": "2026-08-11T02:30:00+00:00",
+            },
+            "secondary_window": {
+                "limit_window_seconds": 604800,
+                "used_percent": 5,
+                "reset_at": "2026-08-16T02:30:00+00:00",
             }
         }
     }
@@ -137,9 +142,29 @@ def test_gpt_quota_source_separates_remaining_and_reset() -> None:
 
     assert quota == {
         "remaining": "<font color='green'>95%</font>",
-        "reset": "↻6d15h",
+        "reset_at": "2026-08-16T02:30:00+00:00",
     }
     response.raise_for_status.assert_called_once_with()
+
+
+def test_weekly_quota_window_can_be_primary_and_is_selected_by_duration() -> None:
+    weekly = {"limit_window_seconds": 604800, "used_percent": 80, "reset_at": 123}
+    short = {"limit_window_seconds": 18_000, "used_percent": 5, "reset_at": 456}
+    assert controller_module._weekly_quota_window({"primary_window": weekly, "secondary_window": short}) is weekly
+
+
+def test_missing_weekly_quota_window_is_fail_open() -> None:
+    assert controller_module._weekly_quota_window(
+        {"primary_window": {"limit_window_seconds": 18_000, "used_percent": 5}}
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected"),
+    [(95, "green"), (50, "green"), (49, "orange"), (20, "orange"), (19, "red")],
+)
+def test_quota_color_thresholds(remaining: int, expected: str) -> None:
+    assert controller_module._quota_color(remaining) == expected
 
 
 def test_current_turn_usage_maps_canonical_metadata_without_session_totals() -> None:
@@ -740,7 +765,7 @@ class TestAwaitedCompletion:
             "hermes_lark_streaming.controller._fetch_gpt_quota_footer",
             return_value={
                 "remaining": "<font color='green'>95%</font>",
-                "reset": "↻6d15h",
+                "reset_at": "2026-08-16T02:30:00+00:00",
             },
         ):
             assert await ctrl.on_completed_wait(
@@ -762,7 +787,7 @@ class TestAwaitedCompletion:
             "context_max": 272_000,
             "balance": "",
             "gpt_quota_remaining": "<font color='green'>95%</font>",
-            "gpt_quota_reset": "↻6d15h",
+            "gpt_quota_reset_at": "2026-08-16T02:30:00+00:00",
         }
 
 
