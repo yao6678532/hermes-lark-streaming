@@ -14,7 +14,7 @@ _LOCALES = ["zh_cn", "en_us"]
 _T: dict[str, tuple[str, str]] = {
     "status_completed": ("✅ Completed", "✅ 已完成"),
     "status_error": ("❌ Error", "❌ 出错"),
-    "status_stopped": ("🛑 Stopped", "🛑 已停止"),
+    "status_stopped": ("⬛️ Stopped", "⬛️ 已停止"),
     "status_label": ("Status", "状态"),
     "model_label": ("Model", "模型"),
     "tokens_label": ("Tokens", "Tokens"),

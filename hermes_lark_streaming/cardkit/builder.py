@@ -276,7 +276,7 @@ def _build_tool_step_output(step: ToolDisplayStep) -> dict | None:
 
 def _tool_status_info(status: str) -> dict[str, str]:
     return {
-        "running": {"label": _T["running"][0], "color": "grey"},
+        "running": {"label": _T["running"][0], "color": "wathet"},
         "success": {"label": _T["done_label"][0], "color": "green"},
         "error": {"label": _T["failed"][0], "color": "red"},
     }.get(status, {"label": status.capitalize(), "color": "grey"})
@@ -445,7 +445,8 @@ def _build_run_details_elements(
         elements=detail_elements,
         show_border=False,
     )
-    panel["padding"] = "0px 8px 0px 8px"
+    panel["margin"] = "-6px 0px 0px 0px"
+    panel["padding"] = "6px 0px 0px 0px"
     return [{"tag": "hr"}, panel]
 
 
