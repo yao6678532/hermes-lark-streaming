@@ -445,6 +445,7 @@ def _build_run_details_elements(
         elements=detail_elements,
         show_border=False,
     )
+    panel["padding"] = "0px 8px 0px 8px"
     return [{"tag": "hr"}, panel]
 
 
