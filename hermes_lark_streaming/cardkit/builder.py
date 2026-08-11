@@ -408,6 +408,11 @@ def _build_run_details_elements(
                 en_lines.append(f"{label_en} {en}" if label_en else en)
                 zh_lines.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
 
+    if is_aborted and data.get("stop_continue_hint") is True:
+        en_hint, zh_hint = _T["stop_continue"]
+        en_lines.append(en_hint)
+        zh_lines.append(zh_hint)
+
     title_en = _run_details_black_text(_join_compact_footer_parts(summary_parts_en))
     title_zh = _run_details_black_text(_join_compact_footer_parts(summary_parts_zh))
     detail_elements: list[dict] = []

@@ -235,9 +235,10 @@ def _build_followup_complete_hook_runner():
     return namespace["complete"]
 
 
-def _build_stop_hook_runner(key_name: str):
+def _build_stop_hook_runner(key_name: str, *, native_fallback: bool = False):
     namespace: dict = {}
-    source = f"async def stop(source, {key_name}):\n{_stop_hook('    ')}"
+    native_return = "    return 'native'\n" if native_fallback else ""
+    source = f"async def stop(source, {key_name}):\n{_stop_hook('    ')}{native_return}"
     exec(compile(source, "<stop-hook-test>", "exec"), namespace)
     return namespace["stop"]
 
@@ -750,7 +751,41 @@ async def test_generated_stop_hook_uses_available_session_key(key_name: str) -> 
     ) as on_session_aborted:
         await stop(source, "session:chat")
 
-    on_session_aborted.assert_awaited_once_with(session_key="session:chat")
+    on_session_aborted.assert_awaited_once_with(session_key="session:chat", stop_command=True)
+
+
+@pytest.mark.parametrize("handled, expected", [(True, None), (False, "native")])
+@pytest.mark.asyncio
+async def test_generated_stop_hook_suppresses_native_ack_only_after_card_success(
+    handled: bool, expected: str | None
+) -> None:
+    stop = _build_stop_hook_runner("quick_key", native_fallback=True)
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"))
+
+    with patch(
+        "hermes_lark_streaming.patch.on_session_aborted",
+        new_callable=AsyncMock,
+        return_value=handled,
+    ):
+        assert await stop(source, "session:chat") == expected
+
+
+@pytest.mark.asyncio
+async def test_generated_stop_hook_exception_keeps_native_ack(caplog: pytest.LogCaptureFixture) -> None:
+    stop = _build_stop_hook_runner("quick_key", native_fallback=True)
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="hermes_lark_streaming"),
+        patch(
+            "hermes_lark_streaming.patch.on_session_aborted",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("stop hook exploded"),
+        ),
+    ):
+        assert await stop(source, "session:chat") == "native"
+
+    assert any("injected hook failed: stop" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -1012,6 +1047,9 @@ class TestApplyRemove:
         assert stop_call < stop_hook < stop_return
         assert "on_session_aborted" in content[stop_hook:stop_return]
         assert "await on_session_aborted" in content[stop_hook:stop_return]
+        assert "stop_command=True" in content[stop_hook:stop_return]
+        assert "return None" in content[stop_hook:stop_return]
+        assert "Stopped." not in content[stop_hook:stop_return]
 
     def test_apply_idempotent(self, run_copy: Path) -> None:
         patcher = _patcher(run_copy)

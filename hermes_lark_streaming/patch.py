@@ -547,13 +547,18 @@ def on_message_aborted(*, ctrl: Any, message_id: str) -> None:
     ctrl.on_aborted(message_id=message_id)
 
 
-async def on_session_aborted(*, session_key: str) -> bool:
+async def on_session_aborted(*, session_key: str, stop_command: bool = False) -> bool:
     """Terminate the active card after Hermes handles a busy-session /stop."""
     try:
         ctrl = get_controller()
         if not ctrl.enabled:
             return False
-        return bool(await ctrl.on_session_aborted(session_key=session_key))
+        return bool(
+            await ctrl.on_session_aborted(
+                session_key=session_key,
+                stop_command=stop_command,
+            )
+        )
     except Exception as exc:
         _logger.warning("on_session_aborted error: %s", exc, exc_info=True)
         return False

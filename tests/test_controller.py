@@ -395,6 +395,7 @@ async def test_on_session_aborted_only_stops_matching_session_key() -> None:
             chat_id="shared-chat",
             session_key="session:second",
         )
+        ctrl._sessions["first"].card_id = "card:first"
         with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True) as complete:
             assert await ctrl.on_session_aborted(session_key="session:first") is True
 
@@ -432,6 +433,50 @@ async def test_on_session_aborted_waits_for_card_creation() -> None:
         assert await waiter is True
 
     complete.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_stop_session_aborted_sets_continue_hint_only_for_explicit_stop() -> None:
+    ctrl = _setup_ctrl()
+    stop_session = _make_session("stop")
+    stop_session.session_key = "session:stop"
+    stop_session.card_id = "card:stop"
+    ctrl._sessions["stop"] = stop_session
+    ctrl._session_keys["session:stop"] = stop_session
+
+    generic_session = _make_session("generic")
+    generic_session.session_key = "session:generic"
+    generic_session.card_id = "card:generic"
+    ctrl._sessions["generic"] = generic_session
+    ctrl._session_keys["session:generic"] = generic_session
+
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True):
+        assert await ctrl.on_session_aborted(session_key="session:stop", stop_command=True) is True
+        assert await ctrl.on_session_aborted(session_key="session:generic") is True
+
+    assert stop_session.footer["stop_continue_hint"] is True
+    assert "stop_continue_hint" not in generic_session.footer
+
+
+@pytest.mark.asyncio
+async def test_stop_session_aborted_fails_open_without_card_or_on_update_failure() -> None:
+    ctrl = _setup_ctrl()
+    no_card = _make_session("no-card")
+    no_card.session_key = "session:no-card"
+    ctrl._sessions["no-card"] = no_card
+    ctrl._session_keys["session:no-card"] = no_card
+
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True) as complete:
+        assert await ctrl.on_session_aborted(session_key="session:no-card", stop_command=True) is False
+    complete.assert_not_awaited()
+
+    failed = _make_session("failed")
+    failed.session_key = "session:failed"
+    failed.card_id = "card:failed"
+    ctrl._sessions["failed"] = failed
+    ctrl._session_keys["session:failed"] = failed
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=False):
+        assert await ctrl.on_session_aborted(session_key="session:failed", stop_command=True) is False
 
 
 @pytest.mark.asyncio

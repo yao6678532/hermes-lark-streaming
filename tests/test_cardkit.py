@@ -392,7 +392,7 @@ class TestBuildToolPanel:
     @pytest.mark.parametrize(
         ("status", "elapsed_ms", "icon_color", "text_color", "label"),
         [
-            ("running", 0, "grey", "grey", "Running"),
+            ("running", 0, "grey", "wathet", "Running"),
             ("success", 50, "grey", "green", "\uff1c0.1s"),
             ("success", 99, "grey", "green", "\uff1c0.1s"),
             ("success", 100, "grey", "green", "0.1s"),
@@ -603,8 +603,23 @@ class TestBuildFooterElements:
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
-        assert self._title(result)["content"] == "🛑 Stopped"
+        assert self._title(result)["content"] == "⬛️ Stopped"
         assert self._content(result) == "Tokens ↓ 1"
+
+    def test_explicit_stop_adds_continue_hint_to_grey_detail(self) -> None:
+        result = _build_footer_elements(
+            {"stop_continue_hint": True},
+            is_aborted=True,
+            fields=[["tokens"]],
+        )
+        panel = self._panel(result)
+        assert self._content(result) == "You can continue this session."
+        assert panel["elements"][0]["i18n_content"]["zh_cn"] == "<font color='grey'>会话仍可继续。</font>"
+        assert "Stopped" not in self._content(result)
+
+    def test_generic_aborted_has_no_continue_hint(self) -> None:
+        result = _build_footer_elements({}, is_aborted=True, fields=[["tokens"]])
+        assert self._panel(result)["elements"] == []
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
@@ -712,7 +727,8 @@ class TestBuildFooterElements:
     def test_run_details_removes_border_but_keeps_padding(self) -> None:
         panel = self._panel(_build_footer_elements({"duration": 4.4, "model": "gpt-5"}))
         assert "border" not in panel
-        assert panel["padding"] == "8px 8px 8px 8px"
+        assert panel["margin"] == "-6px 0px 0px 0px"
+        assert panel["padding"] == "6px 0px 0px 0px"
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(

@@ -601,13 +601,17 @@ def _stop_hook(indent: str) -> str:
         MK_STOP,
         MK_STOP_END,
         [
+            "_lark_stop_handled = False",
             "try:",
             "    if source.platform.value.lower() in ('feishu', 'lark'):",
             "        from hermes_lark_streaming.patch import on_session_aborted",
-            "        await on_session_aborted(",
+            "        _lark_stop_handled = bool(await on_session_aborted(",
             "            session_key=locals().get('quick_key') or locals().get('_quick_key') or '',",
-            "        )",
+            "            stop_command=True,",
+            "        ))",
             *_hook_exception_lines("stop"),
+            "if _lark_stop_handled:",
+            "    return None",
         ],
     )
 

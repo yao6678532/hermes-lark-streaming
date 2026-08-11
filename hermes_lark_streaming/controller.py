@@ -538,7 +538,7 @@ class StreamCardController(StreamingController):
 
         self._complete_session(session)
 
-    async def on_session_aborted(self, *, session_key: str) -> bool:
+    async def on_session_aborted(self, *, session_key: str, stop_command: bool = False) -> bool:
         """Terminate the active card bound to a Hermes session key."""
         if not self.enabled or not session_key:
             return False
@@ -548,10 +548,12 @@ class StreamCardController(StreamingController):
 
         session.progress.clear()
         session.state = SessionState.ABORTED
+        if stop_command:
+            session.footer["stop_continue_hint"] = True
         session.flush.mark_completed()
         _logger.info("on_session_aborted: msg=%s state=ABORTED", session.message_id[:12])
 
-        return await self._complete_session_after_creation(session)
+        return await self._complete_session_after_creation(session, require_card=True)
 
     def on_interrupted(
         self,
@@ -925,8 +927,17 @@ class StreamCardController(StreamingController):
         session.flush.mark_completed()
         self._fire_and_forget(self._complete_session_after_creation(session), session._loop)
 
-    async def _complete_session_after_creation(self, session: CardSession) -> bool:
+    async def _complete_session_after_creation(
+        self,
+        session: CardSession,
+        *,
+        require_card: bool = False,
+    ) -> bool:
         if not await self._wait_for_card_creation(session):
+            self._cleanup_session(session)
+            return False
+        if require_card and not session.card_id:
+            _logger.info("card completion skipped: no active card msg=%s", session.message_id[:12])
             self._cleanup_session(session)
             return False
         return await self._complete_session_wait(session)
