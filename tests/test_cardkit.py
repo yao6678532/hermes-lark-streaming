@@ -357,6 +357,8 @@ class TestBuildToolPanel:
         assert panel["element_id"] == TOOL_PANEL_ELEMENT_ID
         assert panel["header"]["title"]["tag"] == "plain_text"
         assert "Tool use" in panel["header"]["title"]["content"]
+        assert panel["border"] == {"color": "grey", "corner_radius": "5px"}
+        assert panel["padding"] == "8px 8px 8px 8px"
 
     def test_with_steps(self) -> None:
         panel = _build_tool_panel([_STEP_SUCCESS], elapsed_ms=500)
@@ -707,6 +709,11 @@ class TestBuildFooterElements:
         assert "text_color" not in panel["header"]["title"]
         assert "text_color" not in detail
 
+    def test_run_details_removes_border_but_keeps_padding(self) -> None:
+        panel = self._panel(_build_footer_elements({"duration": 4.4, "model": "gpt-5"}))
+        assert "border" not in panel
+        assert panel["padding"] == "8px 8px 8px 8px"
+
     def test_show_label(self) -> None:
         result = _build_footer_elements(
             {"duration": 5},
@@ -853,6 +860,8 @@ class TestBuildReasoningPanel:
         assert title["tag"] == "plain_text"
         assert title["text_color"] == "grey"
         assert title["text_size"] == "notation"
+        assert panel["border"] == {"color": "grey", "corner_radius": "5px"}
+        assert panel["padding"] == "8px 8px 8px 8px"
 
     def test_empty_text_shows_thinking_title(self) -> None:
         panel = _build_reasoning_panel(" ")

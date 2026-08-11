@@ -33,6 +33,7 @@ def _collapsible_panel(
     elements: list[dict],
     vertical_spacing: str = "4px",
     icon_position: str = "right",
+    show_border: bool = True,
 ) -> dict:
     icon_el = {
         "tag": "standard_icon",
@@ -41,7 +42,7 @@ def _collapsible_panel(
     }
     if icon_position == "right":
         icon_el["color"] = "grey"
-    return {
+    panel = {
         "tag": "collapsible_panel",
         "expanded": expanded,
         "header": {
@@ -51,11 +52,13 @@ def _collapsible_panel(
             "icon_position": icon_position,
             "icon_expanded_angle": -180,
         },
-        "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": vertical_spacing,
         "padding": "8px 8px 8px 8px",
         "elements": elements,
     }
+    if show_border:
+        panel["border"] = {"color": "grey", "corner_radius": "5px"}
+    return panel
 
 
 def _streaming_element(
@@ -440,6 +443,7 @@ def _build_run_details_elements(
             "text_size": text_size,
         },
         elements=detail_elements,
+        show_border=False,
     )
     return [{"tag": "hr"}, panel]
 
