@@ -844,14 +844,47 @@ class TestBuildFooterElements:
         spec = chart["chart_spec"]
         assert circle_column["width"] == "28px"
         assert chart["height"] == "28px"
-        assert spec["radius"] == 0.81
+        assert spec["type"] == "circularProgress"
+        assert spec["data"]["values"] == [{"type": "metric", "value": pytest.approx(19700 / 272000)}]
+        assert spec["categoryField"] == "type"
+        assert spec["valueField"] == "value"
+        assert spec["outerRadius"] == 0.81
         assert spec["innerRadius"] == 0.51
         assert spec["cornerRadius"] == 5
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
         assert spec["padding"] == 0
         assert spec["preview"] is False
+        assert "angleField" not in spec
+        assert "colorField" not in spec
         assert "hover" not in spec
+
+    @pytest.mark.parametrize(
+        ("data", "expected_fraction"),
+        [
+            (
+                {"gpt_quota_remaining": "<font color='green'>97%</font>"},
+                0.97,
+            ),
+            (
+                {
+                    "cache_read_tokens": 52_300,
+                    "cache_prompt_tokens": 70_500,
+                },
+                52_300 / 70_500,
+            ),
+        ],
+    )
+    def test_percentage_chart_uses_metric_fraction_for_quota_and_cache(
+        self,
+        data: dict,
+        expected_fraction: float,
+    ) -> None:
+        fields = [["gpt_quota"]] if "gpt_quota_remaining" in data else [["cache"]]
+        result = _build_footer_elements(data, fields=fields)
+        chart = self._percentage_rows(result)[0]["columns"][0]["elements"][0]
+        values = chart["chart_spec"]["data"]["values"]
+        assert values == [{"type": "metric", "value": pytest.approx(expected_fraction)}]
 
     def test_tokens_and_cache_use_two_columns_when_cache_not_promoted(self) -> None:
         result = _build_footer_elements(
