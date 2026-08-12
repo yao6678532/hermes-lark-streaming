@@ -33,6 +33,7 @@ _DEFAULT_RUN_DETAILS_FIELDS = [[
     "reasoning",
     "balance",
 ]]
+_RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
 
 
 def _collapsible_panel(
@@ -385,7 +386,7 @@ def _build_run_details_elements(
     text_size: str = "notation",
 ) -> list[dict]:
     """Build the collapsed terminal Run Details panel from footer metadata."""
-    fields_are_default = fields is None or fields == _DEFAULT_RUN_DETAILS_FIELDS
+    fields_are_default = _run_details_fields_are_default(fields)
     if fields is None:
         fields = [row.copy() for row in _DEFAULT_RUN_DETAILS_FIELDS]
 
@@ -430,8 +431,7 @@ def _build_run_details_elements(
                 )
             )
 
-    en_lines: list[str] = []
-    zh_lines: list[str] = []
+    detail_fields: list[tuple[str, str]] = []
     rendered_fields: set[str] = set()
     for row in fields:
         for field in row:
@@ -444,36 +444,34 @@ def _build_run_details_elements(
             en, zh = _render_run_details_field(field, data, is_error, is_aborted)
             if en:
                 label_en, label_zh = _footer_field_label(field)
-                en_lines.append(f"{label_en} {en}" if label_en else en)
-                zh_lines.append(f"{label_zh} {zh}" if label_zh and zh else (zh or en))
+                detail_fields.append(
+                    (
+                        f"{label_en} {en}" if label_en else en,
+                        f"{label_zh} {zh}" if label_zh and zh else (zh or en),
+                    )
+                )
 
+    detail_elements: list[dict] = visual_elements
+    detail_elements.extend(
+        _build_run_details_detail_rows(
+            detail_fields,
+            text_size=text_size,
+            is_error=is_error,
+        )
+    )
     if is_aborted and data.get("stop_continue_hint") is True:
         en_hint, zh_hint = _T["stop_continue"]
-        en_lines.append(en_hint)
-        zh_lines.append(zh_hint)
+        detail_elements.append(
+            _build_run_details_detail_text(
+                en_hint,
+                zh_hint,
+                text_size=text_size,
+                is_error=False,
+            )
+        )
 
     title_en = _run_details_black_text(_join_compact_footer_parts(summary_parts_en))
     title_zh = _run_details_black_text(_join_compact_footer_parts(summary_parts_zh))
-    detail_elements: list[dict] = visual_elements
-    if en_lines:
-        en_content = "\n".join(en_lines)
-        zh_content = "\n".join(zh_lines)
-        if is_error:
-            en_content = f"<font color='red'>{en_content}</font>"
-            zh_content = f"<font color='red'>{zh_content}</font>"
-        detail_elements.append(
-            {
-                "tag": "markdown",
-                "content": _run_details_grey_text(en_content),
-                "i18n_content": _i18n(
-                    _run_details_grey_text(en_content),
-                    _run_details_grey_text(zh_content),
-                ),
-                "text_align": "left",
-                "text_size": text_size,
-                "margin": "0px 0px 0px 0px",
-            }
-        )
 
     panel = _collapsible_panel(
         expanded=False,
@@ -492,6 +490,16 @@ def _build_run_details_elements(
     panel["margin"] = "-6px 0px 0px 0px"
     panel["padding"] = "6px 0px 0px 0px"
     return [{"tag": "hr"}, panel]
+
+
+def _run_details_fields_are_default(fields: list[list[str]] | None) -> bool:
+    if fields is None:
+        return True
+    detail_rows = [
+        [field for field in row if field not in _RUN_DETAILS_SUMMARY_ONLY_FIELDS]
+        for row in fields
+    ]
+    return [row for row in detail_rows if row] == _DEFAULT_RUN_DETAILS_FIELDS
 
 
 def _metric_number(value: object) -> float | None:
@@ -674,6 +682,66 @@ def _build_run_details_tokens_cache_row(
         "padding": "0px",
         "margin": "0px",
     }
+
+
+def _build_run_details_detail_text(
+    en: str,
+    zh: str,
+    *,
+    text_size: str,
+    is_error: bool,
+) -> dict[str, Any]:
+    if is_error:
+        en = f"<font color='red'>{en}</font>"
+        zh = f"<font color='red'>{zh}</font>"
+    en = _run_details_grey_text(en)
+    zh = _run_details_grey_text(zh)
+    return {
+        "tag": "markdown",
+        "content": en,
+        "i18n_content": _i18n(en, zh),
+        "text_align": "left",
+        "text_size": text_size,
+        "margin": "0px",
+    }
+
+
+def _build_run_details_detail_rows(
+    fields: list[tuple[str, str]],
+    *,
+    text_size: str,
+    is_error: bool,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for offset in range(0, len(fields), 2):
+        pair = fields[offset : offset + 2]
+        columns = [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "0px",
+                "elements": [
+                    _build_run_details_detail_text(
+                        en,
+                        zh,
+                        text_size=text_size,
+                        is_error=is_error,
+                    )
+                ],
+            }
+            for en, zh in pair
+        ]
+        rows.append(
+            {
+                "tag": "column_set",
+                "columns": columns,
+                "horizontal_spacing": "12px",
+                "padding": "0px",
+                "margin": "0px",
+            }
+        )
+    return rows
 
 
 def _run_details_grey_text(content: str) -> str:

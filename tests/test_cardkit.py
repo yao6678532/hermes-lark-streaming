@@ -512,6 +512,16 @@ class TestBuildFooterElements:
             )
         ]
 
+    @classmethod
+    def _markdown_elements(cls, result: list[dict]) -> list[dict]:
+        return [
+            child
+            for row in cls._panel(result)["elements"]
+            for column in row.get("columns", [])
+            for child in column.get("elements", [])
+            if child.get("tag") == "markdown"
+        ]
+
     def test_empty_data_renders_default_status(self) -> None:
         # 默认字段只包含额外 metadata；状态由 compact summary 展示。
         result = _build_footer_elements({})
@@ -617,9 +627,10 @@ class TestBuildFooterElements:
         result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
         assert self._title(result)["content"] == "❌ Error"
         assert self._content(result) == "<font color='red'>Tokens ↑ 1</font>"
-        assert "<font color='grey'><font color='red'>" not in self._panel(result)["elements"][0][
-            "content"
-        ]
+        assert all(
+            "<font color='grey'><font color='red'>" not in element["content"]
+            for element in self._markdown_elements(result)
+        )
 
     def test_status_aborted(self) -> None:
         result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
@@ -718,7 +729,7 @@ class TestBuildFooterElements:
         assert self._content(shown) == "Reasoning 1.6K"
         assert self._panel(hidden)["elements"] == []
 
-    def test_detail_fields_are_vertical_and_share_footer_style(self) -> None:
+    def test_detail_fields_use_two_columns_and_share_footer_style(self) -> None:
         result = _build_footer_elements(
             {
                 "input_tokens": 1000,
@@ -745,9 +756,21 @@ class TestBuildFooterElements:
         )
         assert not panel["header"]["title"]["content"].startswith("<font color='grey'>")
         assert any(
-            element.get("tag") == "markdown" and element.get("content", "").startswith("<font color='grey'>")
-            for element in panel["elements"]
+            element.get("content", "").startswith("<font color='grey'>")
+            for element in self._markdown_elements(result)
         )
+        detail_rows = [
+            element
+            for element in panel["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert len(detail_rows[-1]["columns"]) == 2
+        assert detail_rows[-1]["horizontal_spacing"] == "12px"
         assert "text_color" not in panel["header"]["title"]
         assert "text_color" not in detail
 
@@ -844,6 +867,61 @@ class TestBuildFooterElements:
             if column["elements"][0].get("tag") == "chart"
         ]
         assert values == [pytest.approx(0.97), pytest.approx(19700 / 272000)]
+
+    def test_assistant_profile_fields_promote_quota_and_use_two_column_details(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>97%</font>",
+                "gpt_quota_reset_at": "2026-08-18T00:42:00+00:00",
+                "context_used": 19800,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+                "balance": "¥4.97",
+            },
+            fields=[[
+                "status",
+                "tokens",
+                "context",
+                "quota_reset",
+                "cache",
+                "reasoning",
+                "balance",
+            ]],
+        )
+        panel = self._panel(result)
+        percentage_row = self._percentage_rows(result)[0]
+        assert len(percentage_row["columns"]) == 4
+        values = [
+            column["elements"][0]["chart_spec"]["data"]["values"][0]["value"]
+            for column in percentage_row["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert values == [pytest.approx(0.97), pytest.approx(19800 / 272000)]
+        content = self._content(result)
+        assert "GPT remaining 97%" in content
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Reasoning 3.6K" in content
+        assert "Balance ¥4.97" in content
+        ordinary_rows = [
+            element
+            for element in panel["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert [len(row["columns"]) for row in ordinary_rows] == [2, 2]
+        assert "Tokens" in str(ordinary_rows[0])
+        assert "Cache hit" in str(ordinary_rows[0])
+        assert "Reasoning" in str(ordinary_rows[1])
+        assert "Balance" in str(ordinary_rows[1])
 
     def test_cache_without_valid_denominator_is_not_promoted(self) -> None:
         result = _build_footer_elements(
@@ -1029,8 +1107,8 @@ class TestBuildFooterElements:
         assert "Model" not in content
         assert "GPT Quota" not in content
         assert any(
-            element.get("tag") == "markdown" and element.get("content", "").startswith("<font color='grey'>")
-            for element in self._panel(result)["elements"]
+            element.get("content", "").startswith("<font color='grey'>")
+            for element in self._markdown_elements(result)
         )
         assert all(
             element.get("text_size") == "notation"
