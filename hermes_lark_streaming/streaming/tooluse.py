@@ -309,16 +309,21 @@ def tool_detail_for_display(
 
 
 _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
-    {"aliases": ["skill"], "icon": "setting-inter_outlined", "title": "Load skill", "sanitizer": None},
     {
-        "aliases": ["read", "open"],
+        "aliases": ["skill", "skills_list", "skill_view", "skill_manage"],
+        "icon": "setting-inter_outlined",
+        "title": "Load skill",
+        "sanitizer": None,
+    },
+    {
+        "aliases": ["read", "open", "read_file"],
         "icon": "file-link-text_outlined",
         "title": "Read",
         "sanitizer": "path",
         "no_result": True,
     },
     {
-        "aliases": ["write", "edit"],
+        "aliases": ["write", "edit", "write_file", "patch"],
         "icon": "edit_outlined",
         "title": "Edit",
         "sanitizer": "path",
@@ -331,14 +336,24 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
         "sanitizer": "search",
     },
     {
-        "aliases": ["web_fetch", "web-fetch", "fetch"],
+        "aliases": ["web_fetch", "web-fetch", "web_extract", "fetch"],
         "icon": "language_outlined",
         "title": "Fetch web page",
         "sanitizer": "url",
         "no_result": True,
     },
-    {"aliases": ["grep"], "icon": "doc-search_outlined", "title": "Search text", "sanitizer": "search"},
-    {"aliases": ["glob"], "icon": "folder_outlined", "title": "Search files", "sanitizer": "path"},
+    {
+        "aliases": ["grep", "session_search"],
+        "icon": "doc-search_outlined",
+        "title": "Search text",
+        "sanitizer": "search",
+    },
+    {
+        "aliases": ["glob", "search_files"],
+        "icon": "folder_outlined",
+        "title": "Search files",
+        "sanitizer": "path",
+    },
     {
         "aliases": ["exec", "bash", "command", "run"],
         "icon": "platform_outlined",
@@ -346,7 +361,7 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
         "sanitizer": "command",
     },
     {
-        "aliases": ["terminal"],
+        "aliases": ["terminal", "process", "execute_code"],
         "icon": "platform_outlined",
         "title": "Terminal",
         "sanitizer": "command",
@@ -357,8 +372,11 @@ _TOOL_DESCRIPTORS: list[dict[str, Any]] = [
         "title": "Browser",
         "no_result": True,
     },
-    {"aliases": ["agent", "task", "spawn"], "icon": "robot_outlined", "title": "Run sub-agent"},
+    {"aliases": ["agent", "task", "spawn", "delegate_task"], "icon": "robot_outlined", "title": "Run sub-agent"},
     {"aliases": ["check", "determine", "verify"], "icon": "list-check_outlined", "title": "Check"},
+    {"aliases": ["todo"], "icon": "list-check_outlined", "title": "Todo"},
+    {"aliases": ["memory"], "icon": "database_outlined", "title": "Memory"},
+    {"aliases": ["vision_analyze"], "icon": "image-ai_outlined", "title": "Analyze image"},
     {"aliases": ["summarize", "analyze", "prepare"], "icon": "report_outlined", "title": "Analyze"},
     {"aliases": ["clarify"], "icon": "chat_outlined", "title": "Clarify", "no_result": True},
 ]
@@ -368,10 +386,17 @@ def _resolve_tool_descriptor(name: str | None) -> dict[str, Any] | None:
     if not name:
         return None
     normalized = name.strip().lower().replace("-", "_")
-    for desc in _TOOL_DESCRIPTORS:
-        for alias in desc["aliases"]:
-            if normalized == alias or normalized.startswith(f"{alias}_"):
-                return desc
+    normalized_aliases = [
+        (desc, alias.replace("-", "_").lower())
+        for desc in _TOOL_DESCRIPTORS
+        for alias in desc["aliases"]
+    ]
+    for desc, alias in normalized_aliases:
+        if normalized == alias:
+            return desc
+    for desc, alias in normalized_aliases:
+        if normalized.startswith(f"{alias}_"):
+            return desc
     return None
 
 
@@ -519,7 +544,7 @@ class ToolUseTracker:
                     "detail": detail,
                     "output": s.output,
                     "error": s.error,
-                    "icon": desc["icon"] if desc else "setting-inter_outlined",
+                    "icon": desc["icon"] if desc else "setting_outlined",
                     "elapsed_ms": s.elapsed_ms,
                     "result_block": None if (desc and desc.get("no_result")) else s.result_block,
                     "error_block": s.error_block,
