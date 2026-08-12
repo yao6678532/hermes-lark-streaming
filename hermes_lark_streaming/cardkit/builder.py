@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 from datetime import UTC, datetime
 from typing import Any
@@ -376,6 +377,7 @@ def _build_run_details_elements(
     text_size: str = "notation",
 ) -> list[dict]:
     """Build the collapsed terminal Run Details panel from footer metadata."""
+    fields_was_default = fields is None
     if fields is None:
         fields = [["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]]
 
@@ -391,12 +393,41 @@ def _build_run_details_elements(
         is_aborted=is_aborted,
     )
 
+    visible_fields = {field for row in fields for field in row}
+    percentage_metrics = _build_run_details_percentage_metrics(
+        data,
+        visible_fields=visible_fields,
+        quota_allowed=fields_was_default or "gpt_quota" in visible_fields,
+    )
+    promoted_fields = {
+        field
+        for metric in percentage_metrics
+        for field in metric["fields"]
+    }
+    consumed_fields = set(promoted_fields)
+    visual_elements: list[dict] = []
+    if percentage_metrics:
+        visual_elements.append(_build_run_details_percentage_row(percentage_metrics, text_size=text_size))
+
+    if "cache" not in promoted_fields and "cache" in visible_fields and "tokens" in visible_fields:
+        cache_metric = _build_run_details_cache_metric(data)
+        token_text = _render_run_details_field("tokens", data, is_error, is_aborted)
+        if cache_metric is not None and token_text[0]:
+            consumed_fields.update({"tokens", "cache"})
+            visual_elements.append(
+                _build_run_details_tokens_cache_row(
+                    token_text,
+                    cache_metric,
+                    text_size=text_size,
+                )
+            )
+
     en_lines: list[str] = []
     zh_lines: list[str] = []
     rendered_fields: set[str] = set()
     for row in fields:
         for field in row:
-            if field in summary_fields or field in rendered_fields:
+            if field in summary_fields or field in rendered_fields or field in consumed_fields:
                 continue
             rendered_fields.add(field)
             # Run Details always uses explicit field labels.  Keep
@@ -415,7 +446,7 @@ def _build_run_details_elements(
 
     title_en = _run_details_black_text(_join_compact_footer_parts(summary_parts_en))
     title_zh = _run_details_black_text(_join_compact_footer_parts(summary_parts_zh))
-    detail_elements: list[dict] = []
+    detail_elements: list[dict] = visual_elements
     if en_lines:
         en_content = "\n".join(en_lines)
         zh_content = "\n".join(zh_lines)
@@ -453,6 +484,181 @@ def _build_run_details_elements(
     panel["margin"] = "-6px 0px 0px 0px"
     panel["padding"] = "6px 0px 0px 0px"
     return [{"tag": "hr"}, panel]
+
+
+def _metric_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _format_metric_percent(value: float) -> str:
+    return str(round(max(0.0, min(100.0, value))))
+
+
+def _build_run_details_cache_metric(data: dict) -> dict[str, Any] | None:
+    numerator = _metric_number(data.get("cache_read_tokens"))
+    denominator = _metric_number(data.get("cache_prompt_tokens"))
+    if denominator is None or denominator <= 0:
+        denominator = _metric_number(data.get("input_tokens"))
+    if numerator is None or numerator < 0 or denominator is None or denominator <= 0:
+        return None
+    fraction = max(0.0, min(1.0, numerator / denominator))
+    percentage = _format_metric_percent(fraction * 100)
+    return {
+        "key": "cache",
+        "fields": {"cache"},
+        "fraction": fraction,
+        "primary_en": f"Cache hit {percentage}%",
+        "primary_zh": f"缓存命中 {percentage}%",
+        "secondary_en": f"{_compact(int(numerator))} / {_compact(int(denominator))}",
+        "secondary_zh": f"{_compact(int(numerator))} / {_compact(int(denominator))}",
+    }
+
+
+def _build_run_details_percentage_metrics(
+    data: dict,
+    *,
+    visible_fields: set[str],
+    quota_allowed: bool,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    quota_text = data.get("gpt_quota_remaining")
+    quota_match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(quota_text or ""))
+    if quota_match and quota_allowed:
+        remaining = _metric_number(float(quota_match.group(1)))
+        if remaining is not None:
+            reset_en, reset_zh = (None, None)
+            if "quota_reset" in visible_fields:
+                reset_en, reset_zh = _format_quota_reset_at(data.get("gpt_quota_reset_at"))
+            candidates.append(
+                {
+                    "key": "gpt_quota",
+                    "fields": {"gpt_quota", "quota_reset"} if "quota_reset" in visible_fields else {"gpt_quota"},
+                    "fraction": max(0.0, min(1.0, remaining / 100)),
+                    "primary_en": f"GPT remaining {_format_metric_percent(remaining)}%",
+                    "primary_zh": f"GPT 剩余 {_format_metric_percent(remaining)}%",
+                    "secondary_en": f"Reset {reset_en}" if reset_en else None,
+                    "secondary_zh": f"重置 {reset_zh}" if reset_zh else None,
+                }
+            )
+
+    used = _metric_number(data.get("context_used"))
+    maximum = _metric_number(data.get("context_max"))
+    if "context" in visible_fields and used is not None and maximum is not None and maximum > 0:
+        fraction = max(0.0, min(1.0, used / maximum))
+        candidates.append(
+            {
+                "key": "context",
+                "fields": {"context"},
+                "fraction": fraction,
+                "primary_en": f"Context used {_format_metric_percent(fraction * 100)}%",
+                "primary_zh": f"上下文已用 {_format_metric_percent(fraction * 100)}%",
+                "secondary_en": f"{_compact(int(used))} / {_compact(int(maximum))}",
+                "secondary_zh": f"{_compact(int(used))} / {_compact(int(maximum))}",
+            }
+        )
+
+    if "cache" in visible_fields:
+        cache_metric = _build_run_details_cache_metric(data)
+        if cache_metric is not None:
+            candidates.append(cache_metric)
+    return candidates[:2]
+
+
+def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
+    fraction = float(metric["fraction"])
+    return {
+        "tag": "chart",
+        "height": "28px",
+        "chart_spec": {
+            "type": "circularProgress",
+            "data": {"values": [{"type": "used", "value": fraction}, {"type": "remaining", "value": 1 - fraction}]},
+            "angleField": "value",
+            "colorField": "type",
+            "radius": 0.81,
+            "innerRadius": 0.51,
+            "cornerRadius": 5,
+            "indicator": {"visible": False},
+            "legends": {"visible": False},
+            "padding": 0,
+            "preview": False,
+        },
+    }
+
+
+def _build_run_details_metric_text(metric: dict[str, Any], *, text_size: str) -> dict[str, Any]:
+    secondary_en = metric.get("secondary_en")
+    secondary_zh = metric.get("secondary_zh")
+    en = f"<font color='grey'>{metric['primary_en']}</font>"
+    zh = f"<font color='grey'>{metric['primary_zh']}</font>"
+    if secondary_en:
+        en += f"\n<font color='grey'>{secondary_en}</font>"
+    if secondary_zh:
+        zh += f"\n<font color='grey'>{secondary_zh}</font>"
+    return {
+        "tag": "markdown",
+        "content": en,
+        "i18n_content": _i18n(en, zh),
+        "text_size": text_size,
+        "text_align": "left",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_percentage_row(metrics: list[dict[str, Any]], *, text_size: str) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for metric in metrics:
+        columns.extend(
+            [
+                {"tag": "column", "width": "28px", "padding": "0px", "elements": [_build_run_details_circle(metric)]},
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "padding": "0px",
+                    "elements": [_build_run_details_metric_text(metric, text_size=text_size)],
+                },
+            ]
+        )
+    return {
+        "tag": "column_set",
+        "columns": columns,
+        "horizontal_spacing": "6px",
+        "padding": "0px",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_tokens_cache_row(
+    token_text: tuple[str | None, str | None],
+    cache_metric: dict[str, Any],
+    *,
+    text_size: str,
+) -> dict[str, Any]:
+    token_en, token_zh = token_text
+    cache_text = _build_run_details_metric_text(cache_metric, text_size=text_size)
+    token_en = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_en}</font>"
+    token_zh = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_zh or token_en}</font>"
+    token_element = {
+        "tag": "markdown",
+        "content": token_en,
+        "i18n_content": _i18n(token_en, token_zh),
+        "text_size": text_size,
+        "text_align": "left",
+        "margin": "0px",
+    }
+    return {
+        "tag": "column_set",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [token_element]},
+            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [cache_text]},
+        ],
+        "horizontal_spacing": "12px",
+        "padding": "0px",
+        "margin": "0px",
+    }
 
 
 def _run_details_grey_text(content: str) -> str:

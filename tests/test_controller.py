@@ -43,6 +43,22 @@ def _run_details_panel(card: dict) -> dict:
     )
 
 
+def _run_details_text(panel: dict) -> str:
+    """Collect markdown from both ordinary and visual Run Details rows."""
+    parts: list[str] = []
+
+    def visit(element: dict) -> None:
+        if element.get("tag") == "markdown":
+            parts.append(element.get("content", ""))
+        for column in element.get("columns", []):
+            for child in column.get("elements", []):
+                visit(child)
+
+    for element in panel.get("elements", []):
+        visit(element)
+    return "\n".join(parts)
+
+
 def _enable(ctrl: StreamCardController) -> None:
     ctrl._cfg._raw = {
         "streaming": {"enabled": True},
@@ -1186,8 +1202,8 @@ class TestDoCreateCard:
         assert "commentaryfinal answer" in body_text
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
-        details_text = details["elements"][0]["content"]
-        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_applies_width_mode_to_streaming_card(self) -> None:
@@ -2395,8 +2411,8 @@ class TestMergedReasoning:
             assert text in body_text
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
-        details_text = details["elements"][0]["content"]
-        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
@@ -2506,8 +2522,8 @@ class TestMergedReasoning:
         assert final_reasoning_panels[0]["elements"][0]["content"] == "Confirming"
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
-        details_text = details["elements"][0]["content"]
-        assert details_text == "<font color='grey'>Context 50.0K / 200.0K · 25%</font>"
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_chat_completions_reasoning_deltas_append_in_merged_presentation(self) -> None:
