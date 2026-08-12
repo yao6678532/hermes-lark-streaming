@@ -24,6 +24,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _format_quota_reset_at,
     _format_tool_elapsed,
     _longest_backtick_run,
+    _run_details_metric_color,
     build_complete_card,
     build_streaming_card_v2,
 )
@@ -957,6 +958,12 @@ class TestBuildFooterElements:
         assert spec["outerRadius"] == 0.81
         assert spec["innerRadius"] == 0.51
         assert spec["cornerRadius"] == 5
+        assert spec["progress"]["style"]["fill"] == {
+            "type": "threshold",
+            "field": "value",
+            "domain": [0.5, 0.8],
+            "range": ["green", "orange", "red"],
+        }
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
         assert spec["padding"] == 0
@@ -969,11 +976,64 @@ class TestBuildFooterElements:
         assert text_column["vertical_align"] == "center"
 
     @pytest.mark.parametrize(
-        ("data", "expected_fraction"),
+        ("percentage", "expected"),
+        [
+            (100, "green"),
+            (50, "green"),
+            (49, "orange"),
+            (20, "orange"),
+            (19, "red"),
+            (0, "red"),
+        ],
+    )
+    def test_gpt_quota_circle_uses_remaining_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("gpt_quota", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("percentage", "expected"),
+        [
+            (0, "green"),
+            (49, "green"),
+            (50, "orange"),
+            (79, "orange"),
+            (80, "red"),
+            (100, "red"),
+        ],
+    )
+    def test_context_circle_uses_used_risk_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("context", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("percentage", "expected"),
+        [(0, "blue"), (79, "blue"), (80, "green"), (100, "green")],
+    )
+    def test_cache_circle_uses_neutral_success_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("cache", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("data", "expected_fraction", "expected_fill"),
         [
             (
                 {"gpt_quota_remaining": "<font color='green'>97%</font>"},
                 0.97,
+                {
+                    "type": "threshold",
+                    "field": "value",
+                    "domain": [0.2, 0.5],
+                    "range": ["red", "orange", "green"],
+                },
             ),
             (
                 {
@@ -981,6 +1041,12 @@ class TestBuildFooterElements:
                     "cache_prompt_tokens": 70_500,
                 },
                 52_300 / 70_500,
+                {
+                    "type": "threshold",
+                    "field": "value",
+                    "domain": [0.8],
+                    "range": ["blue", "green"],
+                },
             ),
         ],
     )
@@ -988,12 +1054,14 @@ class TestBuildFooterElements:
         self,
         data: dict,
         expected_fraction: float,
+        expected_fill: dict,
     ) -> None:
         fields = [["gpt_quota"]] if "gpt_quota_remaining" in data else [["cache"]]
         result = _build_footer_elements(data, fields=fields)
         chart = self._percentage_rows(result)[0]["columns"][0]["elements"][0]
         values = chart["chart_spec"]["data"]["values"]
         assert values == [{"type": "metric", "value": pytest.approx(expected_fraction)}]
+        assert chart["chart_spec"]["progress"]["style"]["fill"] == expected_fill
 
     def test_tokens_and_cache_use_two_columns_when_cache_not_promoted(self) -> None:
         result = _build_footer_elements(

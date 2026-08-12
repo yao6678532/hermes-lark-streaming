@@ -8,6 +8,10 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from ..quota import (
+    GPT_QUOTA_HEALTHY_REMAINING_PERCENT,
+    GPT_QUOTA_WARNING_REMAINING_PERCENT,
+)
 from ..streaming.progress import ProgressSnapshot
 from ..streaming.segments import Segment, SegmentType
 from ..streaming.tooluse import ToolDisplayStep, tool_detail_for_display
@@ -34,6 +38,17 @@ _DEFAULT_RUN_DETAILS_FIELDS = [[
     "balance",
 ]]
 _RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
+_RUN_DETAILS_METRIC_COLOR_POLICIES = {
+    "gpt_quota": (
+        (
+            GPT_QUOTA_WARNING_REMAINING_PERCENT / 100,
+            GPT_QUOTA_HEALTHY_REMAINING_PERCENT / 100,
+        ),
+        ("red", "orange", "green"),
+    ),
+    "context": ((0.5, 0.8), ("green", "orange", "red")),
+    "cache": ((0.8,), ("blue", "green")),
+}
 
 
 def _collapsible_panel(
@@ -597,11 +612,40 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
             "outerRadius": 0.81,
             "innerRadius": 0.51,
             "cornerRadius": 5,
+            "progress": {
+                "style": {
+                    "fill": _run_details_metric_fill(metric["key"]),
+                }
+            },
             "indicator": {"visible": False},
             "legends": {"visible": False},
             "padding": 0,
         },
     }
+
+
+def _run_details_metric_fill(metric_key: str) -> dict[str, Any]:
+    """Build the VChart threshold mapping for one metric's semantics."""
+    domain, colors = _RUN_DETAILS_METRIC_COLOR_POLICIES.get(
+        metric_key,
+        ((), ("blue",)),
+    )
+    return {
+        "type": "threshold",
+        "field": "value",
+        "domain": list(domain),
+        "range": list(colors),
+    }
+
+
+def _run_details_metric_color(metric_key: str, fraction: float) -> str:
+    """Resolve a metric color for tests and non-VChart semantic consumers."""
+    domain, colors = _RUN_DETAILS_METRIC_COLOR_POLICIES.get(
+        metric_key,
+        ((), ("blue",)),
+    )
+    index = sum(fraction >= threshold for threshold in domain)
+    return colors[index]
 
 
 def _build_run_details_metric_text(metric: dict[str, Any], *, text_size: str) -> dict[str, Any]:

@@ -23,6 +23,7 @@ from .interactions.clarify import (
     send_clarify_card,
 )
 from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
+from .quota import _quota_color
 from .streaming.controller import StreamingController
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
@@ -30,15 +31,6 @@ from .streaming.text import strip_reasoning_tags
 
 _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
-
-
-def _quota_color(remaining: int) -> str:
-    if remaining >= 50:
-        return "green"
-    if remaining >= 20:
-        return "orange"
-    return "red"
-
 
 def _weekly_quota_window(rate_limit: object) -> dict[str, Any] | None:
     """Select the structured seven-day quota window, independent of names."""

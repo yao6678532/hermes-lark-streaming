@@ -177,7 +177,14 @@ def test_missing_weekly_quota_window_is_fail_open() -> None:
 
 @pytest.mark.parametrize(
     ("remaining", "expected"),
-    [(95, "green"), (50, "green"), (49, "orange"), (20, "orange"), (19, "red")],
+    [
+        (100, "green"),
+        (50, "green"),
+        (49, "orange"),
+        (20, "orange"),
+        (19, "red"),
+        (0, "red"),
+    ],
 )
 def test_quota_color_thresholds(remaining: int, expected: str) -> None:
     assert controller_module._quota_color(remaining) == expected
