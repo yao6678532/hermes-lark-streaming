@@ -818,6 +818,33 @@ class TestBuildFooterElements:
         assert "Context used 7%" in content
         assert "GPT remaining" not in content
 
+    def test_runtime_default_fields_promote_quota_and_context(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>97%</font>",
+                "gpt_quota_reset_at": "2026-08-18T00:42:00+00:00",
+                "context_used": 19700,
+                "context_max": 272000,
+            },
+            fields=[[
+                "tokens", "context", "quota_reset", "cache", "reasoning", "balance"
+            ]],
+        )
+        rows = self._percentage_rows(result)
+        assert len(rows) == 1
+        assert len(rows[0]["columns"]) == 4
+        content = self._content(result)
+        assert "GPT remaining 97%" in content
+        assert "Context used 7%" in content
+        assert "Reset " in content
+        assert all(column["vertical_align"] == "center" for column in rows[0]["columns"])
+        values = [
+            column["elements"][0]["chart_spec"]["data"]["values"][0]["value"]
+            for column in rows[0]["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert values == [pytest.approx(0.97), pytest.approx(19700 / 272000)]
+
     def test_cache_without_valid_denominator_is_not_promoted(self) -> None:
         result = _build_footer_elements(
             {"cache_read_tokens": 18900, "cache_prompt_tokens": 0},
@@ -844,6 +871,7 @@ class TestBuildFooterElements:
         spec = chart["chart_spec"]
         assert circle_column["width"] == "28px"
         assert chart["height"] == "28px"
+        assert chart["preview"] is False
         assert spec["type"] == "circularProgress"
         assert spec["data"]["values"] == [{"type": "metric", "value": pytest.approx(19700 / 272000)}]
         assert spec["categoryField"] == "type"
@@ -854,10 +882,13 @@ class TestBuildFooterElements:
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
         assert spec["padding"] == 0
-        assert spec["preview"] is False
+        assert "preview" not in spec
         assert "angleField" not in spec
         assert "colorField" not in spec
         assert "hover" not in spec
+        text_column = row["columns"][1]
+        assert circle_column["vertical_align"] == "center"
+        assert text_column["vertical_align"] == "center"
 
     @pytest.mark.parametrize(
         ("data", "expected_fraction"),

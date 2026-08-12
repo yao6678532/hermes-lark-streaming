@@ -25,6 +25,14 @@ TOOL_PANEL_ELEMENT_ID = "tool_panel"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 _logger = logging.getLogger("hermes_lark_streaming.cardkit")
+_DEFAULT_RUN_DETAILS_FIELDS = [[
+    "tokens",
+    "context",
+    "quota_reset",
+    "cache",
+    "reasoning",
+    "balance",
+]]
 
 
 def _collapsible_panel(
@@ -377,9 +385,9 @@ def _build_run_details_elements(
     text_size: str = "notation",
 ) -> list[dict]:
     """Build the collapsed terminal Run Details panel from footer metadata."""
-    fields_was_default = fields is None
+    fields_are_default = fields is None or fields == _DEFAULT_RUN_DETAILS_FIELDS
     if fields is None:
-        fields = [["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]]
+        fields = [row.copy() for row in _DEFAULT_RUN_DETAILS_FIELDS]
 
     data = footer_data or {}
     summary_parts_en, summary_parts_zh = _build_footer_summary(
@@ -397,7 +405,7 @@ def _build_run_details_elements(
     percentage_metrics = _build_run_details_percentage_metrics(
         data,
         visible_fields=visible_fields,
-        quota_allowed=fields_was_default or "gpt_quota" in visible_fields,
+        quota_allowed=fields_are_default or "gpt_quota" in visible_fields,
     )
     promoted_fields = {
         field
@@ -572,6 +580,7 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
     return {
         "tag": "chart",
         "height": "28px",
+        "preview": False,
         "chart_spec": {
             "type": "circularProgress",
             "data": {"values": [{"type": "metric", "value": fraction}]},
@@ -583,7 +592,6 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
             "indicator": {"visible": False},
             "legends": {"visible": False},
             "padding": 0,
-            "preview": False,
         },
     }
 
@@ -612,11 +620,18 @@ def _build_run_details_percentage_row(metrics: list[dict[str, Any]], *, text_siz
     for metric in metrics:
         columns.extend(
             [
-                {"tag": "column", "width": "28px", "padding": "0px", "elements": [_build_run_details_circle(metric)]},
+                {
+                    "tag": "column",
+                    "width": "28px",
+                    "vertical_align": "center",
+                    "padding": "0px",
+                    "elements": [_build_run_details_circle(metric)],
+                },
                 {
                     "tag": "column",
                     "width": "weighted",
                     "weight": 1,
+                    "vertical_align": "center",
                     "padding": "0px",
                     "elements": [_build_run_details_metric_text(metric, text_size=text_size)],
                 },
