@@ -458,7 +458,7 @@ def _build_run_details_elements(
 
     if fields_are_default:
         # The default Run Details policy deliberately keeps the textual usage
-        # section to one compact Tokens line.  Cache is promoted to a ring
+        # section to two compact token columns.  Cache is promoted to a ring
         # for usage-billed runs, while GPT subscription runs surface quota
         # instead.  Reasoning and balance are intentionally omitted here:
         # balance belongs in the compact summary and reasoning tokens are not
@@ -468,7 +468,7 @@ def _build_run_details_elements(
         if token_text[0]:
             consumed_fields.add("tokens")
             visual_elements.append(
-                _build_run_details_tokens_row(token_text, text_size=text_size)
+                _build_run_details_tokens_row(data, text_size=text_size, is_error=is_error)
             )
         consumed_fields.update({"cache", "reasoning", "balance"})
     elif "cache" not in promoted_fields and "cache" in visible_fields and "tokens" in visible_fields:
@@ -754,17 +754,58 @@ def _build_run_details_percentage_row(metrics: list[dict[str, Any]], *, text_siz
 
 
 def _build_run_details_tokens_row(
-    token_text: tuple[str | None, str | None],
+    data: dict,
     *,
     text_size: str,
+    is_error: bool,
 ) -> dict[str, Any]:
-    token_en, token_zh = token_text
-    return _build_run_details_detail_text(
-        f"Tokens {token_en}",
-        f"Tokens {token_zh or token_en}",
-        text_size=text_size,
-        is_error=False,
-    )
+    columns: list[dict[str, Any]] = []
+    for field, icon, label_en, label_zh in (
+        ("input_tokens", "space-up_outlined", "Input tokens", "输入 Tokens"),
+        ("output_tokens", "space-down_outlined", "Output tokens", "输出 Tokens"),
+    ):
+        value = _positive_int(data.get(field))
+        if not value:
+            continue
+        content_en = f"{label_en} {_compact(value)}"
+        content_zh = f"{label_zh} {_compact(value)}"
+        if is_error:
+            content_en = f"<font color='red'>{content_en}</font>"
+            content_zh = f"<font color='red'>{content_zh}</font>"
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "0px",
+                "elements": [
+                    {
+                        "tag": "div",
+                        "icon": {
+                            "tag": "standard_icon",
+                            "token": icon,
+                            "color": "grey",
+                        },
+                        "text": {
+                            "tag": "lark_md",
+                            "content": _run_details_grey_text(content_en),
+                            "i18n_content": _i18n(
+                                _run_details_grey_text(content_en),
+                                _run_details_grey_text(content_zh),
+                            ),
+                            "text_size": text_size,
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "columns": columns,
+        "horizontal_spacing": "12px",
+        "padding": "0px",
+        "margin": "0px",
+    }
 
 
 def _build_run_details_tokens_cache_row(

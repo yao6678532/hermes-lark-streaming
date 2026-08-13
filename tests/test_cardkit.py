@@ -499,6 +499,10 @@ class TestBuildFooterElements:
                 for element in column.get("elements", []):
                     if element.get("tag") == "markdown":
                         lines.append(cls._unwrap_grey(element.get("content", "")))
+                    elif element.get("tag") == "div":
+                        text = element.get("text", {})
+                        if text.get("tag") == "lark_md":
+                            lines.append(cls._unwrap_grey(text.get("content", "")))
         return "\n".join(lines)
 
     @classmethod
@@ -802,12 +806,25 @@ class TestBuildFooterElements:
         assert len(rows) == 1
         assert "GPT remaining 85%" in content
         assert "Context used 7%" in content
-        assert "Tokens" in content
         assert "Cache hit" not in content
         assert "Reasoning" not in content
         assert "Reset " in content
         assert "Context 19.7K / 272.0K" not in content
-        assert "Tokens ↑ 19.8K · ↓ 11" in content
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
+        token_row = next(
+            element
+            for element in self._panel(result)["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        )
+        assert [column["elements"][0]["icon"]["token"] for column in token_row["columns"]] == [
+            "space-up_outlined", "space-down_outlined"
+        ]
         assert len(self._percentage_rows(result)) == 1
 
     def test_context_and_cache_promote_without_provider_or_model_name(self) -> None:
@@ -846,10 +863,10 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "Context used 7%" in content
         assert "Cache hit 95%" in content
-        assert "Tokens" in content
         assert "Reasoning" not in content
         assert "Balance" not in content
-        assert "Tokens ↑ 19.8K · ↓ 11" in content
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
         assert len(self._percentage_rows(result)) == 1
 
     def test_only_context_builds_one_metric_without_empty_placeholder(self) -> None:
@@ -955,20 +972,25 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "GPT remaining 97%" in content
         assert "Context used 7%" in content
-        assert "Tokens" in content
         assert "Cache hit 95%" not in content
         assert "Reasoning 3.6K" not in content
         assert "Balance ¥4.97" not in content
-        assert "Tokens ↑ 19.8K · ↓ 11" in content
-        assert all(
-            element.get("tag") != "column_set"
-            or any(
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
+        token_rows = [
+            element
+            for element in panel["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
                 child.get("tag") == "chart"
                 for column in element.get("columns", [])
                 for child in column.get("elements", [])
             )
-            for element in panel["elements"]
-        )
+        ]
+        assert len(token_rows) == 1
+        assert [column["elements"][0]["icon"]["token"] for column in token_rows[0]["columns"]] == [
+            "space-up_outlined", "space-down_outlined"
+        ]
 
     def test_cache_without_valid_denominator_is_not_promoted(self) -> None:
         result = _build_footer_elements(
@@ -1168,8 +1190,9 @@ class TestBuildFooterElements:
             }
         )
         panel = self._panel(result)
-        assert len([element for element in panel["elements"] if element.get("tag") == "column_set"]) == 1
-        assert "Tokens ↑ 19.8K · ↓ 11" in self._content(result)
+        assert len([element for element in panel["elements"] if element.get("tag") == "column_set"]) == 2
+        assert "Input tokens 19.8K" in self._content(result)
+        assert "Output tokens 11" in self._content(result)
         assert "Cache hit" not in self._content(result)
 
     def test_show_label(self) -> None:
@@ -1253,7 +1276,6 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "GPT remaining 95%" in content
         assert "Context used 26%" in content
-        assert "Tokens" in content
         assert "Cache hit 82%" not in content
         assert "Reasoning 3.6K" not in content
         assert "Balance ¥4.97" not in content
