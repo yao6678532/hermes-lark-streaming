@@ -51,16 +51,19 @@ colors while making an icon-only adjustment.
   Context + Cache when both are available.  Never create empty metric columns.
 - GPT quota uses the weekly window with `limit_window_seconds == 604800`; the
   remaining percentage and `reset_at` must come from that same window.
-- GPT quota colors are remaining-based: `>= 50%` green, `>= 20%` orange, and
-  `< 20%` red.  Summary text and its circular progress chart share this policy.
-- Context colors are usage-risk-based: `< 50%` green, `50–<80%` orange, and
-  `>=80%` red.  Cache hit is neutral blue below 80%, green at or above 80%.
+- GPT quota colors are remaining-based: `>= 50%` green (`green-300` on the
+  circular chart), `>= 20%` orange, and `< 20%` red. Summary text and its
+  circular progress chart share the same thresholds.
+- Context colors are usage-risk-based: `< 50%` green (`green-300` on the
+  circular chart), `50–<80%` orange, and `>=80%` red. Cache hit is neutral
+  blue below 80%, `green-300` at or above 80%.
 - The chart is a 28px CardKit chart with top-level `preview: false`; its VChart
   `circularProgress` spec uses one metric value, `categoryField`, and
-  `valueField`. Its desktop hover tooltip uses a metric-specific label and a
-  rounded integer percentage, while the chart `value` remains the 0–1 fraction
-  required for drawing and threshold mapping. Preserve this shape when changing
-  colors or data.
+  `valueField`. Its desktop hover tooltip supplies the same metric-specific
+  label and rounded integer percentage for both `mark` (filled arc) and
+  `dimension` (empty track) interactions, while the chart `value` remains the
+  0–1 fraction required for drawing and threshold mapping. Preserve this shape
+  when changing colors or data.
 
 ## Deployment decision
 

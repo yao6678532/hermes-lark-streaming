@@ -44,10 +44,10 @@ _RUN_DETAILS_METRIC_COLOR_POLICIES = {
             GPT_QUOTA_WARNING_REMAINING_PERCENT / 100,
             GPT_QUOTA_HEALTHY_REMAINING_PERCENT / 100,
         ),
-        ("red", "orange", "green"),
+        ("red", "orange", "green-300"),
     ),
-    "context": ((0.5, 0.8), ("green", "orange", "red")),
-    "cache": ((0.8,), ("blue", "green")),
+    "context": ((0.5, 0.8), ("green-300", "orange", "red")),
+    "cache": ((0.8,), ("blue", "green-300")),
 }
 _RUN_DETAILS_METRIC_CHART_LABELS = {
     "gpt_quota": ("GPT quota", "额度"),
@@ -607,6 +607,10 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
     fraction = float(metric["fraction"])
     label_en, _ = _RUN_DETAILS_METRIC_CHART_LABELS.get(metric["key"], ("Metric", "指标"))
     percentage = f"{_format_metric_percent(fraction * 100)}%"
+    tooltip_pattern = {
+        "title": {"value": label_en},
+        "content": [{"key": "Value", "value": percentage}],
+    }
     return {
         "tag": "chart",
         "height": "28px",
@@ -627,10 +631,11 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
             "indicator": {"visible": False},
             "legends": {"visible": False},
             "tooltip": {
-                "mark": {
-                    "title": {"value": label_en},
-                    "content": [{"key": "Value", "value": percentage}],
-                }
+                # The filled arc uses a mark tooltip; the empty track may use a
+                # dimension tooltip in the desktop renderer.  Give both the
+                # same static, integer-percent payload so no raw fraction leaks.
+                "mark": tooltip_pattern,
+                "dimension": tooltip_pattern.copy(),
             },
             "padding": 0,
         },

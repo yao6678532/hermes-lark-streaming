@@ -962,15 +962,17 @@ class TestBuildFooterElements:
             "type": "threshold",
             "field": "value",
             "domain": [0.5, 0.8],
-            "range": ["green", "orange", "red"],
+            "range": ["green-300", "orange", "red"],
         }
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
+        expected_tooltip_pattern = {
+            "title": {"value": "Context"},
+            "content": [{"key": "Value", "value": "7%"}],
+        }
         assert spec["tooltip"] == {
-            "mark": {
-                "title": {"value": "Context"},
-                "content": [{"key": "Value", "value": "7%"}],
-            }
+            "mark": expected_tooltip_pattern,
+            "dimension": expected_tooltip_pattern,
         }
         assert spec["padding"] == 0
         assert "preview" not in spec
@@ -999,17 +1001,19 @@ class TestBuildFooterElements:
             "title": {"value": "GPT quota"},
             "content": [{"key": "Value", "value": "92%"}],
         }
+        assert charts[0]["tooltip"]["dimension"] == charts[0]["tooltip"]["mark"]
         assert charts[1]["data"]["values"] == [{"type": "Context", "value": pytest.approx(57_116 / 272_000)}]
         assert charts[1]["tooltip"]["mark"] == {
             "title": {"value": "Context"},
             "content": [{"key": "Value", "value": "21%"}],
         }
+        assert charts[1]["tooltip"]["dimension"] == charts[1]["tooltip"]["mark"]
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (100, "green"),
-            (50, "green"),
+            (100, "green-300"),
+            (50, "green-300"),
             (49, "orange"),
             (20, "orange"),
             (19, "red"),
@@ -1026,8 +1030,8 @@ class TestBuildFooterElements:
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (0, "green"),
-            (49, "green"),
+            (0, "green-300"),
+            (49, "green-300"),
             (50, "orange"),
             (79, "orange"),
             (80, "red"),
@@ -1043,7 +1047,7 @@ class TestBuildFooterElements:
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
-        [(0, "blue"), (79, "blue"), (80, "green"), (100, "green")],
+        [(0, "blue"), (79, "blue"), (80, "green-300"), (100, "green-300")],
     )
     def test_cache_circle_uses_neutral_success_thresholds(
         self,
@@ -1062,7 +1066,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.2, 0.5],
-                    "range": ["red", "orange", "green"],
+                    "range": ["red", "orange", "green-300"],
                 },
             ),
             (
@@ -1075,7 +1079,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.8],
-                    "range": ["blue", "green"],
+                    "range": ["blue", "green-300"],
                 },
             ),
         ],
@@ -1098,7 +1102,11 @@ class TestBuildFooterElements:
             "mark": {
                 "title": {"value": expected_type},
                 "content": [{"key": "Value", "value": expected_percentage}],
-            }
+            },
+            "dimension": {
+                "title": {"value": expected_type},
+                "content": [{"key": "Value", "value": expected_percentage}],
+            },
         }
 
     def test_tokens_and_cache_use_two_columns_when_cache_not_promoted(self) -> None:
