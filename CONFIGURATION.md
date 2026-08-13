@@ -113,7 +113,7 @@ lark:
 | answer body 文字大小 | `streaming.body.text_size` | CardKit text size 字符串 | `normal_v2` | 重启 gateway | 传给 answer markdown 的 `text_size`；插件只在缺失或空值时回退到 `normal_v2`。 |
 | 完成态 Run Details | `streaming.footer.enabled` | bool | `true` | 重启 gateway | 控制完成卡片中默认折叠的 Run Details；保持 `footer` 配置名兼容。 |
 | Run Details 文字大小 | `streaming.footer.text_size` | CardKit text size 字符串 | `notation` | 重启 gateway | 传给 Run Details 标题与展开内容；插件只在缺失或空值时回退到 `notation`。 |
-| Run Details 字段选择 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[tokens, context, quota_reset, cache, reasoning, balance]]` | 重启 gateway | 控制展开内容的候选字段；有值且未出现在 summary 的字段按配置顺序纵向逐行显示。空值、缺失或非 list 使用默认值。 |
+| Run Details 字段选择 | `streaming.footer.fields` | `list[list[str]]`；一维 list 也接受 | `[[tokens, context, quota_reset, cache, reasoning, balance]]` | 重启 gateway | 控制展开内容和 adaptive metrics 的候选字段。默认策略会提升 GPT quota、Context、Cache；明确自定义 fields 可隐藏未列出的指标。空值、缺失或非 list 使用默认值。 |
 | Run Details 标签兼容项 | `streaming.footer.show_label` | bool | `false` | 重启 gateway | 保留旧配置项；Run Details 展开内容始终使用清晰的字段标签。 |
 
 ### `footer.fields` 支持的字段
@@ -148,7 +148,7 @@ lark:
 - `width_mode` 缺失、为空或非法时为 `default`。
 - `enabled`、`panel_expanded`、`header.enabled`、`show_reasoning` 缺失时为 `false`；`footer.enabled`、`show_tool_use` 和 `show_tool_detail` 缺失时均为 `true`。这些配置应使用 YAML bool；代码对值采用 Python `bool()` 转换。
 - `body.text_size` 缺失或空值时为 `normal_v2`；`footer.text_size` 缺失或空值时为 `notation`。这两个 text size 字符串不是插件枚举，非法的 CardKit 值不会由插件额外改写。
-- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[tokens, context, quota_reset, cache, reasoning, balance]]`；一维字段 list 会自动包装。详情 presentation 会自动过滤已出现在 compact summary 中的字段，并将每个逻辑字段纵向独立显示。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
+- `footer.fields` 缺失、空 list、非 list，或 footer 不是 mapping 时使用 `[[tokens, context, quota_reset, cache, reasoning, balance]]`；一维字段 list 会自动包装。该历史默认策略（即使额外含 `status`、`elapsed`、`model` 等 summary-only 字段）会允许有效 GPT quota 自动进入 adaptive metrics。明确自定义的 fields 仍只展示列出的指标，例如 `[[context]]` 不会提升 GPT quota。`footer.show_label` 保留读取兼容，但 Run Details 始终显示字段标签。
 - `card_ttl_sec` 缺失时为 `600`。代码会调用 `int()`，因此不可转换的非数字值不是 fallback，而会在读取时失败。
 
 ## 热加载 vs Gateway restart
@@ -178,7 +178,7 @@ Streaming 过程中不渲染 Run Details；统一 Tool Panel 在存在 active to
 
 终态 footer summary 使用现有 CardKit `collapsible_panel`，默认 `expanded: false`，折叠时不显示 “Run Details / 运行详情” 标题。summary 使用 CardKit Markdown 默认正文色，按固定 compact policy 显示 `✅ {elapsed} · {model} · {gpt_quota_remaining}`，例如 `✅ 4.4s · gpt-5.6-luna · 95%`；GPT quota 百分比保留 green/orange/red 语义色，quota reset 只进入 detail。没有 quota 时以 compact context 作为 fallback，例如 `✅ 1.4s · deepseek-v4-flash · 70.5K/1M`。缺失值不会产生多余分隔符。
 
-展开区沿用 `footer.fields` 选择候选字段，过滤 summary 已展示的值后，以相同 `footer.text_size`、grey 文字和纵向 key/value 形式展示。Tokens、Cache、Reasoning 通过 Hermes canonical `session_*` usage counters 在单次 `run_conversation` 前后的差值取得，因此覆盖本 turn 内全部 provider calls，却不会把 session 累计值直接展示为本轮 usage；旧 Hermes 缺少这些 counters 时才 fail-open 回退到 `_last_turn_usage` 的最后一个可靠 provider response。GPT quota 只选择结构化 `limit_window_seconds == 604800` 的 weekly window，remaining 与 `reset_at` 来自同一个 window；reset 使用系统本地时区格式化为绝对日期时间，不再显示倒计时。DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
+展开区沿用 `footer.fields` 选择候选字段。有效 percentage metrics 最多显示两个，默认优先级为 GPT weekly quota、Context、Cache：GPT + Context 同时存在时并排显示；没有 GPT 时可显示 Context + Cache。每个指标使用 28px 圆环和两行文字；后续普通 detail 也按两个逻辑字段并排成行，均使用相同 `footer.text_size` 与 grey detail 样式。GPT quota 的 summary 与圆环共用 `>=50% green`、`>=20% orange`、`<20% red` 的剩余额度阈值；Context 已用 `<50% green`、`50–<80% orange`、`>=80% red`；Cache hit `>=80% green`，其余保持中性 blue。Tokens、Cache、Reasoning 通过 Hermes canonical `session_*` usage counters 在单次 `run_conversation` 前后的差值取得，因此覆盖本 turn 内全部 provider calls，却不会把 session 累计值直接展示为本轮 usage；旧 Hermes 缺少这些 counters 时才 fail-open 回退到 `_last_turn_usage` 的最后一个可靠 provider response。GPT quota 只选择结构化 `limit_window_seconds == 604800` 的 weekly window，remaining 与 `reset_at` 来自同一个 window；reset 使用系统本地时区格式化为绝对日期时间，不再显示倒计时。DeepSeek 的 cache hit 由 Hermes 对原生 `prompt_cache_hit_tokens` 的规范化结果提供。provider 未返回的字段直接省略。Run Details 不读取 `panel_expanded`，因此不会改变 Reasoning Panel 或 Tool Panel 的展开语义。
 
 修改这些 `streaming.*` 项后建议重启 gateway，确保新的 `Config` 实例加载配置。凭据和 profile 路径变化也建议重启 gateway。`agent.gateway_notify_interval` 是 Hermes 自身在 gateway 运行配置中读取的参数，修改后应重启 gateway。
 

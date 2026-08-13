@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### 新增
+
+- 完成态 Run Details 采用自适应指标展示：默认策略优先展示 GPT weekly quota、Context，其次为 Cache；GPT quota、Context、Cache 的圆环颜色分别遵循剩余额度、上下文使用率和 cache hit 的语义阈值。相关配置入口为 `streaming.footer.enabled`、`streaming.footer.text_size`、`streaming.footer.fields` 与 `streaming.footer.show_label`，字段说明见 `CONFIGURATION.md`。
+- Tool Panel UX 配置入口补充为 `display.platforms.feishu.show_tool_use`、`display.platforms.feishu.show_tool_detail`、`display.platforms.feishu.tool_detail_mode`（均兼容对应的 `display.*` fallback）；Tool descriptor 图标与标题由 `streaming/tooluse.py` 维护。
+
+### Added
+
+- Completion Run Details now use adaptive metrics: the default policy prioritizes GPT weekly quota and Context, followed by Cache. Their circular progress colors follow the remaining-quota, context-usage, and cache-hit semantic thresholds. Configuration entry points are `streaming.footer.enabled`, `streaming.footer.text_size`, `streaming.footer.fields`, and `streaming.footer.show_label`; see `CONFIGURATION.md` for field details.
+- Document Tool Panel UX settings: `display.platforms.feishu.show_tool_use`, `display.platforms.feishu.show_tool_detail`, and `display.platforms.feishu.tool_detail_mode` (each keeps its matching `display.*` fallback). Tool descriptor icons and titles are maintained in `streaming/tooluse.py`.
+
 ## [0.12.0] - 2026-07-31
 
 ### 新增
