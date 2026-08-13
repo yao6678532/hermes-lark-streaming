@@ -942,7 +942,7 @@ class TestBuildFooterElements:
         assert "GPT remaining 85%" in content
         assert "Reset" not in content
 
-    def test_percentage_chart_uses_safe_28px_hover_friendly_spec(self) -> None:
+    def test_percentage_chart_uses_safe_28px_non_highlighting_hover_spec(self) -> None:
         result = _build_footer_elements({"context_used": 19700, "context_max": 272000})
         row = self._percentage_rows(result)[0]
         circle_column = row["columns"][0]
@@ -962,10 +962,11 @@ class TestBuildFooterElements:
             "type": "threshold",
             "field": "value",
             "domain": [0.5, 0.8],
-            "range": ["#5CD168", "orange", "red"],
+            "range": ["#A2C10B", "#FF811A", "#F54A45"],
         }
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
+        assert spec["hover"] is False
         expected_tooltip_pattern = {
             "title": {"value": "Context"},
             "content": [{"key": "Value", "value": "7%"}],
@@ -978,7 +979,6 @@ class TestBuildFooterElements:
         assert "preview" not in spec
         assert "angleField" not in spec
         assert "colorField" not in spec
-        assert "hover" not in spec
         text_column = row["columns"][1]
         assert circle_column["vertical_align"] == "center"
         assert text_column["vertical_align"] == "center"
@@ -1012,12 +1012,12 @@ class TestBuildFooterElements:
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (100, "#5CD168"),
-            (50, "#5CD168"),
-            (49, "orange"),
-            (20, "orange"),
-            (19, "red"),
-            (0, "red"),
+            (100, "#A2C10B"),
+            (50, "#A2C10B"),
+            (49, "#FF811A"),
+            (20, "#FF811A"),
+            (19, "#F54A45"),
+            (0, "#F54A45"),
         ],
     )
     def test_gpt_quota_circle_uses_remaining_thresholds(
@@ -1030,12 +1030,12 @@ class TestBuildFooterElements:
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (0, "#5CD168"),
-            (49, "#5CD168"),
-            (50, "orange"),
-            (79, "orange"),
-            (80, "red"),
-            (100, "red"),
+            (0, "#A2C10B"),
+            (49, "#A2C10B"),
+            (50, "#FF811A"),
+            (79, "#FF811A"),
+            (80, "#F54A45"),
+            (100, "#F54A45"),
         ],
     )
     def test_context_circle_uses_used_risk_thresholds(
@@ -1047,7 +1047,7 @@ class TestBuildFooterElements:
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
-        [(0, "blue"), (79, "blue"), (80, "#5CD168"), (100, "#5CD168")],
+        [(0, "blue"), (79, "blue"), (80, "#A2C10B"), (100, "#A2C10B")],
     )
     def test_cache_circle_uses_neutral_success_thresholds(
         self,
@@ -1066,7 +1066,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.2, 0.5],
-                    "range": ["red", "orange", "#5CD168"],
+                    "range": ["#F54A45", "#FF811A", "#A2C10B"],
                 },
             ),
             (
@@ -1079,7 +1079,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.8],
-                    "range": ["blue", "#5CD168"],
+                    "range": ["blue", "#A2C10B"],
                 },
             ),
         ],

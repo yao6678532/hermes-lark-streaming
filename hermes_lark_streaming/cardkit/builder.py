@@ -38,20 +38,33 @@ _DEFAULT_RUN_DETAILS_FIELDS = [[
     "balance",
 ]]
 _RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
-# CardKit's ``green-300`` token is not a VChart/CSS color literal.  Use its
-# official light-theme value for chart fills; CardKit text continues to use its
-# own semantic color tokens elsewhere.
-_RUN_DETAILS_CHART_GREEN_300 = "#5CD168"
+# CardKit's named color tokens are not VChart/CSS color literals.  Use the
+# selected official light-theme values for chart fills; CardKit text continues
+# to use its own semantic color tokens elsewhere.
+_RUN_DETAILS_CHART_LIME_300 = "#A2C10B"
+_RUN_DETAILS_CHART_ORANGE_350 = "#FF811A"
+_RUN_DETAILS_CHART_RED_400 = "#F54A45"
 _RUN_DETAILS_METRIC_COLOR_POLICIES = {
     "gpt_quota": (
         (
             GPT_QUOTA_WARNING_REMAINING_PERCENT / 100,
             GPT_QUOTA_HEALTHY_REMAINING_PERCENT / 100,
         ),
-        ("red", "orange", _RUN_DETAILS_CHART_GREEN_300),
+        (
+            _RUN_DETAILS_CHART_RED_400,
+            _RUN_DETAILS_CHART_ORANGE_350,
+            _RUN_DETAILS_CHART_LIME_300,
+        ),
     ),
-    "context": ((0.5, 0.8), (_RUN_DETAILS_CHART_GREEN_300, "orange", "red")),
-    "cache": ((0.8,), ("blue", _RUN_DETAILS_CHART_GREEN_300)),
+    "context": (
+        (0.5, 0.8),
+        (
+            _RUN_DETAILS_CHART_LIME_300,
+            _RUN_DETAILS_CHART_ORANGE_350,
+            _RUN_DETAILS_CHART_RED_400,
+        ),
+    ),
+    "cache": ((0.8,), ("blue", _RUN_DETAILS_CHART_LIME_300)),
 }
 _RUN_DETAILS_METRIC_CHART_LABELS = {
     "gpt_quota": ("GPT quota", "额度"),
@@ -627,6 +640,10 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
             "outerRadius": 0.81,
             "innerRadius": 0.51,
             "cornerRadius": 5,
+            # Keep the tooltip but suppress VChart's default hover state.  Its
+            # distinct track/progress marks otherwise enlarge and receive
+            # incompatible blue highlight styles on desktop.
+            "hover": False,
             "progress": {
                 "style": {
                     "fill": _run_details_metric_fill(metric["key"]),

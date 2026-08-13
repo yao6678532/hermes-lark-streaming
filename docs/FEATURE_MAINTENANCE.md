@@ -56,16 +56,19 @@ colors while making an icon-only adjustment.
   thresholds.
 - Context colors are usage-risk-based: `< 50%` green, `50–<80%` orange, and
   `>=80%` red. Cache hit is neutral blue below 80%, green at or above 80%.
-  CardKit's `green-300` is a CardKit color token, not a VChart fill value; the
-  chart therefore uses its official light-theme CSS value, `#5CD168`, while
-  CardKit text continues to use its own semantic tokens.
+  CardKit's named color tokens are not VChart fill values; the chart therefore
+  uses the selected official light-theme CSS values: lime `#A2C10B` (300),
+  orange `#FF811A` (350), and red `#F54A45` (400). CardKit text continues to
+  use its own semantic tokens.
 - The chart is a 28px CardKit chart with top-level `preview: false`; its VChart
   `circularProgress` spec uses one metric value, `categoryField`, and
   `valueField`. Its desktop hover tooltip supplies the same metric-specific
   label and rounded integer percentage for both `mark` (filled arc) and
   `dimension` (empty track) interactions, while the chart `value` remains the
-  0–1 fraction required for drawing and threshold mapping. Preserve this shape
-  when changing colors or data.
+  0–1 fraction required for drawing and threshold mapping. Its VChart
+  `hover: false` disables the incompatible default track/progress highlight
+  state while preserving tooltip presentation. Preserve this shape when
+  changing colors or data.
 
 ## Deployment decision
 
