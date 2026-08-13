@@ -456,7 +456,22 @@ def _build_run_details_elements(
     if percentage_metrics:
         visual_elements.append(_build_run_details_percentage_row(percentage_metrics, text_size=text_size))
 
-    if "cache" not in promoted_fields and "cache" in visible_fields and "tokens" in visible_fields:
+    if fields_are_default:
+        # The default Run Details policy deliberately keeps the textual usage
+        # section to one full-width Tokens row.  Cache is promoted to a ring
+        # for usage-billed runs, while GPT subscription runs surface quota
+        # instead.  Reasoning and balance are intentionally omitted here:
+        # balance belongs in the compact summary and reasoning tokens are not
+        # a primary run-health signal.  Explicit custom fields retain the
+        # legacy detail behavior below.
+        token_text = _render_run_details_field("tokens", data, is_error, is_aborted)
+        if token_text[0]:
+            consumed_fields.add("tokens")
+            visual_elements.append(
+                _build_run_details_tokens_row(token_text, text_size=text_size)
+            )
+        consumed_fields.update({"cache", "reasoning", "balance"})
+    elif "cache" not in promoted_fields and "cache" in visible_fields and "tokens" in visible_fields:
         cache_metric = _build_run_details_cache_metric(data)
         token_text = _render_run_details_field("tokens", data, is_error, is_aborted)
         if cache_metric is not None and token_text[0]:
@@ -738,12 +753,39 @@ def _build_run_details_percentage_row(metrics: list[dict[str, Any]], *, text_siz
     }
 
 
+def _build_run_details_tokens_row(
+    token_text: tuple[str | None, str | None],
+    *,
+    text_size: str,
+) -> dict[str, Any]:
+    token_en, token_zh = token_text
+    token_en = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_en}</font>"
+    token_zh = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_zh or token_en}</font>"
+    token_element = {
+        "tag": "markdown",
+        "content": token_en,
+        "i18n_content": _i18n(token_en, token_zh),
+        "text_size": text_size,
+        "text_align": "left",
+        "margin": "0px",
+    }
+    return {
+        "tag": "column_set",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [token_element]},
+        ],
+        "padding": "0px",
+        "margin": "0px",
+    }
+
+
 def _build_run_details_tokens_cache_row(
     token_text: tuple[str | None, str | None],
     cache_metric: dict[str, Any],
     *,
     text_size: str,
 ) -> dict[str, Any]:
+    """Retain the legacy two-column usage row for explicit custom fields."""
     token_en, token_zh = token_text
     cache_text = _build_run_details_metric_text(cache_metric, text_size=text_size)
     token_en = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_en}</font>"
@@ -925,15 +967,11 @@ def _build_footer_summary(
         if quota_zh:
             zh_parts.append(quota_zh)
     else:
-        context_en, context_zh = _compact_context_summary(
-            data,
-            is_error=is_error,
-            is_aborted=is_aborted,
-        )
-        if context_en:
-            en_parts.append(context_en)
-        if context_zh:
-            zh_parts.append(context_zh)
+        balance_en, balance_zh = _render_footer_field("balance", data, is_error, is_aborted, False)
+        if balance_en:
+            en_parts.append(balance_en)
+        if balance_zh:
+            zh_parts.append(balance_zh)
 
     return en_parts, zh_parts
 
@@ -955,29 +993,10 @@ def _footer_summary_field_names(
     if quota_en:
         fields.add("gpt_quota")
     else:
-        context_en, _ = _compact_context_summary(
-            data,
-            is_error=is_error,
-            is_aborted=is_aborted,
-        )
-        if context_en:
-            fields.add("context")
+        balance_en, _ = _render_footer_field("balance", data, is_error, is_aborted, False)
+        if balance_en:
+            fields.add("balance")
     return fields
-
-
-def _compact_context_summary(
-    data: dict,
-    *,
-    is_error: bool,
-    is_aborted: bool,
-) -> tuple[str | None, str | None]:
-    """Render context compactly for the summary without its percentage."""
-    used = _positive_int(data.get("context_used"))
-    max_c = _positive_int(data.get("context_max"))
-    if not max_c:
-        return None, None
-    value = f"{_compact_summary_number(used)}/{_compact_summary_number(max_c)}"
-    return value, value
 
 
 def _join_compact_footer_parts(parts: list[str]) -> str:
@@ -1191,10 +1210,6 @@ def _positive_int(value: object) -> int:
     except (TypeError, ValueError):
         return 0
     return parsed if parsed > 0 else 0
-
-
-def _compact_summary_number(n: int) -> str:
-    return re.sub(r"\.0(?=[KM])", "", _compact(n))
 
 
 def _compact(n: int) -> str:

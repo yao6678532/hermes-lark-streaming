@@ -611,17 +611,18 @@ class TestBuildFooterElements:
         assert "GPT remaining 95%" in self._content(result)
         assert "↻" not in self._content(result)
 
-    def test_context_is_summary_fallback_without_quota(self) -> None:
+    def test_balance_replaces_context_in_summary_without_quota(self) -> None:
         result = _build_footer_elements(
             {
                 "duration": 122,
                 "model": "deepseek-v3",
                 "context_used": 50000,
                 "context_max": 128000,
+                "balance": "¥4.97",
             },
             fields=[["status", "elapsed", "model"]],
         )
-        assert self._title(result)["content"] == "✅ 2m 2s · deepseek-v3 · 50K/128K"
+        assert self._title(result)["content"] == "✅ 2m 2s · deepseek-v3 · ¥4.97"
         assert self._panel(result)["elements"] == []
 
     def test_status_error(self) -> None:
@@ -668,7 +669,7 @@ class TestBuildFooterElements:
             {"context_used": 50000, "context_max": 200000},
             fields=[["context"]],
         )
-        assert self._title(result)["content"] == "✅ 50K/200K"
+        assert self._title(result)["content"] == "✅"
         assert "Context used 25%" in self._content(result)
 
     def test_tokens_displayed(self) -> None:
@@ -737,14 +738,16 @@ class TestBuildFooterElements:
                 "context_used": 500,
                 "context_max": 2000,
                 "balance": "¥4.97",
+                "api_calls": 2,
             },
-            fields=[["tokens", "context", "balance"]],
+            fields=[["tokens", "context", "balance", "api_calls"]],
             text_size="normal_v2",
         )
         panel = self._panel(result)
         detail = panel["elements"][0]
         assert "Context used 25%" in self._content(result)
-        assert "Balance ¥4.97" in self._content(result)
+        assert self._title(result)["content"] == "✅ ¥4.97"
+        assert "Balance ¥4.97" not in self._content(result)
         assert all(
             element.get("tag") != "markdown" or " · Context" not in element.get("content", "")
             for element in panel["elements"]
@@ -781,7 +784,7 @@ class TestBuildFooterElements:
         assert panel["margin"] == "-6px 0px 0px 0px"
         assert panel["padding"] == "6px 0px 0px 0px"
 
-    def test_gpt_promotes_quota_and_context_and_keeps_cache_in_tokens_row(self) -> None:
+    def test_default_gpt_details_keep_only_full_width_tokens_after_metrics(self) -> None:
         result = _build_footer_elements(
             {
                 "gpt_quota_remaining": "<font color='green'>85%</font>",
@@ -799,10 +802,23 @@ class TestBuildFooterElements:
         assert len(rows) == 1
         assert "GPT remaining 85%" in content
         assert "Context used 7%" in content
-        assert "Cache hit 95%" in content
         assert "Tokens" in content
+        assert "Cache hit" not in content
+        assert "Reasoning" not in content
         assert "Reset " in content
         assert "Context 19.7K / 272.0K" not in content
+        ordinary_rows = [
+            element
+            for element in self._panel(result)["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert len(ordinary_rows) == 1
+        assert len(ordinary_rows[0]["columns"]) == 1
 
     def test_context_and_cache_promote_without_provider_or_model_name(self) -> None:
         result = _build_footer_elements(
@@ -821,6 +837,40 @@ class TestBuildFooterElements:
         assert "Context used 7%" in content
         assert "Cache hit 95%" in content
         assert "Context 19.7K / 272.0K" not in content
+
+    def test_default_usage_billed_details_keep_only_full_width_tokens_after_metrics(self) -> None:
+        result = _build_footer_elements(
+            {
+                "model": "deepseek-v3",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+                "balance": "¥4.97",
+            },
+        )
+        assert self._title(result)["content"] == "✅ deepseek-v3 · ¥4.97"
+        content = self._content(result)
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Tokens" in content
+        assert "Reasoning" not in content
+        assert "Balance" not in content
+        ordinary_rows = [
+            element
+            for element in self._panel(result)["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert len(ordinary_rows) == 1
+        assert len(ordinary_rows[0]["columns"]) == 1
 
     def test_only_context_builds_one_metric_without_empty_placeholder(self) -> None:
         result = _build_footer_elements({"context_used": 19700, "context_max": 272000})
@@ -841,6 +891,26 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "Context used 7%" in content
         assert "GPT remaining" not in content
+
+    def test_explicit_fields_keep_cache_and_reasoning_details(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>85%</font>",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+            },
+            fields=[["tokens", "context", "gpt_quota", "cache", "reasoning"]],
+        )
+        content = self._content(result)
+        assert "GPT remaining 85%" in content
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Reasoning 3.6K" in content
 
     def test_runtime_default_fields_promote_quota_and_context(self) -> None:
         result = _build_footer_elements(
@@ -869,7 +939,7 @@ class TestBuildFooterElements:
         ]
         assert values == [pytest.approx(0.97), pytest.approx(19700 / 272000)]
 
-    def test_assistant_profile_fields_promote_quota_and_use_two_column_details(self) -> None:
+    def test_assistant_profile_default_fields_use_single_tokens_detail(self) -> None:
         result = _build_footer_elements(
             {
                 "gpt_quota_remaining": "<font color='green'>97%</font>",
@@ -905,9 +975,10 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "GPT remaining 97%" in content
         assert "Context used 7%" in content
-        assert "Cache hit 95%" in content
-        assert "Reasoning 3.6K" in content
-        assert "Balance ¥4.97" in content
+        assert "Tokens" in content
+        assert "Cache hit 95%" not in content
+        assert "Reasoning 3.6K" not in content
+        assert "Balance ¥4.97" not in content
         ordinary_rows = [
             element
             for element in panel["elements"]
@@ -918,11 +989,8 @@ class TestBuildFooterElements:
                 for child in column.get("elements", [])
             )
         ]
-        assert [len(row["columns"]) for row in ordinary_rows] == [2, 2]
+        assert [len(row["columns"]) for row in ordinary_rows] == [1]
         assert "Tokens" in str(ordinary_rows[0])
-        assert "Cache hit" in str(ordinary_rows[0])
-        assert "Reasoning" in str(ordinary_rows[1])
-        assert "Balance" in str(ordinary_rows[1])
 
     def test_cache_without_valid_denominator_is_not_promoted(self) -> None:
         result = _build_footer_elements(
@@ -1109,7 +1177,7 @@ class TestBuildFooterElements:
             },
         }
 
-    def test_tokens_and_cache_use_two_columns_when_cache_not_promoted(self) -> None:
+    def test_default_tokens_row_is_full_width_when_cache_not_promoted(self) -> None:
         result = _build_footer_elements(
             {
                 "gpt_quota_remaining": "<font color='green'>85%</font>",
@@ -1126,10 +1194,10 @@ class TestBuildFooterElements:
         ]
         assert len(rows) == 2
         ordinary = rows[1]
-        assert len(ordinary["columns"]) == 2
-        assert ordinary["horizontal_spacing"] == "12px"
+        assert len(ordinary["columns"]) == 1
+        assert "horizontal_spacing" not in ordinary
         assert "Tokens" in str(ordinary)
-        assert "Cache hit" in str(ordinary)
+        assert "Cache hit" not in str(ordinary)
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -1190,7 +1258,7 @@ class TestBuildFooterElements:
         assert local_now.strftime("%H:%M") in en
         assert local_now.strftime("%H:%M") in zh
 
-    def test_default_details_keep_only_extra_metadata(self) -> None:
+    def test_default_details_keep_only_primary_run_usage(self) -> None:
         reset_at = datetime.now().astimezone() + timedelta(days=5)
         result = _build_footer_elements(
             {
@@ -1212,10 +1280,10 @@ class TestBuildFooterElements:
         content = self._content(result)
         assert "GPT remaining 95%" in content
         assert "Context used 26%" in content
-        assert "Cache hit 82%" in content
         assert "Tokens" in content
-        assert "Reasoning 3.6K" in content
-        assert "Balance ¥4.97" in content
+        assert "Cache hit 82%" not in content
+        assert "Reasoning 3.6K" not in content
+        assert "Balance ¥4.97" not in content
         assert "Status" not in content
         assert "Elapsed" not in content
         assert "Model" not in content
