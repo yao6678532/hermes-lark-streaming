@@ -458,7 +458,7 @@ def _build_run_details_elements(
 
     if fields_are_default:
         # The default Run Details policy deliberately keeps the textual usage
-        # section to one full-width Tokens row.  Cache is promoted to a ring
+        # section to one compact Tokens line.  Cache is promoted to a ring
         # for usage-billed runs, while GPT subscription runs surface quota
         # instead.  Reasoning and balance are intentionally omitted here:
         # balance belongs in the compact summary and reasoning tokens are not
@@ -759,24 +759,12 @@ def _build_run_details_tokens_row(
     text_size: str,
 ) -> dict[str, Any]:
     token_en, token_zh = token_text
-    token_en = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_en}</font>"
-    token_zh = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_zh or token_en}</font>"
-    token_element = {
-        "tag": "markdown",
-        "content": token_en,
-        "i18n_content": _i18n(token_en, token_zh),
-        "text_size": text_size,
-        "text_align": "left",
-        "margin": "0px",
-    }
-    return {
-        "tag": "column_set",
-        "columns": [
-            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [token_element]},
-        ],
-        "padding": "0px",
-        "margin": "0px",
-    }
+    return _build_run_details_detail_text(
+        f"Tokens {token_en}",
+        f"Tokens {token_zh or token_en}",
+        text_size=text_size,
+        is_error=False,
+    )
 
 
 def _build_run_details_tokens_cache_row(
