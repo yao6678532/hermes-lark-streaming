@@ -44,6 +44,7 @@ _RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
 _RUN_DETAILS_CHART_LIME_300 = "#A2C10B"
 _RUN_DETAILS_CHART_ORANGE_350 = "#FF811A"
 _RUN_DETAILS_CHART_RED_400 = "#F54A45"
+_RUN_DETAILS_CHART_BLUE_350 = "#7AA2FF"
 _RUN_DETAILS_METRIC_COLOR_POLICIES = {
     "gpt_quota": (
         (
@@ -64,7 +65,7 @@ _RUN_DETAILS_METRIC_COLOR_POLICIES = {
             _RUN_DETAILS_CHART_RED_400,
         ),
     ),
-    "cache": ((0.8,), ("blue", _RUN_DETAILS_CHART_LIME_300)),
+    "cache": ((0.8,), (_RUN_DETAILS_CHART_BLUE_350, _RUN_DETAILS_CHART_LIME_300)),
 }
 _RUN_DETAILS_METRIC_CHART_LABELS = {
     "gpt_quota": ("GPT quota", "额度"),
@@ -626,7 +627,7 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
     percentage = f"{_format_metric_percent(fraction * 100)}%"
     tooltip_pattern = {
         "title": {"value": label_en},
-        "content": [{"key": "Value", "value": percentage}],
+        "content": [{"key": "Percentage", "value": percentage}],
     }
     return {
         "tag": "chart",

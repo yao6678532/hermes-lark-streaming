@@ -58,12 +58,12 @@ colors while making an icon-only adjustment.
   `>=80%` red. Cache hit is neutral blue below 80%, green at or above 80%.
   CardKit's named color tokens are not VChart fill values; the chart therefore
   uses the selected official light-theme CSS values: lime `#A2C10B` (300),
-  orange `#FF811A` (350), and red `#F54A45` (400). CardKit text continues to
-  use its own semantic tokens.
+  orange `#FF811A` (350), red `#F54A45` (400), and the neutral Cache blue
+  `#7AA2FF` (350). CardKit text continues to use its own semantic tokens.
 - The chart is a 28px CardKit chart with top-level `preview: false`; its VChart
   `circularProgress` spec uses one metric value, `categoryField`, and
   `valueField`. Its desktop hover tooltip supplies the same metric-specific
-  label and rounded integer percentage for both `mark` (filled arc) and
+  label and a `Percentage` field with a rounded integer value for both `mark` (filled arc) and
   `dimension` (empty track) interactions, while the chart `value` remains the
   0–1 fraction required for drawing and threshold mapping. Its VChart
   `hover: false` disables the incompatible default track/progress highlight

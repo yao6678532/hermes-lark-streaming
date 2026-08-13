@@ -969,7 +969,7 @@ class TestBuildFooterElements:
         assert spec["hover"] is False
         expected_tooltip_pattern = {
             "title": {"value": "Context"},
-            "content": [{"key": "Value", "value": "7%"}],
+            "content": [{"key": "Percentage", "value": "7%"}],
         }
         assert spec["tooltip"] == {
             "mark": expected_tooltip_pattern,
@@ -999,13 +999,13 @@ class TestBuildFooterElements:
         assert charts[0]["data"]["values"] == [{"type": "GPT quota", "value": 0.92}]
         assert charts[0]["tooltip"]["mark"] == {
             "title": {"value": "GPT quota"},
-            "content": [{"key": "Value", "value": "92%"}],
+            "content": [{"key": "Percentage", "value": "92%"}],
         }
         assert charts[0]["tooltip"]["dimension"] == charts[0]["tooltip"]["mark"]
         assert charts[1]["data"]["values"] == [{"type": "Context", "value": pytest.approx(57_116 / 272_000)}]
         assert charts[1]["tooltip"]["mark"] == {
             "title": {"value": "Context"},
-            "content": [{"key": "Value", "value": "21%"}],
+            "content": [{"key": "Percentage", "value": "21%"}],
         }
         assert charts[1]["tooltip"]["dimension"] == charts[1]["tooltip"]["mark"]
 
@@ -1047,7 +1047,7 @@ class TestBuildFooterElements:
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
-        [(0, "blue"), (79, "blue"), (80, "#A2C10B"), (100, "#A2C10B")],
+        [(0, "#7AA2FF"), (79, "#7AA2FF"), (80, "#A2C10B"), (100, "#A2C10B")],
     )
     def test_cache_circle_uses_neutral_success_thresholds(
         self,
@@ -1079,7 +1079,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.8],
-                    "range": ["blue", "#A2C10B"],
+                    "range": ["#7AA2FF", "#A2C10B"],
                 },
             ),
         ],
@@ -1101,11 +1101,11 @@ class TestBuildFooterElements:
         assert chart["chart_spec"]["tooltip"] == {
             "mark": {
                 "title": {"value": expected_type},
-                "content": [{"key": "Value", "value": expected_percentage}],
+                "content": [{"key": "Percentage", "value": expected_percentage}],
             },
             "dimension": {
                 "title": {"value": expected_type},
-                "content": [{"key": "Value", "value": expected_percentage}],
+                "content": [{"key": "Percentage", "value": expected_percentage}],
             },
         }
 
