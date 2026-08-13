@@ -962,7 +962,7 @@ class TestBuildFooterElements:
             "type": "threshold",
             "field": "value",
             "domain": [0.5, 0.8],
-            "range": ["green-300", "orange", "red"],
+            "range": ["#5CD168", "orange", "red"],
         }
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
@@ -1012,8 +1012,8 @@ class TestBuildFooterElements:
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (100, "green-300"),
-            (50, "green-300"),
+            (100, "#5CD168"),
+            (50, "#5CD168"),
             (49, "orange"),
             (20, "orange"),
             (19, "red"),
@@ -1030,8 +1030,8 @@ class TestBuildFooterElements:
     @pytest.mark.parametrize(
         ("percentage", "expected"),
         [
-            (0, "green-300"),
-            (49, "green-300"),
+            (0, "#5CD168"),
+            (49, "#5CD168"),
             (50, "orange"),
             (79, "orange"),
             (80, "red"),
@@ -1047,7 +1047,7 @@ class TestBuildFooterElements:
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
-        [(0, "blue"), (79, "blue"), (80, "green-300"), (100, "green-300")],
+        [(0, "blue"), (79, "blue"), (80, "#5CD168"), (100, "#5CD168")],
     )
     def test_cache_circle_uses_neutral_success_thresholds(
         self,
@@ -1066,7 +1066,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.2, 0.5],
-                    "range": ["red", "orange", "green-300"],
+                    "range": ["red", "orange", "#5CD168"],
                 },
             ),
             (
@@ -1079,7 +1079,7 @@ class TestBuildFooterElements:
                     "type": "threshold",
                     "field": "value",
                     "domain": [0.8],
-                    "range": ["blue", "green-300"],
+                    "range": ["blue", "#5CD168"],
                 },
             ),
         ],

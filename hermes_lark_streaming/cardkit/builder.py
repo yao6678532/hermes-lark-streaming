@@ -38,16 +38,20 @@ _DEFAULT_RUN_DETAILS_FIELDS = [[
     "balance",
 ]]
 _RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
+# CardKit's ``green-300`` token is not a VChart/CSS color literal.  Use its
+# official light-theme value for chart fills; CardKit text continues to use its
+# own semantic color tokens elsewhere.
+_RUN_DETAILS_CHART_GREEN_300 = "#5CD168"
 _RUN_DETAILS_METRIC_COLOR_POLICIES = {
     "gpt_quota": (
         (
             GPT_QUOTA_WARNING_REMAINING_PERCENT / 100,
             GPT_QUOTA_HEALTHY_REMAINING_PERCENT / 100,
         ),
-        ("red", "orange", "green-300"),
+        ("red", "orange", _RUN_DETAILS_CHART_GREEN_300),
     ),
-    "context": ((0.5, 0.8), ("green-300", "orange", "red")),
-    "cache": ((0.8,), ("blue", "green-300")),
+    "context": ((0.5, 0.8), (_RUN_DETAILS_CHART_GREEN_300, "orange", "red")),
+    "cache": ((0.8,), ("blue", _RUN_DETAILS_CHART_GREEN_300)),
 }
 _RUN_DETAILS_METRIC_CHART_LABELS = {
     "gpt_quota": ("GPT quota", "额度"),
