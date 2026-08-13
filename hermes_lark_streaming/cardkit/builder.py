@@ -803,7 +803,6 @@ def _build_run_details_tokens_row(
         "tag": "column_set",
         "columns": columns,
         "horizontal_spacing": "12px",
-        "padding": "0px",
         "margin": "0px",
     }
 
