@@ -952,7 +952,7 @@ class TestBuildFooterElements:
         assert chart["height"] == "28px"
         assert chart["preview"] is False
         assert spec["type"] == "circularProgress"
-        assert spec["data"]["values"] == [{"type": "metric", "value": pytest.approx(19700 / 272000)}]
+        assert spec["data"]["values"] == [{"type": "Context", "value": pytest.approx(19700 / 272000)}]
         assert spec["categoryField"] == "type"
         assert spec["valueField"] == "value"
         assert spec["outerRadius"] == 0.81
@@ -966,6 +966,12 @@ class TestBuildFooterElements:
         }
         assert spec["indicator"]["visible"] is False
         assert spec["legends"]["visible"] is False
+        assert spec["tooltip"] == {
+            "mark": {
+                "title": {"value": "Context"},
+                "content": [{"key": "Value", "value": "7%"}],
+            }
+        }
         assert spec["padding"] == 0
         assert "preview" not in spec
         assert "angleField" not in spec
@@ -974,6 +980,30 @@ class TestBuildFooterElements:
         text_column = row["columns"][1]
         assert circle_column["vertical_align"] == "center"
         assert text_column["vertical_align"] == "center"
+
+    def test_percentage_chart_tooltip_uses_distinct_labels_and_rounded_percentages(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>92%</font>",
+                "context_used": 57_116,
+                "context_max": 272_000,
+            },
+        )
+        charts = [
+            column["elements"][0]["chart_spec"]
+            for column in self._percentage_rows(result)[0]["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert charts[0]["data"]["values"] == [{"type": "GPT quota", "value": 0.92}]
+        assert charts[0]["tooltip"]["mark"] == {
+            "title": {"value": "GPT quota"},
+            "content": [{"key": "Value", "value": "92%"}],
+        }
+        assert charts[1]["data"]["values"] == [{"type": "Context", "value": pytest.approx(57_116 / 272_000)}]
+        assert charts[1]["tooltip"]["mark"] == {
+            "title": {"value": "Context"},
+            "content": [{"key": "Value", "value": "21%"}],
+        }
 
     @pytest.mark.parametrize(
         ("percentage", "expected"),
@@ -1060,8 +1090,16 @@ class TestBuildFooterElements:
         result = _build_footer_elements(data, fields=fields)
         chart = self._percentage_rows(result)[0]["columns"][0]["elements"][0]
         values = chart["chart_spec"]["data"]["values"]
-        assert values == [{"type": "metric", "value": pytest.approx(expected_fraction)}]
+        expected_type = "GPT quota" if "gpt_quota_remaining" in data else "Cache"
+        expected_percentage = f"{round(expected_fraction * 100)}%"
+        assert values == [{"type": expected_type, "value": pytest.approx(expected_fraction)}]
         assert chart["chart_spec"]["progress"]["style"]["fill"] == expected_fill
+        assert chart["chart_spec"]["tooltip"] == {
+            "mark": {
+                "title": {"value": expected_type},
+                "content": [{"key": "Value", "value": expected_percentage}],
+            }
+        }
 
     def test_tokens_and_cache_use_two_columns_when_cache_not_promoted(self) -> None:
         result = _build_footer_elements(

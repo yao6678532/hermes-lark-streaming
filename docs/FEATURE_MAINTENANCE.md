@@ -57,7 +57,10 @@ colors while making an icon-only adjustment.
   `>=80%` red.  Cache hit is neutral blue below 80%, green at or above 80%.
 - The chart is a 28px CardKit chart with top-level `preview: false`; its VChart
   `circularProgress` spec uses one metric value, `categoryField`, and
-  `valueField`.  Preserve this shape when changing colors or data.
+  `valueField`. Its desktop hover tooltip uses a metric-specific label and a
+  rounded integer percentage, while the chart `value` remains the 0–1 fraction
+  required for drawing and threshold mapping. Preserve this shape when changing
+  colors or data.
 
 ## Deployment decision
 

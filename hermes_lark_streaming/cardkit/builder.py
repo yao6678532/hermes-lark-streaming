@@ -49,6 +49,11 @@ _RUN_DETAILS_METRIC_COLOR_POLICIES = {
     "context": ((0.5, 0.8), ("green", "orange", "red")),
     "cache": ((0.8,), ("blue", "green")),
 }
+_RUN_DETAILS_METRIC_CHART_LABELS = {
+    "gpt_quota": ("GPT quota", "额度"),
+    "context": ("Context", "上下文"),
+    "cache": ("Cache", "缓存"),
+}
 
 
 def _collapsible_panel(
@@ -600,13 +605,15 @@ def _build_run_details_percentage_metrics(
 
 def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
     fraction = float(metric["fraction"])
+    label_en, _ = _RUN_DETAILS_METRIC_CHART_LABELS.get(metric["key"], ("Metric", "指标"))
+    percentage = f"{_format_metric_percent(fraction * 100)}%"
     return {
         "tag": "chart",
         "height": "28px",
         "preview": False,
         "chart_spec": {
             "type": "circularProgress",
-            "data": {"values": [{"type": "metric", "value": fraction}]},
+            "data": {"values": [{"type": label_en, "value": fraction}]},
             "categoryField": "type",
             "valueField": "value",
             "outerRadius": 0.81,
@@ -619,6 +626,12 @@ def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
             },
             "indicator": {"visible": False},
             "legends": {"visible": False},
+            "tooltip": {
+                "mark": {
+                    "title": {"value": label_en},
+                    "content": [{"key": "Value", "value": percentage}],
+                }
+            },
             "padding": 0,
         },
     }
