@@ -22,6 +22,7 @@ from hermes_lark_streaming.cardkit.builder import (
     _escape_md,
     _format_elapsed,
     _format_quota_reset_at,
+    _format_quota_reset_label,
     _format_tool_elapsed,
     _longest_backtick_run,
     _run_details_metric_color,
@@ -1253,6 +1254,31 @@ class TestBuildFooterElements:
         assert en is not None and zh is not None
         assert local_now.strftime("%H:%M") in en
         assert local_now.strftime("%H:%M") in zh
+
+    @pytest.mark.parametrize(
+        ("offset", "expected_en", "expected_zh"),
+        [
+            (timedelta(hours=2, minutes=30), "2h · 30min", "2h · 30min"),
+            (timedelta(minutes=59, seconds=30), "59min", "59min"),
+        ],
+    )
+    def test_reset_label_uses_countdown_on_reset_date(
+        self,
+        offset: timedelta,
+        expected_en: str,
+        expected_zh: str,
+    ) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_at = local_now + offset
+        en, zh = _format_quota_reset_label(reset_at, now=local_now)
+        assert (en, zh) == (expected_en, expected_zh)
+
+    def test_reset_label_uses_date_without_time_before_reset_date(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_at = local_now + timedelta(days=1, hours=2)
+        en, zh = _format_quota_reset_label(reset_at, now=local_now)
+        assert en == f"{reset_at.strftime('%b')} {reset_at.day}"
+        assert zh == f"{reset_at.month}月{reset_at.day}日"
 
     def test_default_details_keep_only_primary_run_usage(self) -> None:
         reset_at = datetime.now().astimezone() + timedelta(days=5)

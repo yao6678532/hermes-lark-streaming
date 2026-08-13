@@ -600,7 +600,7 @@ def _build_run_details_percentage_metrics(
         if remaining is not None:
             reset_en, reset_zh = (None, None)
             if "quota_reset" in visible_fields:
-                reset_en, reset_zh = _format_quota_reset_at(data.get("gpt_quota_reset_at"))
+                reset_en, reset_zh = _format_quota_reset_label(data.get("gpt_quota_reset_at"))
             candidates.append(
                 {
                     "key": "gpt_quota",
@@ -971,6 +971,48 @@ def _format_quota_reset_at(
         f"{month} {reset_at.day}, {reset_at.year} {clock}",
         f"{reset_at.year}年{reset_at.month}月{reset_at.day}日 {clock}",
     )
+
+
+def _format_quota_reset_label(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Format the compact reset label used beside the GPT quota ring.
+
+    Keep the normal state to a month/day so the two-line metric stays compact.
+    On the reset date, replace the date with a minute-precision countdown.
+    Both timestamps are compared after conversion to the local runtime
+    timezone, matching the absolute reset formatter above.
+    """
+    reset_at = _parse_reset_at(value)
+    if reset_at is None:
+        return None, None
+    current = (now or datetime.now().astimezone()).astimezone()
+    if reset_at.date() != current.date():
+        month = (
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        )[reset_at.month - 1]
+        if reset_at.year == current.year:
+            return f"{month} {reset_at.day}", f"{reset_at.month}月{reset_at.day}日"
+        return (
+            f"{month} {reset_at.day}, {reset_at.year}",
+            f"{reset_at.year}年{reset_at.month}月{reset_at.day}日",
+        )
+
+    remaining_seconds = (reset_at - current).total_seconds()
+    if remaining_seconds <= 0:
+        return "now", "立即"
+    total_minutes = max(1, int(remaining_seconds // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}min")
+    countdown = " · ".join(parts)
+    return countdown, countdown
 
 
 def _build_footer_summary(
