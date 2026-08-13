@@ -88,22 +88,6 @@ Card templates (cardkit/)
   └─ i18n.py — localized CardKit labels
 ```
 
-## UI Configuration and Maintenance Map
-
-Keep the complete user-facing value/reference documentation in `CONFIGURATION.md`.
-This table is the implementation index for agents: it maps configurable UI behavior
-to the code and regression tests that own it.
-
-| Feature | Configuration fields | Primary implementation | Regression tests | Deployment note |
-|---|---|---|---|---|
-| Run Details | `streaming.footer.enabled`, `streaming.footer.text_size`, `streaming.footer.fields`, `streaming.footer.show_label` | `config.py` (`Config.footer_*`); `cardkit/builder.py` (`_build_run_details_elements()` and related metric helpers); `quota.py` for GPT quota thresholds | `tests/test_config.py`, `tests/test_cardkit.py`, `tests/test_controller.py` | A `streaming.*` config change needs a gateway restart. Builder/quota-only code changes do **not** require hook reinstall. |
-| Tool Panel visibility and detail UX | `display.platforms.feishu.show_tool_use`, `display.platforms.feishu.show_tool_detail`, `display.platforms.feishu.tool_detail_mode`; compatible fallbacks: `display.show_tool_use`, `display.show_tool_detail`, `display.tool_detail_mode` | `config.py`; `streaming/tooluse.py` for descriptor names/icons/sanitization; `cardkit/builder.py` (`_build_tool_panel()` and step renderers); `streaming/segment_helper.py` | `tests/test_config.py`, `tests/test_tooluse.py`, `tests/test_cardkit.py`, `tests/test_controller.py` | Display config is reread at runtime. Tool Panel-only code changes do **not** require hook reinstall. |
-
-`patcher.py` changes the generated Hermes hooks: after any such change, run
-`uninstall` then `install` before restarting the Hermes gateway. Pure CardKit,
-Run Details, Tool Panel, configuration, or descriptor changes must not be treated
-as hook changes.
-
 ## Key Constraints
 
 - Hermes `>= 0.14.0` (2026.5.16) required. `patcher.py` targets specific function names in Hermes's `gateway/run.py` (`_handle_message_with_agent`, `progress_callback`, `_stream_delta_cb`, `_interim_assistant_cb`) and `cron/scheduler.py` (`_deliver_result`). If Hermes changes these, `verify` will catch it.

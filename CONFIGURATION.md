@@ -4,6 +4,9 @@
 
 配置行为以 `hermes_lark_streaming/config.py` 为最终依据。历史 `.plans` 文档属于已完成实施计划，不应作为配置参考。
 
+Tool Panel 与 Run Details 的实现入口、字段作用范围、测试位置和部署判断见
+[`docs/FEATURE_MAINTENANCE.md`](docs/FEATURE_MAINTENANCE.md)；本文件是用户可配置值的唯一完整参考。
+
 ## 配置文件位置与 Profile
 
 Hermes 配置是 profile scoped。默认 profile 使用：
