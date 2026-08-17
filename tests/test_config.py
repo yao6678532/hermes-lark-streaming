@@ -152,15 +152,21 @@ class TestFooterFields:
     )
     def test_empty_footer_configuration_returns_default(self, raw: dict[str, Any]) -> None:
         cfg = _make_config(raw)
-        assert cfg.footer_fields == [["status", "elapsed", "context", "model"]]
+        assert cfg.footer_fields == [
+            ["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]
+        ]
 
     def test_footer_not_dict_returns_default(self) -> None:
         cfg = _make_config({"streaming": {"footer": "invalid"}})
-        assert cfg.footer_fields == [["status", "elapsed", "context", "model"]]
+        assert cfg.footer_fields == [
+            ["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]
+        ]
 
     def test_fields_non_list_returns_default(self) -> None:
         cfg = _make_config({"streaming": {"footer": {"fields": "status"}}})
-        assert cfg.footer_fields == [["status", "elapsed", "context", "model"]]
+        assert cfg.footer_fields == [
+            ["tokens", "context", "quota_reset", "cache", "reasoning", "balance"]
+        ]
 
 
 class TestHeaderEnabled:

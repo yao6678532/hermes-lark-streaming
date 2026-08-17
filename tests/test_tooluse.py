@@ -267,6 +267,21 @@ class TestResolveToolDescriptor:
             ("command", "platform_outlined", "command"),
             ("run", "platform_outlined", "command"),
             ("terminal", "platform_outlined", "command"),
+            ("process", "platform_outlined", "command"),
+            ("execute_code", "platform_outlined", "command"),
+            ("read_file", "file-link-text_outlined", "path"),
+            ("write_file", "edit_outlined", "path"),
+            ("patch", "edit_outlined", "path"),
+            ("web_extract", "language_outlined", "url"),
+            ("search_files", "folder_outlined", "path"),
+            ("skills_list", "setting-inter_outlined", None),
+            ("skill_view", "setting-inter_outlined", None),
+            ("skill_manage", "setting-inter_outlined", None),
+            ("vision_analyze", "image-ai_outlined", None),
+            ("todo", "list-check_outlined", None),
+            ("memory", "database_outlined", None),
+            ("session_search", "doc-search_outlined", "search"),
+            ("delegate_task", "robot_outlined", None),
             ("browser", "internet_outlined", None),
             ("playwright", "internet_outlined", None),
             ("navigate", "internet_outlined", None),
@@ -304,6 +319,12 @@ class TestResolveToolDescriptor:
         desc = _resolve_tool_descriptor("read_file")
         assert desc is not None
         assert desc["title"] == "Read"
+
+    def test_exact_match_has_priority_over_generic_prefix(self) -> None:
+        desc = _resolve_tool_descriptor("search_files")
+        assert desc is not None
+        assert desc["icon"] == "folder_outlined"
+        assert desc["title"] == "Search files"
 
 
 class TestHumanizeToolName:
@@ -467,7 +488,8 @@ class TestToolUseTracker:
         tracker = ToolUseTracker()
         tracker.record_start("custom_tool_xyz", "")
         steps = tracker.build_display_steps()
-        assert steps[0]["icon"] == "setting-inter_outlined"
+        assert steps[0]["icon"] == "setting_outlined"
+        assert steps[0]["icon"] != "setting-inter_outlined"
 
     def test_no_result_tools_skip_result_block(self) -> None:
         tracker = ToolUseTracker()

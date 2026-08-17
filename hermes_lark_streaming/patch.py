@@ -25,6 +25,75 @@ from .interactions.clarify import (
 
 _logger = logging.getLogger("hermes_lark_streaming")
 
+_TURN_USAGE_COUNTERS: dict[str, tuple[str, ...]] = {
+    # ``prompt_tokens`` is the provider-reported prompt total.  Hermes'
+    # canonical ``input_tokens`` excludes cache buckets, so retain both and
+    # let the footer use the prompt total for the user-facing input count.
+    "prompt_tokens": ("session_prompt_tokens",),
+    "input_tokens": ("session_input_tokens",),
+    "output_tokens": ("session_output_tokens", "session_completion_tokens"),
+    "cache_read_tokens": ("session_cache_read_tokens",),
+    "cache_write_tokens": ("session_cache_write_tokens",),
+    "reasoning_tokens": ("session_reasoning_tokens",),
+}
+
+
+def _usage_counter(agent: Any, attributes: tuple[str, ...]) -> int | None:
+    """Read the first available non-negative Hermes usage counter."""
+    for attribute in attributes:
+        if not hasattr(agent, attribute):
+            continue
+        value = getattr(agent, attribute, None)
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            continue
+        if parsed >= 0:
+            return parsed
+    return None
+
+
+def capture_turn_usage_baseline(agent: Any) -> dict[str, int] | None:
+    """Snapshot cumulative canonical counters immediately before one turn."""
+    baseline = {
+        name: value
+        for name, attributes in _TURN_USAGE_COUNTERS.items()
+        if (value := _usage_counter(agent, attributes)) is not None
+    }
+    return baseline or None
+
+
+def current_turn_usage(
+    agent: Any,
+    *,
+    baseline: dict[str, int] | None,
+    fallback: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return whole-turn canonical usage without exposing session totals.
+
+    Hermes counters are session-cumulative, but their difference across one
+    ``run_conversation`` call is a reliable per-turn total, including tool-loop
+    provider calls.  Older Hermes versions without these counters fall back to
+    ``_last_turn_usage`` (the latest provider response) and remain fail-open.
+    """
+    usage = dict(fallback) if isinstance(fallback, dict) else {}
+    if not isinstance(baseline, dict):
+        return usage or None
+
+    for name, attributes in _TURN_USAGE_COUNTERS.items():
+        before = baseline.get(name)
+        after = _usage_counter(agent, attributes)
+        if not isinstance(before, int) or after is None or after < before:
+            # A reset/rotation makes this counter unsuitable for subtraction;
+            # keep the canonical last-call fallback for that individual field.
+            continue
+        delta = after - before
+        if delta > 0 or name not in usage:
+            usage[name] = delta
+    return usage or None
+
 
 def _safe_hook(
     default_return: Any = None,
@@ -302,6 +371,22 @@ def on_message_started(
     )
 
 
+@_safe_hook()
+def on_turn_usage(
+    *,
+    ctrl: Any,
+    message_id: str,
+    usage: dict[str, Any] | None = None,
+    api_calls: object = 0,
+) -> None:
+    """Forward Hermes' canonical current-turn usage to the active card."""
+    ctrl.on_turn_usage(
+        message_id=message_id,
+        usage=usage,
+        api_calls=api_calls,
+    )
+
+
 @_safe_hook(default_return=False)
 async def on_message_completed_wait(
     *,
@@ -347,10 +432,6 @@ async def on_queued_followup_boundary(*, ctrl: Any, message_id: str, result: dic
             is_error=bool(result.get("failed")),
             duration=0.0,
             model=result.get("model", ""),
-            tokens={
-                "input_tokens": result.get("input_tokens", 0),
-                "output_tokens": result.get("output_tokens", 0),
-            },
             context={
                 "used_tokens": result.get("last_prompt_tokens", 0),
                 "max_tokens": result.get("context_length", 0),
@@ -466,13 +547,18 @@ def on_message_aborted(*, ctrl: Any, message_id: str) -> None:
     ctrl.on_aborted(message_id=message_id)
 
 
-async def on_session_aborted(*, session_key: str) -> bool:
+async def on_session_aborted(*, session_key: str, stop_command: bool = False) -> bool:
     """Terminate the active card after Hermes handles a busy-session /stop."""
     try:
         ctrl = get_controller()
         if not ctrl.enabled:
             return False
-        return bool(await ctrl.on_session_aborted(session_key=session_key))
+        return bool(
+            await ctrl.on_session_aborted(
+                session_key=session_key,
+                stop_command=stop_command,
+            )
+        )
     except Exception as exc:
         _logger.warning("on_session_aborted error: %s", exc, exc_info=True)
         return False

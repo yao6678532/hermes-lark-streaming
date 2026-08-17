@@ -33,6 +33,32 @@ _COMMENTARY_STAGE_2 = "第 2 阶段\uFF1A继续读取 AGENTS.md\uFF0C确认最�
 _FINAL_ANSWER = "第 3 阶段\uFF1A比较与总结\n项目版本……\n最低 Hermes 版本……\n最终结论……"
 
 
+def _run_details_panel(card: dict) -> dict:
+    return next(
+        element
+        for element in card["body"]["elements"]
+        if element.get("tag") == "collapsible_panel"
+        and "💭" not in element.get("header", {}).get("title", {}).get("content", "")
+        and element.get("element_id") is None
+    )
+
+
+def _run_details_text(panel: dict) -> str:
+    """Collect markdown from both ordinary and visual Run Details rows."""
+    parts: list[str] = []
+
+    def visit(element: dict) -> None:
+        if element.get("tag") == "markdown":
+            parts.append(element.get("content", ""))
+        for column in element.get("columns", []):
+            for child in column.get("elements", []):
+                visit(child)
+
+    for element in panel.get("elements", []):
+        visit(element)
+    return "\n".join(parts)
+
+
 def _enable(ctrl: StreamCardController) -> None:
     ctrl._cfg._raw = {
         "streaming": {"enabled": True},
@@ -95,7 +121,128 @@ def test_enabled_retries_unsuccessful_unscoped_fallback() -> None:
 
 def test_gpt_quota_lookup_failure_is_fail_open() -> None:
     with patch.dict(sys.modules, {"agent.credential_pool": None}):
-        assert controller_module._fetch_gpt_quota_footer("gpt-5-codex") == ""
+        assert controller_module._fetch_gpt_quota_footer("gpt-5-codex") == {}
+
+
+def test_gpt_quota_source_separates_remaining_and_reset() -> None:
+    credential_pool = ModuleType("agent.credential_pool")
+    credential_pool.load_pool = MagicMock(  # type: ignore[attr-defined]
+        return_value=SimpleNamespace(
+            select=lambda: SimpleNamespace(
+                access_token="token",
+                base_url="https://chatgpt.com/backend-api/codex",
+                extra={"account_id": "account"},
+            )
+        )
+    )
+    response = MagicMock()
+    response.json.return_value = {
+        "rate_limit": {
+            "primary_window": {
+                "limit_window_seconds": 18_000,
+                "used_percent": 5,
+                "reset_at": "2026-08-11T02:30:00+00:00",
+            },
+            "secondary_window": {
+                "limit_window_seconds": 604800,
+                "used_percent": 5,
+                "reset_at": "2026-08-16T02:30:00+00:00",
+            }
+        }
+    }
+
+    with patch.dict(sys.modules, {"agent.credential_pool": credential_pool}), patch(
+        "httpx.get", return_value=response
+    ):
+        quota = controller_module._fetch_gpt_quota_footer("gpt-5.6-luna")
+
+    assert quota == {
+        "remaining": "<font color='green'>95%</font>",
+        "reset_at": "2026-08-16T02:30:00+00:00",
+    }
+    response.raise_for_status.assert_called_once_with()
+
+
+def test_weekly_quota_window_can_be_primary_and_is_selected_by_duration() -> None:
+    weekly = {"limit_window_seconds": 604800, "used_percent": 80, "reset_at": 123}
+    short = {"limit_window_seconds": 18_000, "used_percent": 5, "reset_at": 456}
+    assert controller_module._weekly_quota_window({"primary_window": weekly, "secondary_window": short}) is weekly
+
+
+def test_missing_weekly_quota_window_is_fail_open() -> None:
+    assert controller_module._weekly_quota_window(
+        {"primary_window": {"limit_window_seconds": 18_000, "used_percent": 5}}
+    ) is None
+
+
+@pytest.mark.parametrize(
+    ("remaining", "expected"),
+    [
+        (100, "green"),
+        (50, "green"),
+        (49, "orange"),
+        (20, "orange"),
+        (19, "red"),
+        (0, "red"),
+    ],
+)
+def test_quota_color_thresholds(remaining: int, expected: str) -> None:
+    assert controller_module._quota_color(remaining) == expected
+
+
+def test_current_turn_usage_maps_canonical_metadata_without_session_totals() -> None:
+    data = controller_module._turn_usage_footer_data(
+        {
+            "prompt_tokens": 70_500,
+            "input_tokens": 18_200,
+            "output_tokens": 2_100,
+            "cache_read_tokens": 52_300,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 1_600,
+            "session_input_tokens": 999_999,
+        },
+        api_calls=3,
+    )
+
+    assert data == {
+        "input_tokens": 70_500,
+        "cache_prompt_tokens": 70_500,
+        "output_tokens": 2_100,
+        "cache_read_tokens": 52_300,
+        "reasoning_tokens": 1_600,
+        "api_calls": 3,
+    }
+    assert 999_999 not in data.values()
+
+
+def test_on_turn_usage_stores_only_positive_current_turn_metadata() -> None:
+    loop = asyncio.new_event_loop()
+    try:
+        ctrl = StreamCardController()
+        ctrl._cfg = MagicMock()
+        ctrl._cfg.enabled = True
+        ctrl._cfg.feishu_app_id = "app"
+        ctrl._cfg.env_app_id = ""
+        session = CardSession("usage-message", "chat", loop)
+        ctrl._sessions[session.message_id] = session
+
+        ctrl.on_turn_usage(
+            message_id=session.message_id,
+            usage={
+                "prompt_tokens": 1_200,
+                "output_tokens": 0,
+                "cache_read_tokens": 200,
+                "reasoning_tokens": None,
+            },
+        )
+
+        assert session.footer == {
+            "input_tokens": 1_200,
+            "cache_prompt_tokens": 1_200,
+            "cache_read_tokens": 200,
+        }
+    finally:
+        loop.close()
 
 
 def test_reasoning_hook_forwards_api_mode() -> None:
@@ -271,6 +418,7 @@ async def test_on_session_aborted_only_stops_matching_session_key() -> None:
             chat_id="shared-chat",
             session_key="session:second",
         )
+        ctrl._sessions["first"].card_id = "card:first"
         with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True) as complete:
             assert await ctrl.on_session_aborted(session_key="session:first") is True
 
@@ -308,6 +456,50 @@ async def test_on_session_aborted_waits_for_card_creation() -> None:
         assert await waiter is True
 
     complete.assert_awaited_once_with(session)
+
+
+@pytest.mark.asyncio
+async def test_stop_session_aborted_sets_continue_hint_only_for_explicit_stop() -> None:
+    ctrl = _setup_ctrl()
+    stop_session = _make_session("stop")
+    stop_session.session_key = "session:stop"
+    stop_session.card_id = "card:stop"
+    ctrl._sessions["stop"] = stop_session
+    ctrl._session_keys["session:stop"] = stop_session
+
+    generic_session = _make_session("generic")
+    generic_session.session_key = "session:generic"
+    generic_session.card_id = "card:generic"
+    ctrl._sessions["generic"] = generic_session
+    ctrl._session_keys["session:generic"] = generic_session
+
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True):
+        assert await ctrl.on_session_aborted(session_key="session:stop", stop_command=True) is True
+        assert await ctrl.on_session_aborted(session_key="session:generic") is True
+
+    assert stop_session.footer["stop_continue_hint"] is True
+    assert "stop_continue_hint" not in generic_session.footer
+
+
+@pytest.mark.asyncio
+async def test_stop_session_aborted_fails_open_without_card_or_on_update_failure() -> None:
+    ctrl = _setup_ctrl()
+    no_card = _make_session("no-card")
+    no_card.session_key = "session:no-card"
+    ctrl._sessions["no-card"] = no_card
+    ctrl._session_keys["session:no-card"] = no_card
+
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True) as complete:
+        assert await ctrl.on_session_aborted(session_key="session:no-card", stop_command=True) is False
+    complete.assert_not_awaited()
+
+    failed = _make_session("failed")
+    failed.session_key = "session:failed"
+    failed.card_id = "card:failed"
+    ctrl._sessions["failed"] = failed
+    ctrl._session_keys["session:failed"] = failed
+    with patch.object(ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=False):
+        assert await ctrl.on_session_aborted(session_key="session:failed", stop_command=True) is False
 
 
 @pytest.mark.asyncio
@@ -619,6 +811,52 @@ class TestAwaitedCompletion:
             ) is True
 
         assert session.state == SessionState.FAILED
+
+    @pytest.mark.asyncio
+    async def test_completion_merges_turn_usage_with_structured_quota(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_usage_complete", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_usage_complete"
+        session.card_msg_id = "card_msg_usage_complete"
+        session.footer = {
+            "input_tokens": 12_400,
+            "output_tokens": 1_800,
+            "cache_read_tokens": 10_200,
+            "reasoning_tokens": 3_600,
+        }
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(
+            ctrl, "_complete_session_wait", new_callable=AsyncMock, return_value=True
+        ), patch(
+            "hermes_lark_streaming.controller._fetch_gpt_quota_footer",
+            return_value={
+                "remaining": "<font color='green'>95%</font>",
+                "reset_at": "2026-08-16T02:30:00+00:00",
+            },
+        ):
+            assert await ctrl.on_completed_wait(
+                message_id=session.message_id,
+                answer="answer",
+                duration=4.4,
+                model="gpt-5.6-luna",
+                context={"used_tokens": 70_500, "max_tokens": 272_000},
+            ) is True
+
+        assert session.footer == {
+            "duration": 4.4,
+            "model": "gpt-5.6-luna",
+            "input_tokens": 12_400,
+            "output_tokens": 1_800,
+            "cache_read_tokens": 10_200,
+            "reasoning_tokens": 3_600,
+            "context_used": 70_500,
+            "context_max": 272_000,
+            "balance": "",
+            "gpt_quota_remaining": "<font color='green'>95%</font>",
+            "gpt_quota_reset_at": "2026-08-16T02:30:00+00:00",
+        }
 
 
 @pytest.mark.asyncio
@@ -969,8 +1207,10 @@ class TestDoCreateCard:
             if element.get("tag") == "markdown"
         )
         assert "commentaryfinal answer" in body_text
-        assert "✅ 26.5s · 5h 80% · gpt-5" in body_text
-        assert "50.0K" not in body_text
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_applies_width_mode_to_streaming_card(self) -> None:
@@ -1569,7 +1809,6 @@ class TestDoFlush:
         await ctrl._do_flush(session)
 
         assert calls == [
-            ("batch", "card_tool_pending_old"),
             ("create", ""),
             ("reply", ""),
             ("close", "card_tool_pending_old"),
@@ -1577,11 +1816,11 @@ class TestDoFlush:
             ("batch", "card_tool_pending_next"),
         ]
         assert session.card_id == "card_tool_pending_next"
-        assert session.split_index == 2
-        assert len(session.segment_state.segments) == 3
-        assert session.segment_state.segments[1].tool_end_offset == 1
-        assert session.segment_state.segments[2].tool_offset == 1
-        assert session.segment_state.segments[2].created is True
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 2
+        assert session.segment_state.segments[1].tool_offset == 0
+        assert session.segment_state.segments[1].tool_end_offset == 0
+        assert session.segment_state.segments[1].created is True
 
     @pytest.mark.asyncio
     async def test_oversized_new_tool_segment_splits_across_multiple_cards(self) -> None:
@@ -1624,8 +1863,8 @@ class TestDoFlush:
         assert session.card_msg_id == "msg_tool_page_3"
         assert session.split_index == 2
         assert len(session.segment_state.segments) == 3
-        assert [s.tool_offset for s in session.segment_state.segments] == [0, 58, 116]
-        assert [s.tool_end_offset for s in session.segment_state.segments] == [58, 116, 0]
+        assert [s.tool_offset for s in session.segment_state.segments] == [0, 57, 114]
+        assert [s.tool_end_offset for s in session.segment_state.segments] == [57, 114, 0]
         assert all(s.created for s in session.segment_state.segments)
         assert session.segment_state.segments[-1].element_estimate + session.element_count <= 180
 
@@ -2177,8 +2416,10 @@ class TestMergedReasoning:
             "最终结论……",
         ):
             assert text in body_text
-        assert "✅ 26.5s · 5h 80% · gpt-5" in body_text
-        assert "50.0K" not in body_text
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_codex_activity_uses_one_lane_across_hidden_tools_and_final_card(self) -> None:
@@ -2286,13 +2527,10 @@ class TestMergedReasoning:
         ]
         assert len(final_reasoning_panels) == 1
         assert final_reasoning_panels[0]["elements"][0]["content"] == "Confirming"
-        footer_contents = [
-            element["content"]
-            for element in complete_card["body"]["elements"]
-            if element.get("tag") == "markdown"
-        ]
-        assert "✅ 26.5s · 5h 80% · gpt-5" in footer_contents
-        assert not any("50.0K" in content for content in footer_contents)
+        details = _run_details_panel(complete_card)
+        assert details["expanded"] is False
+        details_text = _run_details_text(details)
+        assert "Context used 25%" in details_text
 
     @pytest.mark.asyncio
     async def test_chat_completions_reasoning_deltas_append_in_merged_presentation(self) -> None:

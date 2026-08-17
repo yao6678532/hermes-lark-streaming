@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime, timedelta
+from unittest.mock import patch
+
 import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
@@ -17,8 +21,11 @@ from hermes_lark_streaming.cardkit.builder import (
     _compact,
     _escape_md,
     _format_elapsed,
+    _format_quota_reset_at,
+    _format_quota_reset_label,
     _format_tool_elapsed,
     _longest_backtick_run,
+    _run_details_metric_color,
     build_complete_card,
     build_streaming_card_v2,
 )
@@ -350,7 +357,10 @@ class TestBuildToolPanel:
     def test_empty_steps(self) -> None:
         panel = _build_tool_panel([])
         assert panel["element_id"] == TOOL_PANEL_ELEMENT_ID
+        assert panel["header"]["title"]["tag"] == "plain_text"
         assert "Tool use" in panel["header"]["title"]["content"]
+        assert panel["border"] == {"color": "grey", "corner_radius": "5px"}
+        assert panel["padding"] == "8px 8px 8px 8px"
 
     def test_with_steps(self) -> None:
         panel = _build_tool_panel([_STEP_SUCCESS], elapsed_ms=500)
@@ -384,7 +394,7 @@ class TestBuildToolPanel:
     @pytest.mark.parametrize(
         ("status", "elapsed_ms", "icon_color", "text_color", "label"),
         [
-            ("running", 0, "grey", "grey", "Running"),
+            ("running", 0, "grey", "wathet", "Running"),
             ("success", 50, "grey", "green", "\uff1c0.1s"),
             ("success", 99, "grey", "green", "\uff1c0.1s"),
             ("success", 100, "grey", "green", "0.1s"),
@@ -452,62 +462,739 @@ class TestBuildToolPanel:
 
 
 class TestBuildFooterElements:
+    @staticmethod
+    def _panel(result: list[dict]) -> dict:
+        panel = result[1]
+        assert panel["tag"] == "collapsible_panel"
+        return panel
+
+    @staticmethod
+    def _unwrap_grey(value: str) -> str:
+        return re.sub(r"<font color='grey'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
+
+    @staticmethod
+    def _unwrap_summary_styles(value: str) -> str:
+        value = re.sub(r"<font color='black'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
+        return re.sub(r"<font color='grey'>(.*?)</font>", r"\1", value, flags=re.DOTALL)
+
+    @classmethod
+    def _title(cls, result: list[dict]) -> dict:
+        title = cls._panel(result)["header"]["title"].copy()
+        title["content"] = cls._unwrap_summary_styles(title["content"])
+        title["i18n_content"] = {
+            locale: cls._unwrap_summary_styles(content)
+            for locale, content in title["i18n_content"].items()
+        }
+        return title
+
+    @classmethod
+    def _content(cls, result: list[dict]) -> str:
+        elements = cls._panel(result)["elements"]
+        if not elements:
+            return ""
+        lines: list[str] = []
+        for row in elements:
+            if row.get("tag") == "markdown":
+                lines.append(cls._unwrap_grey(row.get("content", "")))
+            for column in row.get("columns", []):
+                for element in column.get("elements", []):
+                    if element.get("tag") == "markdown":
+                        lines.append(cls._unwrap_grey(element.get("content", "")))
+                    elif element.get("tag") == "div":
+                        text = element.get("text", {})
+                        if text.get("tag") == "lark_md":
+                            lines.append(cls._unwrap_grey(text.get("content", "")))
+        return "\n".join(lines)
+
+    @classmethod
+    def _percentage_rows(cls, result: list[dict]) -> list[dict]:
+        return [
+            element
+            for element in cls._panel(result)["elements"]
+            if element.get("tag") == "column_set" and any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+
+    @classmethod
+    def _markdown_elements(cls, result: list[dict]) -> list[dict]:
+        return [
+            child
+            for row in cls._panel(result)["elements"]
+            for column in row.get("columns", [])
+            for child in column.get("elements", [])
+            if child.get("tag") == "markdown"
+        ]
+
     def test_empty_data_renders_default_status(self) -> None:
-        # 默认字段包含 "status"，总是会渲染
+        # 默认字段只包含额外 metadata；状态由 compact summary 展示。
         result = _build_footer_elements({})
         assert len(result) >= 2
-        assert result[1]["content"] == "✅"
+        assert self._panel(result)["expanded"] is False
+        assert self._title(result)["content"] == "✅"
+        assert self._panel(result)["elements"] == []
 
-    def test_completed_status_uses_compact_spacing(self) -> None:
+    def test_summary_uses_elapsed_and_model(self) -> None:
         result = _build_footer_elements(
             {"duration": 26.5, "model": "gpt-5"},
             fields=[["status", "elapsed", "model"]],
         )
-        assert result[1]["content"] == "✅ 26.5s · gpt-5"
+        title = self._title(result)
+        assert title["content"] == "✅ 26.5s · gpt-5"
+        assert title["i18n_content"]["zh_cn"] == "✅ 26.5s · gpt-5"
+        assert "Run Details" not in title["content"]
+        assert "运行详情" not in title["i18n_content"]["zh_cn"]
 
-    def test_gpt_quota_hides_context(self) -> None:
+    def test_summary_uses_default_markdown_color(self) -> None:
+        result = _build_footer_elements({"duration": 4.4, "model": "gpt-5.6-luna"})
+        raw_title = self._panel(result)["header"]["title"]["content"]
+        assert raw_title == "<font color='black'>✅ 4.4s · gpt-5.6-luna</font>"
+        assert not raw_title.startswith("<font color='grey'>")
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            ({"model": "gpt-5"}, "✅ gpt-5"),
+            ({"duration": 26.5}, "✅ 26.5s"),
+            ({}, "✅"),
+        ],
+    )
+    def test_summary_omits_missing_core_parts(self, data: dict, expected: str) -> None:
+        result = _build_footer_elements(data, fields=[["status"]])
+        assert self._title(result)["content"] == expected
+
+    def test_gpt_quota_keeps_context_available_in_detail(self) -> None:
+        remaining = "<font color='green'>80%</font>"
+        reset_at = datetime.now().astimezone() + timedelta(days=5)
         result = _build_footer_elements(
             {
                 "context_used": 50000,
                 "context_max": 200000,
-                "gpt_quota": "5h 80%",
+                "gpt_quota_remaining": remaining,
+                "gpt_quota_reset_at": reset_at,
             },
-            fields=[["status", "context", "gpt_quota"]],
+            fields=[["status", "context", "gpt_quota", "quota_reset"]],
         )
-        assert result[1]["content"] == "✅ 5h 80%"
-        assert "50.0K" not in result[1]["content"]
+        content = self._content(result)
+        title = self._title(result)
+        assert title["content"] == f"✅ {remaining}"
+        assert "↻" not in content
+        assert "GPT remaining 80%" in content
+        assert "Context used 25%" in content
+
+    def test_malformed_quota_reset_is_fail_open_for_detail(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>95%</font>",
+                "gpt_quota_reset_at": "not-a-timestamp",
+            },
+            fields=[["quota_reset"]],
+        )
+        assert self._panel(result)["elements"] == []
+
+    def test_quota_markup_is_rendered_in_markdown_summary_header(self) -> None:
+        quota = "<font color='green'>95%</font>"
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "gpt-5.6-luna",
+                "gpt_quota_remaining": quota,
+                "gpt_quota_reset_at": "2026-08-16T02:30:00+00:00",
+            },
+            fields=[["gpt_quota", "quota_reset"]],
+        )
+        title = self._panel(result)["header"]["title"]
+        assert title["tag"] == "markdown"
+        assert title["content"] == (
+            f"<font color='black'>✅ 2m 2s · gpt-5.6-luna · </font>{quota}"
+        )
+        assert quota in title["content"]
+        assert f"<font color='grey'>{quota}" not in title["content"]
+        assert not title["content"].startswith("<font color='grey'>")
+        assert "GPT remaining 95%" in self._content(result)
+        assert "↻" not in self._content(result)
+
+    def test_balance_replaces_context_in_summary_without_quota(self) -> None:
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "deepseek-v3",
+                "context_used": 50000,
+                "context_max": 128000,
+                "balance": "¥4.97",
+            },
+            fields=[["status", "elapsed", "model"]],
+        )
+        assert self._title(result)["content"] == "✅ 2m 2s · deepseek-v3 · ¥4.97"
+        assert self._panel(result)["elements"] == []
 
     def test_status_error(self) -> None:
-        result = _build_footer_elements({}, is_error=True)
-        assert "red" in result[1]["content"]
+        result = _build_footer_elements({"input_tokens": 1}, is_error=True, fields=[["status", "tokens"]])
+        assert self._title(result)["content"] == "❌ Error"
+        assert self._content(result) == "<font color='red'>Tokens ↑ 1</font>"
+        assert all(
+            "<font color='grey'><font color='red'>" not in element["content"]
+            for element in self._markdown_elements(result)
+        )
 
     def test_status_aborted(self) -> None:
-        result = _build_footer_elements({}, is_aborted=True)
-        assert "Stopped" in result[1]["content"]
+        result = _build_footer_elements({"output_tokens": 1}, is_aborted=True, fields=[["status", "tokens"]])
+        assert self._title(result)["content"] == "⬛️ Stopped"
+        assert self._content(result) == "Tokens ↓ 1"
+
+    def test_explicit_stop_adds_continue_hint_to_grey_detail(self) -> None:
+        result = _build_footer_elements(
+            {"stop_continue_hint": True},
+            is_aborted=True,
+            fields=[["tokens"]],
+        )
+        panel = self._panel(result)
+        assert self._content(result) == "You can continue this session."
+        assert panel["elements"][0]["i18n_content"]["zh_cn"] == "<font color='grey'>会话仍可继续。</font>"
+        assert "Stopped" not in self._content(result)
+
+    def test_generic_aborted_has_no_continue_hint(self) -> None:
+        result = _build_footer_elements({}, is_aborted=True, fields=[["tokens"]])
+        assert self._panel(result)["elements"] == []
 
     def test_elapsed_displayed(self) -> None:
         result = _build_footer_elements({"duration": 12.5}, fields=[["elapsed"]])
-        assert "12.5s" in result[1]["content"]
+        assert self._title(result)["content"] == "✅ 12.5s"
+        assert self._content(result) == ""
 
     def test_model_displayed(self) -> None:
         result = _build_footer_elements({"model": "claude-3"}, fields=[["model"]])
-        assert "claude-3" in result[1]["content"]
+        assert self._title(result)["content"] == "✅ claude-3"
+        assert self._content(result) == ""
 
     def test_context_displayed(self) -> None:
         result = _build_footer_elements(
             {"context_used": 50000, "context_max": 200000},
             fields=[["context"]],
         )
-        assert "50.0K" in result[1]["content"]
-        assert "25%" in result[1]["content"]
+        assert self._title(result)["content"] == "✅"
+        assert "Context used 25%" in self._content(result)
 
     def test_tokens_displayed(self) -> None:
         result = _build_footer_elements(
             {"input_tokens": 1000, "output_tokens": 500},
             fields=[["tokens"]],
         )
-        assert "↑" in result[1]["content"]
-        assert "↓" in result[1]["content"]
+        assert self._content(result) == "Tokens ↑ 1.0K · ↓ 500"
+
+    @pytest.mark.parametrize(
+        ("data", "expected"),
+        [
+            ({"input_tokens": 1200}, "Tokens ↑ 1.2K"),
+            ({"output_tokens": 800}, "Tokens ↓ 800"),
+        ],
+    )
+    def test_tokens_omit_missing_direction(self, data: dict, expected: str) -> None:
+        result = _build_footer_elements(data, fields=[["tokens"]])
+        assert self._content(result) == expected
+
+    def test_tokens_with_no_usage_are_hidden(self) -> None:
+        result = _build_footer_elements({}, fields=[["tokens"]])
+        assert self._panel(result)["elements"] == []
+
+    def test_cache_hit_uses_current_prompt_denominator(self) -> None:
+        result = _build_footer_elements(
+            {
+                "input_tokens": 70_500,
+                "cache_prompt_tokens": 70_500,
+                "cache_read_tokens": 52_300,
+            },
+            fields=[["cache"]],
+        )
+        assert "Cache hit 74%" in self._content(result)
+        assert "52.3K / 70.5K" in self._content(result)
+        assert "缓存命中 74%" in str(self._panel(result)["elements"])
+
+    @pytest.mark.parametrize(
+        "data",
+        [{}, {"cache_read_tokens": 0, "cache_write_tokens": 0}],
+    )
+    def test_cache_is_hidden_without_positive_usage(self, data: dict) -> None:
+        result = _build_footer_elements(data, fields=[["cache"]])
+        assert self._panel(result)["elements"] == []
+
+    def test_cache_does_not_divide_by_zero(self) -> None:
+        result = _build_footer_elements(
+            {"cache_read_tokens": 1000, "cache_prompt_tokens": 0},
+            fields=[["cache"]],
+        )
+        assert self._content(result) == "Cache Read 1.0K"
+
+    def test_reasoning_tokens_are_optional(self) -> None:
+        shown = _build_footer_elements(
+            {"reasoning_tokens": 1600},
+            fields=[["reasoning"]],
+        )
+        hidden = _build_footer_elements({}, fields=[["reasoning"]])
+        assert self._content(shown) == "Reasoning 1.6K"
+        assert self._panel(hidden)["elements"] == []
+
+    def test_detail_fields_use_two_columns_and_share_footer_style(self) -> None:
+        result = _build_footer_elements(
+            {
+                "input_tokens": 1000,
+                "context_used": 500,
+                "context_max": 2000,
+                "balance": "¥4.97",
+                "api_calls": 2,
+            },
+            fields=[["tokens", "context", "balance", "api_calls"]],
+            text_size="normal_v2",
+        )
+        panel = self._panel(result)
+        detail = panel["elements"][0]
+        assert "Context used 25%" in self._content(result)
+        assert self._title(result)["content"] == "✅ ¥4.97"
+        assert "Balance ¥4.97" not in self._content(result)
+        assert all(
+            element.get("tag") != "markdown" or " · Context" not in element.get("content", "")
+            for element in panel["elements"]
+        )
+        assert panel["header"]["title"]["text_size"] == "normal_v2"
+        assert all(
+            element.get("text_size") == "normal_v2"
+            for element in panel["elements"]
+            if element.get("tag") == "markdown"
+        )
+        assert not panel["header"]["title"]["content"].startswith("<font color='grey'>")
+        assert any(
+            element.get("content", "").startswith("<font color='grey'>")
+            for element in self._markdown_elements(result)
+        )
+        detail_rows = [
+            element
+            for element in panel["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert len(detail_rows[-1]["columns"]) == 2
+        assert detail_rows[-1]["horizontal_spacing"] == "12px"
+        assert "text_color" not in panel["header"]["title"]
+        assert "text_color" not in detail
+
+    def test_run_details_removes_border_but_keeps_padding(self) -> None:
+        panel = self._panel(_build_footer_elements({"duration": 4.4, "model": "gpt-5"}))
+        assert "border" not in panel
+        assert panel["margin"] == "-6px 0px 0px 0px"
+        assert panel["padding"] == "6px 0px 0px 0px"
+
+    def test_default_gpt_details_keep_only_single_line_tokens_after_metrics(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>85%</font>",
+                "gpt_quota_reset_at": "2026-08-18T00:42:00+00:00",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+            }
+        )
+        content = self._content(result)
+        rows = self._percentage_rows(result)
+        assert len(rows) == 1
+        assert "GPT remaining 85%" in content
+        assert "Context used 7%" in content
+        assert "Cache hit" not in content
+        assert "Reasoning" not in content
+        assert "Reset " in content
+        assert "Context 19.7K / 272.0K" not in content
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
+        token_row = next(
+            element
+            for element in self._panel(result)["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        )
+        assert [column["elements"][0]["icon"]["token"] for column in token_row["columns"]] == [
+            "space-up_outlined", "space-down_outlined"
+        ]
+        assert len(self._percentage_rows(result)) == 1
+
+    def test_context_and_cache_promote_without_provider_or_model_name(self) -> None:
+        result = _build_footer_elements(
+            {
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "model": "any-runtime-name",
+            }
+        )
+        rows = self._percentage_rows(result)
+        assert len(rows) == 1
+        content = self._content(result)
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Context 19.7K / 272.0K" not in content
+
+    def test_default_usage_billed_details_keep_only_single_line_tokens_after_metrics(self) -> None:
+        result = _build_footer_elements(
+            {
+                "model": "deepseek-v3",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+                "balance": "¥4.97",
+            },
+        )
+        assert self._title(result)["content"] == "✅ deepseek-v3 · ¥4.97"
+        content = self._content(result)
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Reasoning" not in content
+        assert "Balance" not in content
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
+        assert len(self._percentage_rows(result)) == 1
+
+    def test_only_context_builds_one_metric_without_empty_placeholder(self) -> None:
+        result = _build_footer_elements({"context_used": 19700, "context_max": 272000})
+        rows = self._percentage_rows(result)
+        assert len(rows) == 1
+        assert len(rows[0]["columns"]) == 2
+        assert "Context used 7%" in self._content(result)
+
+    def test_explicit_fields_do_not_promote_unconfigured_quota(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>85%</font>",
+                "context_used": 19700,
+                "context_max": 272000,
+            },
+            fields=[["context"]],
+        )
+        content = self._content(result)
+        assert "Context used 7%" in content
+        assert "GPT remaining" not in content
+
+    def test_explicit_fields_keep_cache_and_reasoning_details(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>85%</font>",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+            },
+            fields=[["tokens", "context", "gpt_quota", "cache", "reasoning"]],
+        )
+        content = self._content(result)
+        assert "GPT remaining 85%" in content
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" in content
+        assert "Reasoning 3.6K" in content
+
+    def test_runtime_default_fields_promote_quota_and_context(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>97%</font>",
+                "gpt_quota_reset_at": "2026-08-18T00:42:00+00:00",
+                "context_used": 19700,
+                "context_max": 272000,
+            },
+            fields=[[
+                "tokens", "context", "quota_reset", "cache", "reasoning", "balance"
+            ]],
+        )
+        rows = self._percentage_rows(result)
+        assert len(rows) == 1
+        assert len(rows[0]["columns"]) == 4
+        content = self._content(result)
+        assert "GPT remaining 97%" in content
+        assert "Context used 7%" in content
+        assert "Reset " in content
+        assert all(column["vertical_align"] == "center" for column in rows[0]["columns"])
+        values = [
+            column["elements"][0]["chart_spec"]["data"]["values"][0]["value"]
+            for column in rows[0]["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert values == [pytest.approx(0.97), pytest.approx(19700 / 272000)]
+
+    def test_assistant_profile_default_fields_use_single_line_tokens_detail(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>97%</font>",
+                "gpt_quota_reset_at": "2026-08-18T00:42:00+00:00",
+                "context_used": 19800,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+                "reasoning_tokens": 3600,
+                "balance": "¥4.97",
+            },
+            fields=[[
+                "status",
+                "tokens",
+                "context",
+                "quota_reset",
+                "cache",
+                "reasoning",
+                "balance",
+            ]],
+        )
+        panel = self._panel(result)
+        percentage_row = self._percentage_rows(result)[0]
+        assert len(percentage_row["columns"]) == 4
+        values = [
+            column["elements"][0]["chart_spec"]["data"]["values"][0]["value"]
+            for column in percentage_row["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert values == [pytest.approx(0.97), pytest.approx(19800 / 272000)]
+        content = self._content(result)
+        assert "GPT remaining 97%" in content
+        assert "Context used 7%" in content
+        assert "Cache hit 95%" not in content
+        assert "Reasoning 3.6K" not in content
+        assert "Balance ¥4.97" not in content
+        assert "Input tokens 19.8K" in content
+        assert "Output tokens 11" in content
+        token_rows = [
+            element
+            for element in panel["elements"]
+            if element.get("tag") == "column_set"
+            and not any(
+                child.get("tag") == "chart"
+                for column in element.get("columns", [])
+                for child in column.get("elements", [])
+            )
+        ]
+        assert len(token_rows) == 1
+        assert [column["elements"][0]["icon"]["token"] for column in token_rows[0]["columns"]] == [
+            "space-up_outlined", "space-down_outlined"
+        ]
+
+    def test_cache_without_valid_denominator_is_not_promoted(self) -> None:
+        result = _build_footer_elements(
+            {"cache_read_tokens": 18900, "cache_prompt_tokens": 0},
+            fields=[["cache"]],
+        )
+        assert self._percentage_rows(result) == []
+        assert "Cache Read 18.9K" in self._content(result)
+
+    def test_quota_without_reset_still_builds_metric_without_empty_reset(self) -> None:
+        result = _build_footer_elements(
+            {"gpt_quota_remaining": "<font color='green'>85%</font>"},
+            fields=[["gpt_quota", "quota_reset"]],
+        )
+        assert len(self._percentage_rows(result)) == 1
+        content = self._content(result)
+        assert "GPT remaining 85%" in content
+        assert "Reset" not in content
+
+    def test_percentage_chart_uses_safe_28px_non_highlighting_hover_spec(self) -> None:
+        result = _build_footer_elements({"context_used": 19700, "context_max": 272000})
+        row = self._percentage_rows(result)[0]
+        circle_column = row["columns"][0]
+        chart = circle_column["elements"][0]
+        spec = chart["chart_spec"]
+        assert circle_column["width"] == "28px"
+        assert chart["height"] == "28px"
+        assert chart["preview"] is False
+        assert spec["type"] == "circularProgress"
+        assert spec["data"]["values"] == [{"type": "Context", "value": pytest.approx(19700 / 272000)}]
+        assert spec["categoryField"] == "type"
+        assert spec["valueField"] == "value"
+        assert spec["outerRadius"] == 0.81
+        assert spec["innerRadius"] == 0.51
+        assert spec["cornerRadius"] == 5
+        assert spec["progress"]["style"]["fill"] == {
+            "type": "threshold",
+            "field": "value",
+            "domain": [0.5, 0.8],
+            "range": ["#A2C10B", "#FF811A", "#F54A45"],
+        }
+        assert spec["indicator"]["visible"] is False
+        assert spec["legends"]["visible"] is False
+        assert spec["hover"] is False
+        expected_tooltip_pattern = {
+            "title": {"value": "Context"},
+            "content": [{"key": "Percentage", "value": "7%"}],
+        }
+        assert spec["tooltip"] == {
+            "mark": expected_tooltip_pattern,
+            "dimension": expected_tooltip_pattern,
+        }
+        assert spec["padding"] == 0
+        assert "preview" not in spec
+        assert "angleField" not in spec
+        assert "colorField" not in spec
+        text_column = row["columns"][1]
+        assert circle_column["vertical_align"] == "center"
+        assert text_column["vertical_align"] == "center"
+
+    def test_percentage_chart_tooltip_uses_distinct_labels_and_rounded_percentages(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>92%</font>",
+                "context_used": 57_116,
+                "context_max": 272_000,
+            },
+        )
+        charts = [
+            column["elements"][0]["chart_spec"]
+            for column in self._percentage_rows(result)[0]["columns"]
+            if column["elements"][0].get("tag") == "chart"
+        ]
+        assert charts[0]["data"]["values"] == [{"type": "GPT quota", "value": 0.92}]
+        assert charts[0]["tooltip"]["mark"] == {
+            "title": {"value": "GPT quota"},
+            "content": [{"key": "Percentage", "value": "92%"}],
+        }
+        assert charts[0]["tooltip"]["dimension"] == charts[0]["tooltip"]["mark"]
+        assert charts[1]["data"]["values"] == [{"type": "Context", "value": pytest.approx(57_116 / 272_000)}]
+        assert charts[1]["tooltip"]["mark"] == {
+            "title": {"value": "Context"},
+            "content": [{"key": "Percentage", "value": "21%"}],
+        }
+        assert charts[1]["tooltip"]["dimension"] == charts[1]["tooltip"]["mark"]
+
+    @pytest.mark.parametrize(
+        ("percentage", "expected"),
+        [
+            (100, "#A2C10B"),
+            (50, "#A2C10B"),
+            (49, "#FF811A"),
+            (20, "#FF811A"),
+            (19, "#F54A45"),
+            (0, "#F54A45"),
+        ],
+    )
+    def test_gpt_quota_circle_uses_remaining_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("gpt_quota", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("percentage", "expected"),
+        [
+            (0, "#A2C10B"),
+            (49, "#A2C10B"),
+            (50, "#FF811A"),
+            (79, "#FF811A"),
+            (80, "#F54A45"),
+            (100, "#F54A45"),
+        ],
+    )
+    def test_context_circle_uses_used_risk_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("context", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("percentage", "expected"),
+        [(0, "#7AA2FF"), (79, "#7AA2FF"), (80, "#A2C10B"), (100, "#A2C10B")],
+    )
+    def test_cache_circle_uses_neutral_success_thresholds(
+        self,
+        percentage: int,
+        expected: str,
+    ) -> None:
+        assert _run_details_metric_color("cache", percentage / 100) == expected
+
+    @pytest.mark.parametrize(
+        ("data", "expected_fraction", "expected_fill"),
+        [
+            (
+                {"gpt_quota_remaining": "<font color='green'>97%</font>"},
+                0.97,
+                {
+                    "type": "threshold",
+                    "field": "value",
+                    "domain": [0.2, 0.5],
+                    "range": ["#F54A45", "#FF811A", "#A2C10B"],
+                },
+            ),
+            (
+                {
+                    "cache_read_tokens": 52_300,
+                    "cache_prompt_tokens": 70_500,
+                },
+                52_300 / 70_500,
+                {
+                    "type": "threshold",
+                    "field": "value",
+                    "domain": [0.8],
+                    "range": ["#7AA2FF", "#A2C10B"],
+                },
+            ),
+        ],
+    )
+    def test_percentage_chart_uses_metric_fraction_for_quota_and_cache(
+        self,
+        data: dict,
+        expected_fraction: float,
+        expected_fill: dict,
+    ) -> None:
+        fields = [["gpt_quota"]] if "gpt_quota_remaining" in data else [["cache"]]
+        result = _build_footer_elements(data, fields=fields)
+        chart = self._percentage_rows(result)[0]["columns"][0]["elements"][0]
+        values = chart["chart_spec"]["data"]["values"]
+        expected_type = "GPT quota" if "gpt_quota_remaining" in data else "Cache"
+        expected_percentage = f"{round(expected_fraction * 100)}%"
+        assert values == [{"type": expected_type, "value": pytest.approx(expected_fraction)}]
+        assert chart["chart_spec"]["progress"]["style"]["fill"] == expected_fill
+        assert chart["chart_spec"]["tooltip"] == {
+            "mark": {
+                "title": {"value": expected_type},
+                "content": [{"key": "Percentage", "value": expected_percentage}],
+            },
+            "dimension": {
+                "title": {"value": expected_type},
+                "content": [{"key": "Percentage", "value": expected_percentage}],
+            },
+        }
+
+    def test_default_tokens_is_single_line_when_cache_not_promoted(self) -> None:
+        result = _build_footer_elements(
+            {
+                "gpt_quota_remaining": "<font color='green'>85%</font>",
+                "context_used": 19700,
+                "context_max": 272000,
+                "input_tokens": 19800,
+                "output_tokens": 11,
+                "cache_read_tokens": 18900,
+                "cache_prompt_tokens": 19800,
+            }
+        )
+        panel = self._panel(result)
+        assert len([element for element in panel["elements"] if element.get("tag") == "column_set"]) == 2
+        assert "Input tokens 19.8K" in self._content(result)
+        assert "Output tokens 11" in self._content(result)
+        assert "Cache hit" not in self._content(result)
 
     def test_show_label(self) -> None:
         result = _build_footer_elements(
@@ -515,17 +1202,140 @@ class TestBuildFooterElements:
             fields=[["elapsed"]],
             show_label=True,
         )
-        assert "Elapsed" in result[1]["content"]
+        assert self._content(result) == ""
 
     def test_multi_row_fields(self) -> None:
         result = _build_footer_elements(
             {"duration": 5, "model": "gpt"},
             fields=[["elapsed"], ["model"]],
         )
-        assert "\n" in result[1]["content"]
+        assert self._content(result) == ""
+
+    def test_field_subset_only_renders_selected_fields(self) -> None:
+        result = _build_footer_elements(
+            {"duration": 5, "model": "gpt", "balance": "$2"},
+            fields=[["model"]],
+        )
+        content = self._content(result)
+        assert content == ""
+
+    def test_summary_is_independent_from_footer_fields(self) -> None:
+        result = _build_footer_elements(
+            {
+                "duration": 122,
+                "model": "gpt-5.6-luna",
+                "gpt_quota_remaining": "<font color='green'>96%</font>",
+                "input_tokens": 12400,
+                "output_tokens": 2100,
+            },
+            fields=[["tokens"]],
+        )
+        assert self._title(result)["content"] == (
+            "✅ 2m 2s · gpt-5.6-luna · <font color='green'>96%</font>"
+        )
+        assert self._content(result) == "Tokens ↑ 12.4K · ↓ 2.1K"
+
+    def test_reset_timestamp_formats_local_absolute_time_and_cross_year(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        same_year = local_now.replace(month=8, day=16, hour=10, minute=30)
+        en, zh = _format_quota_reset_at(same_year, now=local_now)
+        assert en == "Aug 16, 10:30"
+        assert zh == "8月16日 10:30"
+
+        next_year = same_year.replace(year=local_now.year + 1)
+        en_next, zh_next = _format_quota_reset_at(next_year, now=local_now)
+        assert str(local_now.year + 1) in en_next
+        assert str(local_now.year + 1) in zh_next
+
+    def test_reset_timestamp_converts_utc_to_local_timezone(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_utc = local_now.astimezone(UTC)
+        en, zh = _format_quota_reset_at(reset_utc, now=local_now)
+        assert en is not None and zh is not None
+        assert local_now.strftime("%H:%M") in en
+        assert local_now.strftime("%H:%M") in zh
+
+    @pytest.mark.parametrize(
+        ("offset", "expected_en", "expected_zh"),
+        [
+            (timedelta(hours=2, minutes=30), "2h · 30min", "2h · 30min"),
+            (timedelta(minutes=59, seconds=30), "59min", "59min"),
+        ],
+    )
+    def test_reset_label_uses_countdown_on_reset_date(
+        self,
+        offset: timedelta,
+        expected_en: str,
+        expected_zh: str,
+    ) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_at = local_now + offset
+        en, zh = _format_quota_reset_label(reset_at, now=local_now)
+        assert (en, zh) == (expected_en, expected_zh)
+
+    def test_reset_label_uses_date_without_time_before_reset_date(self) -> None:
+        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        reset_at = local_now + timedelta(days=1, hours=2)
+        en, zh = _format_quota_reset_label(reset_at, now=local_now)
+        assert en == f"{reset_at.strftime('%b')} {reset_at.day}"
+        assert zh == f"{reset_at.month}月{reset_at.day}日"
+
+    def test_default_details_keep_only_primary_run_usage(self) -> None:
+        reset_at = datetime.now().astimezone() + timedelta(days=5)
+        result = _build_footer_elements(
+            {
+                "duration": 4.4,
+                "model": "gpt-5.6-luna",
+                "gpt_quota_remaining": "<font color='green'>95%</font>",
+                "gpt_quota_reset_at": reset_at,
+                "input_tokens": 12400,
+                "output_tokens": 1800,
+                "context_used": 70500,
+                "context_max": 272000,
+                "cache_read_tokens": 10200,
+                "cache_write_tokens": 1100,
+                "cache_prompt_tokens": 12400,
+                "reasoning_tokens": 3600,
+                "balance": "¥4.97",
+            }
+        )
+        content = self._content(result)
+        assert "GPT remaining 95%" in content
+        assert "Context used 26%" in content
+        assert "Cache hit 82%" not in content
+        assert "Reasoning 3.6K" not in content
+        assert "Balance ¥4.97" not in content
+        assert "Status" not in content
+        assert "Elapsed" not in content
+        assert "Model" not in content
+        assert "GPT Quota" not in content
+        assert any(
+            element.get("content", "").startswith("<font color='grey'>")
+            for element in self._markdown_elements(result)
+        )
+        assert all(
+            element.get("text_size") == "notation"
+            for element in self._panel(result)["elements"]
+            if element.get("tag") == "markdown"
+        )
 
     def test_no_matching_fields(self) -> None:
-        assert _build_footer_elements({}, fields=[["tokens"]]) == []
+        result = _build_footer_elements({}, fields=[["tokens"]])
+        assert self._title(result)["content"] == "✅"
+        assert self._panel(result)["elements"] == []
+
+    def test_empty_fields_preserve_existing_no_matching_semantics(self) -> None:
+        result = _build_footer_elements({"model": "gpt"}, fields=[])
+        assert self._title(result)["content"] == "✅ gpt"
+        assert self._panel(result)["elements"] == []
+
+    def test_run_details_failure_falls_back_to_legacy_footer(self) -> None:
+        with patch(
+            "hermes_lark_streaming.cardkit.builder._build_run_details_elements",
+            side_effect=RuntimeError("presentation failure"),
+        ):
+            result = _build_footer_elements({})
+        assert result[1]["content"] == "✅"
 
 
 # --- 推理面板 ---
@@ -561,6 +1371,8 @@ class TestBuildReasoningPanel:
         assert title["tag"] == "plain_text"
         assert title["text_color"] == "grey"
         assert title["text_size"] == "notation"
+        assert panel["border"] == {"color": "grey", "corner_radius": "5px"}
+        assert panel["padding"] == "8px 8px 8px 8px"
 
     def test_empty_text_shows_thinking_title(self) -> None:
         panel = _build_reasoning_panel(" ")
@@ -629,6 +1441,10 @@ class TestBuildStreamingCardV2:
         assert card["schema"] == "2.0"
         assert card["config"]["streaming_mode"] is True
         assert card["body"]["elements"]
+        assert not any(
+            "Run Details" in element.get("header", {}).get("title", {}).get("content", "")
+            for element in card["body"]["elements"]
+        )
 
     def test_with_tool_steps(self) -> None:
         card = build_streaming_card_v2(tool_steps=[_STEP_RUNNING], elapsed_ms=100)
@@ -800,8 +1616,50 @@ class TestBuildSegmentCompleteCard:
             all_tool_steps=steps,
         )
         tool_elements = [e for e in card["body"]["elements"] if e.get("tag") == "collapsible_panel"]
+        tool_elements = [e for e in tool_elements if e.get("element_id") == TOOL_PANEL_ELEMENT_ID]
         assert len(tool_elements) == 1
         assert len(tool_elements[0].get("elements", [])) == 2  # steps[1:3]
+
+    @pytest.mark.parametrize("panel_expanded", [False, True])
+    def test_run_details_stays_collapsed_independent_of_panel_expanded(
+        self, panel_expanded: bool
+    ) -> None:
+        card = build_complete_card(
+            segments=[_seg("reasoning", "think"), _seg("answer", "reply")],
+            all_tool_steps=[],
+            footer_data={"duration": 26.5, "model": "gpt-5"},
+            panel_expanded=panel_expanded,
+        )
+        details = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" not in element.get("header", {}).get("title", {}).get("content", "")
+            and element.get("element_id") is None
+        )
+        reasoning = next(
+            element
+            for element in card["body"]["elements"]
+            if element.get("tag") == "collapsible_panel"
+            and "💭" in element.get("header", {}).get("title", {}).get("content", "")
+        )
+        assert details["expanded"] is False
+        assert reasoning["expanded"] is panel_expanded
+
+    def test_tool_visibility_does_not_hide_run_details(self) -> None:
+        card = build_complete_card(
+            segments=[_seg("tool", tool_offset=0, tool_end_offset=1), _seg("answer", "hello")],
+            all_tool_steps=[_STEP_SUCCESS],
+            show_tool_use=False,
+            footer_data={"duration": 1.0, "model": "gpt-5"},
+        )
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
+        assert any(
+            e.get("tag") == "collapsible_panel"
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
+            for e in card["body"]["elements"]
+        )
 
     def test_multiple_tool_segments_render_one_unified_panel(self) -> None:
         card = build_complete_card(
@@ -881,7 +1739,7 @@ class TestBuildSegmentCompleteCard:
             segments=[_seg("tool", tool_offset=5, tool_end_offset=5)],
             all_tool_steps=[_STEP_SUCCESS],
         )
-        assert not any(e.get("tag") == "collapsible_panel" for e in card["body"]["elements"])
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
 
     def test_show_tool_use_false_hides_tool_panel(self) -> None:
         """show_tool_use=False → TOOL segment rendered as nothing (无工具面板)."""
@@ -892,7 +1750,7 @@ class TestBuildSegmentCompleteCard:
             show_tool_use=False,
         )
         # 无 collapsible_panel（工具面板）
-        assert not any(e.get("tag") == "collapsible_panel" for e in card["body"]["elements"])
+        assert not any(e.get("element_id") == TOOL_PANEL_ELEMENT_ID for e in card["body"]["elements"])
         # 但 answer 依然在
         assert any(e.get("tag") == "markdown" and "hello" in str(e.get("content", ""))
                    for e in card["body"]["elements"])
@@ -1073,6 +1931,14 @@ class TestCompleteCardFooter:
         )
         tags = [e.get("tag") for e in card["body"]["elements"]]
         assert "hr" in tags
+        details = next(
+            e
+            for e in card["body"]["elements"]
+            if e.get("tag") == "collapsible_panel"
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
+        )
+        assert details["expanded"] is False
 
     def test_footer_disabled(self) -> None:
         card = build_complete_card(
@@ -1082,3 +1948,9 @@ class TestCompleteCardFooter:
         )
         tags = [e.get("tag") for e in card["body"]["elements"]]
         assert "hr" not in tags
+        assert not any(
+            e.get("tag") == "collapsible_panel"
+            and "💭" not in e.get("header", {}).get("title", {}).get("content", "")
+            and e.get("element_id") is None
+            for e in card["body"]["elements"]
+        )

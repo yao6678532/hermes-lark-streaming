@@ -23,6 +23,7 @@ from .interactions.clarify import (
     send_clarify_card,
 )
 from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
+from .quota import _quota_color
 from .streaming.controller import StreamingController
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
@@ -31,62 +32,57 @@ from .streaming.text import strip_reasoning_tags
 _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
 
+def _weekly_quota_window(rate_limit: object) -> dict[str, Any] | None:
+    """Select the structured seven-day quota window, independent of names."""
+    if not isinstance(rate_limit, dict):
+        return None
 
-def _fetch_gpt_quota_footer(model: str) -> str:
-    """Return a compact Codex/GPT quota string for the footer.
+    candidates: list[object] = []
+    # Keep the API's conventional order when both windows are weekly, while
+    # making the decision solely from the structured duration metadata.
+    for key in ("primary_window", "secondary_window"):
+        if key in rate_limit:
+            candidates.append(rate_limit[key])
+    for key, value in rate_limit.items():
+        if key not in {"primary_window", "secondary_window"}:
+            candidates.append(value)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        raw_duration = candidate.get("limit_window_seconds")
+        if raw_duration is None:
+            continue
+        try:
+            duration = int(raw_duration) if not isinstance(raw_duration, bool) else 0
+        except (TypeError, ValueError):
+            continue
+        if duration == 604800:
+            return candidate
+    return None
+
+
+def _fetch_gpt_quota_footer(model: str) -> dict[str, Any]:
+    """Return structured Codex/GPT quota metadata for the footer.
 
     Uses Hermes' credential pool rather than the singleton Codex auth store, so
     it works for profiles/accounts that only have pooled credentials. Fail-open:
-    any auth/API/parsing error returns an empty string and the footer field is
+    any auth/API/parsing error returns an empty dict and the footer fields are
     hidden by the card builder.
     """
     normalized_model = (model or "").lower()
     if not any(marker in normalized_model for marker in ("gpt", "codex", "openai")):
-        return ""
+        return {}
 
     try:
-        from datetime import UTC, datetime
-
         import httpx
         from agent.credential_pool import load_pool  # type: ignore[import-not-found]
-
-        def _format_reset(value: object) -> str:
-            if value in (None, ""):
-                return ""
-            try:
-                if isinstance(value, (int, float)):
-                    reset_at = datetime.fromtimestamp(float(value), tz=UTC)
-                else:
-                    text = str(value).strip()
-                    if text.endswith("Z"):
-                        text = text[:-1] + "+00:00"
-                    reset_at = datetime.fromisoformat(text)
-                    if reset_at.tzinfo is None:
-                        reset_at = reset_at.replace(tzinfo=UTC)
-                seconds = max(0, int((reset_at - datetime.now(UTC)).total_seconds()))
-                minutes = seconds // 60
-                if minutes < 60:
-                    return f"{minutes}m"
-                hours, minutes = divmod(minutes, 60)
-                if hours < 24:
-                    return f"{hours}h{minutes:02d}m"
-                days, hours = divmod(hours, 24)
-                return f"{days}d{hours}h"
-            except Exception:
-                return ""
-
-        def _quota_color(remaining: int) -> str:
-            if remaining >= 50:
-                return "green"
-            if remaining >= 20:
-                return "orange"
-            return "red"
 
         pool = load_pool("openai-codex")
         cred = pool.select()
         token = str(getattr(cred, "access_token", "") or "").strip() if cred else ""
         if not token:
-            return ""
+            return {}
 
         base_url = str(getattr(cred, "base_url", "") or "https://chatgpt.com/backend-api/codex").strip().rstrip("/")
         if base_url.endswith("/codex"):
@@ -106,25 +102,70 @@ def _fetch_gpt_quota_footer(model: str) -> str:
         response.raise_for_status()
         payload = response.json() or {}
         rate_limit = payload.get("rate_limit") or {}
-        if rate_limit.get("limit_reached") is True or rate_limit.get("allowed") is False:
-            return "GPT limited"
-
-        parts: list[str] = []
-        for key, label in (("primary_window", "5h"), ("secondary_window", "W")):
-            window = rate_limit.get(key) or {}
-            used = window.get("used_percent")
-            if used is None:
-                continue
-            remaining = max(0, min(100, round(100 - float(used))))
-            colored_quota = f"<font color='{_quota_color(remaining)}'>{label} {remaining}%</font>"
-            reset = _format_reset(window.get("reset_at"))
-            if label == "5h" and reset:
-                parts.append(f"{colored_quota} ↻{reset}")
-            else:
-                parts.append(colored_quota)
-        return " · ".join(parts) if parts else ""
+        window = _weekly_quota_window(rate_limit)
+        if window is None:
+            return {}
+        used = window.get("used_percent")
+        if used is None:
+            return {}
+        try:
+            used_percent = float(used)
+        except (TypeError, ValueError):
+            return {}
+        if not 0 <= used_percent <= 100:
+            return {}
+        remaining = max(0, min(100, round(100 - used_percent)))
+        metadata: dict[str, Any] = {
+            "remaining": f"<font color='{_quota_color(remaining)}'>{remaining}%</font>"
+        }
+        if window.get("reset_at") not in (None, ""):
+            metadata["reset_at"] = window["reset_at"]
+        return metadata
     except Exception:
-        return ""
+        return {}
+
+
+def _turn_usage_footer_data(usage: dict | None, *, api_calls: object = 0) -> dict[str, int]:
+    """Select reliable current-turn Hermes usage fields for Run Details."""
+
+    def positive_int(value: object) -> int:
+        if not isinstance(value, (str, int, float)):
+            return 0
+        try:
+            parsed = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return parsed if parsed > 0 else 0
+
+    data: dict[str, int] = {}
+    if isinstance(usage, dict):
+        uncached_input = positive_int(usage.get("input_tokens"))
+        cache_read = positive_int(usage.get("cache_read_tokens"))
+        cache_write = positive_int(usage.get("cache_write_tokens"))
+        prompt_tokens = positive_int(usage.get("prompt_tokens"))
+        if not prompt_tokens:
+            prompt_tokens = uncached_input + cache_read + cache_write
+        output_tokens = positive_int(
+            usage.get("output_tokens") or usage.get("completion_tokens")
+        )
+        reasoning_tokens = positive_int(usage.get("reasoning_tokens"))
+
+        if prompt_tokens:
+            data["input_tokens"] = prompt_tokens
+            data["cache_prompt_tokens"] = prompt_tokens
+        if output_tokens:
+            data["output_tokens"] = output_tokens
+        if cache_read:
+            data["cache_read_tokens"] = cache_read
+        if cache_write:
+            data["cache_write_tokens"] = cache_write
+        if reasoning_tokens:
+            data["reasoning_tokens"] = reasoning_tokens
+
+    call_count = positive_int(api_calls)
+    if call_count:
+        data["api_calls"] = call_count
+    return data
 
 
 class StreamCardController(StreamingController):
@@ -342,6 +383,24 @@ class StreamCardController(StreamingController):
 
         session.create_task = self._fire_and_forget(self._do_create_card(session), loop)
 
+    def on_turn_usage(
+        self,
+        *,
+        message_id: str,
+        usage: dict | None,
+        api_calls: object = 0,
+    ) -> None:
+        """Store Hermes' canonical current-turn usage on the active card session."""
+        if not self.enabled:
+            return
+        session = self._get_active_session(message_id)
+        if session is None:
+            redirected_id = self._interrupt_map.get(message_id)
+            session = self._get_active_session(redirected_id) if redirected_id else None
+        if session is None:
+            return
+        session.footer.update(_turn_usage_footer_data(usage, api_calls=api_calls))
+
     def _mark_text_fallback_needed(self, session: CardSession) -> None:
         keys = {session.message_id}
         if session.anchor_id:
@@ -471,7 +530,7 @@ class StreamCardController(StreamingController):
 
         self._complete_session(session)
 
-    async def on_session_aborted(self, *, session_key: str) -> bool:
+    async def on_session_aborted(self, *, session_key: str, stop_command: bool = False) -> bool:
         """Terminate the active card bound to a Hermes session key."""
         if not self.enabled or not session_key:
             return False
@@ -481,10 +540,12 @@ class StreamCardController(StreamingController):
 
         session.progress.clear()
         session.state = SessionState.ABORTED
+        if stop_command:
+            session.footer["stop_continue_hint"] = True
         session.flush.mark_completed()
         _logger.info("on_session_aborted: msg=%s state=ABORTED", session.message_id[:12])
 
-        return await self._complete_session_after_creation(session)
+        return await self._complete_session_after_creation(session, require_card=True)
 
     def on_interrupted(
         self,
@@ -834,26 +895,41 @@ class StreamCardController(StreamingController):
             except Exception:
                 pass
 
-        gpt_quota = _fetch_gpt_quota_footer(model)
+        quota = _fetch_gpt_quota_footer(model)
 
-        session.footer = {
-            "duration": duration,
-            "model": model,
-            **({"input_tokens": tokens.get("input_tokens")} if tokens else {}),
-            **({"output_tokens": tokens.get("output_tokens")} if tokens else {}),
-            **({"context_used": context.get("used_tokens")} if context else {}),
-            **({"context_max": context.get("max_tokens")} if context else {}),
-            "balance": balance,
-            "gpt_quota": gpt_quota,
-        }
+        footer = dict(session.footer)
+        footer.update({"duration": duration, "model": model, "balance": balance})
+        if tokens:
+            footer.update(_turn_usage_footer_data(tokens, api_calls=tokens.get("api_calls", 0)))
+        if context:
+            footer.update(
+                {
+                    "context_used": context.get("used_tokens"),
+                    "context_max": context.get("max_tokens"),
+                }
+            )
+        if quota.get("remaining"):
+            footer["gpt_quota_remaining"] = quota["remaining"]
+        if quota.get("reset_at") not in (None, ""):
+            footer["gpt_quota_reset_at"] = quota["reset_at"]
+        session.footer = footer
 
     def _complete_session(self, session: CardSession) -> None:
         """异步完成当前流式卡片."""
         session.flush.mark_completed()
         self._fire_and_forget(self._complete_session_after_creation(session), session._loop)
 
-    async def _complete_session_after_creation(self, session: CardSession) -> bool:
+    async def _complete_session_after_creation(
+        self,
+        session: CardSession,
+        *,
+        require_card: bool = False,
+    ) -> bool:
         if not await self._wait_for_card_creation(session):
+            self._cleanup_session(session)
+            return False
+        if require_card and not session.card_id:
+            _logger.info("card completion skipped: no active card msg=%s", session.message_id[:12])
             self._cleanup_session(session)
             return False
         return await self._complete_session_wait(session)

@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+import math
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
+from ..quota import (
+    GPT_QUOTA_HEALTHY_REMAINING_PERCENT,
+    GPT_QUOTA_WARNING_REMAINING_PERCENT,
+)
 from ..streaming.progress import ProgressSnapshot
 from ..streaming.segments import Segment, SegmentType
 from ..streaming.tooluse import ToolDisplayStep, tool_detail_for_display
@@ -22,6 +28,50 @@ REASONING_TEXT_ELEMENT_ID = "reasoning_text"
 TOOL_PANEL_ELEMENT_ID = "tool_panel"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
+_logger = logging.getLogger("hermes_lark_streaming.cardkit")
+_DEFAULT_RUN_DETAILS_FIELDS = [[
+    "tokens",
+    "context",
+    "quota_reset",
+    "cache",
+    "reasoning",
+    "balance",
+]]
+_RUN_DETAILS_SUMMARY_ONLY_FIELDS = {"status", "elapsed", "model"}
+# CardKit's named color tokens are not VChart/CSS color literals.  Use the
+# selected official light-theme values for chart fills; CardKit text continues
+# to use its own semantic color tokens elsewhere.
+_RUN_DETAILS_CHART_LIME_300 = "#A2C10B"
+_RUN_DETAILS_CHART_ORANGE_350 = "#FF811A"
+_RUN_DETAILS_CHART_RED_400 = "#F54A45"
+_RUN_DETAILS_CHART_BLUE_350 = "#7AA2FF"
+_RUN_DETAILS_METRIC_COLOR_POLICIES = {
+    "gpt_quota": (
+        (
+            GPT_QUOTA_WARNING_REMAINING_PERCENT / 100,
+            GPT_QUOTA_HEALTHY_REMAINING_PERCENT / 100,
+        ),
+        (
+            _RUN_DETAILS_CHART_RED_400,
+            _RUN_DETAILS_CHART_ORANGE_350,
+            _RUN_DETAILS_CHART_LIME_300,
+        ),
+    ),
+    "context": (
+        (0.5, 0.8),
+        (
+            _RUN_DETAILS_CHART_LIME_300,
+            _RUN_DETAILS_CHART_ORANGE_350,
+            _RUN_DETAILS_CHART_RED_400,
+        ),
+    ),
+    "cache": ((0.8,), (_RUN_DETAILS_CHART_BLUE_350, _RUN_DETAILS_CHART_LIME_300)),
+}
+_RUN_DETAILS_METRIC_CHART_LABELS = {
+    "gpt_quota": ("GPT quota", "额度"),
+    "context": ("Context", "上下文"),
+    "cache": ("Cache", "缓存"),
+}
 
 
 def _collapsible_panel(
@@ -31,6 +81,7 @@ def _collapsible_panel(
     elements: list[dict],
     vertical_spacing: str = "4px",
     icon_position: str = "right",
+    show_border: bool = True,
 ) -> dict:
     icon_el = {
         "tag": "standard_icon",
@@ -39,7 +90,7 @@ def _collapsible_panel(
     }
     if icon_position == "right":
         icon_el["color"] = "grey"
-    return {
+    panel = {
         "tag": "collapsible_panel",
         "expanded": expanded,
         "header": {
@@ -49,11 +100,13 @@ def _collapsible_panel(
             "icon_position": icon_position,
             "icon_expanded_angle": -180,
         },
-        "border": {"color": "grey", "corner_radius": "5px"},
         "vertical_spacing": vertical_spacing,
         "padding": "8px 8px 8px 8px",
         "elements": elements,
     }
+    if show_border:
+        panel["border"] = {"color": "grey", "corner_radius": "5px"}
+    return panel
 
 
 def _streaming_element(
@@ -271,7 +324,7 @@ def _build_tool_step_output(step: ToolDisplayStep) -> dict | None:
 
 def _tool_status_info(status: str) -> dict[str, str]:
     return {
-        "running": {"label": _T["running"][0], "color": "grey"},
+        "running": {"label": _T["running"][0], "color": "wathet"},
         "success": {"label": _T["done_label"][0], "color": "green"},
         "error": {"label": _T["failed"][0], "color": "red"},
     }.get(status, {"label": status.capitalize(), "color": "grey"})
@@ -333,15 +386,739 @@ def _build_footer_elements(
     show_label: bool = False,
     text_size: str = "notation",
 ) -> list[dict]:
+    """Build the terminal Run Details presentation.
+
+    The public/internal footer naming is intentionally retained for config and
+    session compatibility.  Only its terminal presentation changes here.
+    """
+    try:
+        return _build_run_details_elements(
+            footer_data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            fields=fields,
+            show_label=show_label,
+            text_size=text_size,
+        )
+    except Exception:
+        # A presentation-only failure must not prevent the answer card from
+        # being delivered.  Keep the old compact footer as a fail-open path.
+        _logger.exception("Run Details build failed; falling back to legacy footer")
+        return _build_legacy_footer_elements(
+            footer_data,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            fields=fields,
+            show_label=show_label,
+            text_size=text_size,
+        )
+
+
+def _build_run_details_elements(
+    footer_data: dict | None,
+    *,
+    is_error: bool = False,
+    is_aborted: bool = False,
+    fields: list[list[str]] | None = None,
+    show_label: bool = False,
+    text_size: str = "notation",
+) -> list[dict]:
+    """Build the collapsed terminal Run Details panel from footer metadata."""
+    fields_are_default = _run_details_fields_are_default(fields)
+    if fields is None:
+        fields = [row.copy() for row in _DEFAULT_RUN_DETAILS_FIELDS]
+
+    data = footer_data or {}
+    summary_parts_en, summary_parts_zh = _build_footer_summary(
+        data,
+        is_error=is_error,
+        is_aborted=is_aborted,
+    )
+    summary_fields = _footer_summary_field_names(
+        data,
+        is_error=is_error,
+        is_aborted=is_aborted,
+    )
+
+    visible_fields = {field for row in fields for field in row}
+    percentage_metrics = _build_run_details_percentage_metrics(
+        data,
+        visible_fields=visible_fields,
+        quota_allowed=fields_are_default or "gpt_quota" in visible_fields,
+    )
+    promoted_fields = {
+        field
+        for metric in percentage_metrics
+        for field in metric["fields"]
+    }
+    consumed_fields = set(promoted_fields)
+    visual_elements: list[dict] = []
+    if percentage_metrics:
+        visual_elements.append(_build_run_details_percentage_row(percentage_metrics, text_size=text_size))
+
+    if fields_are_default:
+        # The default Run Details policy deliberately keeps the textual usage
+        # section to two compact token columns.  Cache is promoted to a ring
+        # for usage-billed runs, while GPT subscription runs surface quota
+        # instead.  Reasoning and balance are intentionally omitted here:
+        # balance belongs in the compact summary and reasoning tokens are not
+        # a primary run-health signal.  Explicit custom fields retain the
+        # legacy detail behavior below.
+        token_text = _render_run_details_field("tokens", data, is_error, is_aborted)
+        if token_text[0]:
+            consumed_fields.add("tokens")
+            visual_elements.append(
+                _build_run_details_tokens_row(data, text_size=text_size, is_error=is_error)
+            )
+        consumed_fields.update({"cache", "reasoning", "balance"})
+    elif "cache" not in promoted_fields and "cache" in visible_fields and "tokens" in visible_fields:
+        cache_metric = _build_run_details_cache_metric(data)
+        token_text = _render_run_details_field("tokens", data, is_error, is_aborted)
+        if cache_metric is not None and token_text[0]:
+            consumed_fields.update({"tokens", "cache"})
+            visual_elements.append(
+                _build_run_details_tokens_cache_row(
+                    token_text,
+                    cache_metric,
+                    text_size=text_size,
+                )
+            )
+
+    detail_fields: list[tuple[str, str]] = []
+    rendered_fields: set[str] = set()
+    for row in fields:
+        for field in row:
+            if field in summary_fields or field in rendered_fields or field in consumed_fields:
+                continue
+            rendered_fields.add(field)
+            # Run Details always uses explicit field labels.  Keep
+            # footer.show_label accepted for config compatibility, but do not
+            # duplicate labels already supplied by this presentation.
+            en, zh = _render_run_details_field(field, data, is_error, is_aborted)
+            if en:
+                label_en, label_zh = _footer_field_label(field)
+                detail_fields.append(
+                    (
+                        f"{label_en} {en}" if label_en else en,
+                        f"{label_zh} {zh}" if label_zh and zh else (zh or en),
+                    )
+                )
+
+    detail_elements: list[dict] = visual_elements
+    detail_elements.extend(
+        _build_run_details_detail_rows(
+            detail_fields,
+            text_size=text_size,
+            is_error=is_error,
+        )
+    )
+    if is_aborted and data.get("stop_continue_hint") is True:
+        en_hint, zh_hint = _T["stop_continue"]
+        detail_elements.append(
+            _build_run_details_detail_text(
+                en_hint,
+                zh_hint,
+                text_size=text_size,
+                is_error=False,
+            )
+        )
+
+    title_en = _run_details_black_text(_join_compact_footer_parts(summary_parts_en))
+    title_zh = _run_details_black_text(_join_compact_footer_parts(summary_parts_zh))
+
+    panel = _collapsible_panel(
+        expanded=False,
+        title_el={
+            "tag": "markdown",
+            "content": title_en,
+            "i18n_content": _i18n(
+                title_en,
+                title_zh,
+            ),
+            "text_size": text_size,
+        },
+        elements=detail_elements,
+        show_border=False,
+    )
+    panel["margin"] = "-6px 0px 0px 0px"
+    panel["padding"] = "6px 0px 0px 0px"
+    return [{"tag": "hr"}, panel]
+
+
+def _run_details_fields_are_default(fields: list[list[str]] | None) -> bool:
+    if fields is None:
+        return True
+    detail_rows = [
+        [field for field in row if field not in _RUN_DETAILS_SUMMARY_ONLY_FIELDS]
+        for row in fields
+    ]
+    return [row for row in detail_rows if row] == _DEFAULT_RUN_DETAILS_FIELDS
+
+
+def _metric_number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _format_metric_percent(value: float) -> str:
+    return str(round(max(0.0, min(100.0, value))))
+
+
+def _build_run_details_cache_metric(data: dict) -> dict[str, Any] | None:
+    numerator = _metric_number(data.get("cache_read_tokens"))
+    denominator = _metric_number(data.get("cache_prompt_tokens"))
+    if denominator is None or denominator <= 0:
+        denominator = _metric_number(data.get("input_tokens"))
+    if numerator is None or numerator < 0 or denominator is None or denominator <= 0:
+        return None
+    fraction = max(0.0, min(1.0, numerator / denominator))
+    percentage = _format_metric_percent(fraction * 100)
+    return {
+        "key": "cache",
+        "fields": {"cache"},
+        "fraction": fraction,
+        "primary_en": f"Cache hit {percentage}%",
+        "primary_zh": f"缓存命中 {percentage}%",
+        "secondary_en": f"{_compact(int(numerator))} / {_compact(int(denominator))}",
+        "secondary_zh": f"{_compact(int(numerator))} / {_compact(int(denominator))}",
+    }
+
+
+def _build_run_details_percentage_metrics(
+    data: dict,
+    *,
+    visible_fields: set[str],
+    quota_allowed: bool,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    quota_text = data.get("gpt_quota_remaining")
+    quota_match = re.search(r"(\d+(?:\.\d+)?)\s*%", str(quota_text or ""))
+    if quota_match and quota_allowed:
+        remaining = _metric_number(float(quota_match.group(1)))
+        if remaining is not None:
+            reset_en, reset_zh = (None, None)
+            if "quota_reset" in visible_fields:
+                reset_en, reset_zh = _format_quota_reset_label(data.get("gpt_quota_reset_at"))
+            candidates.append(
+                {
+                    "key": "gpt_quota",
+                    "fields": {"gpt_quota", "quota_reset"} if "quota_reset" in visible_fields else {"gpt_quota"},
+                    "fraction": max(0.0, min(1.0, remaining / 100)),
+                    "primary_en": f"GPT remaining {_format_metric_percent(remaining)}%",
+                    "primary_zh": f"GPT 剩余 {_format_metric_percent(remaining)}%",
+                    "secondary_en": f"Reset {reset_en}" if reset_en else None,
+                    "secondary_zh": f"重置 {reset_zh}" if reset_zh else None,
+                }
+            )
+
+    used = _metric_number(data.get("context_used"))
+    maximum = _metric_number(data.get("context_max"))
+    if "context" in visible_fields and used is not None and maximum is not None and maximum > 0:
+        fraction = max(0.0, min(1.0, used / maximum))
+        candidates.append(
+            {
+                "key": "context",
+                "fields": {"context"},
+                "fraction": fraction,
+                "primary_en": f"Context used {_format_metric_percent(fraction * 100)}%",
+                "primary_zh": f"上下文已用 {_format_metric_percent(fraction * 100)}%",
+                "secondary_en": f"{_compact(int(used))} / {_compact(int(maximum))}",
+                "secondary_zh": f"{_compact(int(used))} / {_compact(int(maximum))}",
+            }
+        )
+
+    if "cache" in visible_fields:
+        cache_metric = _build_run_details_cache_metric(data)
+        if cache_metric is not None:
+            candidates.append(cache_metric)
+    return candidates[:2]
+
+
+def _build_run_details_circle(metric: dict[str, Any]) -> dict[str, Any]:
+    fraction = float(metric["fraction"])
+    label_en, _ = _RUN_DETAILS_METRIC_CHART_LABELS.get(metric["key"], ("Metric", "指标"))
+    percentage = f"{_format_metric_percent(fraction * 100)}%"
+    tooltip_pattern = {
+        "title": {"value": label_en},
+        "content": [{"key": "Percentage", "value": percentage}],
+    }
+    return {
+        "tag": "chart",
+        "height": "28px",
+        "preview": False,
+        "chart_spec": {
+            "type": "circularProgress",
+            "data": {"values": [{"type": label_en, "value": fraction}]},
+            "categoryField": "type",
+            "valueField": "value",
+            "outerRadius": 0.81,
+            "innerRadius": 0.51,
+            "cornerRadius": 5,
+            # Keep the tooltip but suppress VChart's default hover state.  Its
+            # distinct track/progress marks otherwise enlarge and receive
+            # incompatible blue highlight styles on desktop.
+            "hover": False,
+            "progress": {
+                "style": {
+                    "fill": _run_details_metric_fill(metric["key"]),
+                }
+            },
+            "indicator": {"visible": False},
+            "legends": {"visible": False},
+            "tooltip": {
+                # The filled arc uses a mark tooltip; the empty track may use a
+                # dimension tooltip in the desktop renderer.  Give both the
+                # same static, integer-percent payload so no raw fraction leaks.
+                "mark": tooltip_pattern,
+                "dimension": tooltip_pattern.copy(),
+            },
+            "padding": 0,
+        },
+    }
+
+
+def _run_details_metric_fill(metric_key: str) -> dict[str, Any]:
+    """Build the VChart threshold mapping for one metric's semantics."""
+    domain, colors = _RUN_DETAILS_METRIC_COLOR_POLICIES.get(
+        metric_key,
+        ((), ("blue",)),
+    )
+    return {
+        "type": "threshold",
+        "field": "value",
+        "domain": list(domain),
+        "range": list(colors),
+    }
+
+
+def _run_details_metric_color(metric_key: str, fraction: float) -> str:
+    """Resolve a metric color for tests and non-VChart semantic consumers."""
+    domain, colors = _RUN_DETAILS_METRIC_COLOR_POLICIES.get(
+        metric_key,
+        ((), ("blue",)),
+    )
+    index = sum(fraction >= threshold for threshold in domain)
+    return colors[index]
+
+
+def _build_run_details_metric_text(metric: dict[str, Any], *, text_size: str) -> dict[str, Any]:
+    secondary_en = metric.get("secondary_en")
+    secondary_zh = metric.get("secondary_zh")
+    en = f"<font color='grey'>{metric['primary_en']}</font>"
+    zh = f"<font color='grey'>{metric['primary_zh']}</font>"
+    if secondary_en:
+        en += f"\n<font color='grey'>{secondary_en}</font>"
+    if secondary_zh:
+        zh += f"\n<font color='grey'>{secondary_zh}</font>"
+    return {
+        "tag": "markdown",
+        "content": en,
+        "i18n_content": _i18n(en, zh),
+        "text_size": text_size,
+        "text_align": "left",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_percentage_row(metrics: list[dict[str, Any]], *, text_size: str) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for metric in metrics:
+        columns.extend(
+            [
+                {
+                    "tag": "column",
+                    "width": "28px",
+                    "vertical_align": "center",
+                    "padding": "0px",
+                    "elements": [_build_run_details_circle(metric)],
+                },
+                {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "padding": "0px",
+                    "elements": [_build_run_details_metric_text(metric, text_size=text_size)],
+                },
+            ]
+        )
+    return {
+        "tag": "column_set",
+        "columns": columns,
+        "horizontal_spacing": "6px",
+        "padding": "0px",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_tokens_row(
+    data: dict,
+    *,
+    text_size: str,
+    is_error: bool,
+) -> dict[str, Any]:
+    columns: list[dict[str, Any]] = []
+    for field, icon, label_en, label_zh in (
+        ("input_tokens", "space-up_outlined", "Input tokens", "输入 Tokens"),
+        ("output_tokens", "space-down_outlined", "Output tokens", "输出 Tokens"),
+    ):
+        value = _positive_int(data.get(field))
+        if not value:
+            continue
+        content_en = f"{label_en} {_compact(value)}"
+        content_zh = f"{label_zh} {_compact(value)}"
+        if is_error:
+            content_en = f"<font color='red'>{content_en}</font>"
+            content_zh = f"<font color='red'>{content_zh}</font>"
+        columns.append(
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "0px",
+                "elements": [
+                    {
+                        "tag": "div",
+                        "icon": {
+                            "tag": "standard_icon",
+                            "token": icon,
+                            "color": "grey",
+                        },
+                        "text": {
+                            "tag": "lark_md",
+                            "content": _run_details_grey_text(content_en),
+                            "i18n_content": _i18n(
+                                _run_details_grey_text(content_en),
+                                _run_details_grey_text(content_zh),
+                            ),
+                            "text_size": text_size,
+                        },
+                    }
+                ],
+            }
+        )
+    return {
+        "tag": "column_set",
+        "columns": columns,
+        "horizontal_spacing": "12px",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_tokens_cache_row(
+    token_text: tuple[str | None, str | None],
+    cache_metric: dict[str, Any],
+    *,
+    text_size: str,
+) -> dict[str, Any]:
+    """Retain the legacy two-column usage row for explicit custom fields."""
+    token_en, token_zh = token_text
+    cache_text = _build_run_details_metric_text(cache_metric, text_size=text_size)
+    token_en = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_en}</font>"
+    token_zh = f"<font color='grey'>Tokens</font>\n<font color='grey'>{token_zh or token_en}</font>"
+    token_element = {
+        "tag": "markdown",
+        "content": token_en,
+        "i18n_content": _i18n(token_en, token_zh),
+        "text_size": text_size,
+        "text_align": "left",
+        "margin": "0px",
+    }
+    return {
+        "tag": "column_set",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [token_element]},
+            {"tag": "column", "width": "weighted", "weight": 1, "padding": "0px", "elements": [cache_text]},
+        ],
+        "horizontal_spacing": "12px",
+        "padding": "0px",
+        "margin": "0px",
+    }
+
+
+def _build_run_details_detail_text(
+    en: str,
+    zh: str,
+    *,
+    text_size: str,
+    is_error: bool,
+) -> dict[str, Any]:
+    if is_error:
+        en = f"<font color='red'>{en}</font>"
+        zh = f"<font color='red'>{zh}</font>"
+    en = _run_details_grey_text(en)
+    zh = _run_details_grey_text(zh)
+    return {
+        "tag": "markdown",
+        "content": en,
+        "i18n_content": _i18n(en, zh),
+        "text_align": "left",
+        "text_size": text_size,
+        "margin": "0px",
+    }
+
+
+def _build_run_details_detail_rows(
+    fields: list[tuple[str, str]],
+    *,
+    text_size: str,
+    is_error: bool,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for offset in range(0, len(fields), 2):
+        pair = fields[offset : offset + 2]
+        columns = [
+            {
+                "tag": "column",
+                "width": "weighted",
+                "weight": 1,
+                "padding": "0px",
+                "elements": [
+                    _build_run_details_detail_text(
+                        en,
+                        zh,
+                        text_size=text_size,
+                        is_error=is_error,
+                    )
+                ],
+            }
+            for en, zh in pair
+        ]
+        rows.append(
+            {
+                "tag": "column_set",
+                "columns": columns,
+                "horizontal_spacing": "12px",
+                "padding": "0px",
+                "margin": "0px",
+            }
+        )
+    return rows
+
+
+def _run_details_grey_text(content: str) -> str:
+    """Apply the grey Run Details style to markdown content.
+
+    CardKit's ``text_color`` property is ignored for markdown elements.  Use
+    the supported markdown font markup instead.  Existing semantic spans (GPT
+    quota and error colors) are kept as siblings so CardKit never has to render
+    unsupported nested ``font`` tags.
+    """
+    if not content:
+        return content
+    font_span = re.compile(r"(<font\b[^>]*>.*?</font>)", flags=re.IGNORECASE | re.DOTALL)
+    return "".join(
+        part if font_span.fullmatch(part) else f"<font color='grey'>{part}</font>"
+        for part in font_span.split(content)
+        if part
+    )
+
+
+def _run_details_black_text(content: str) -> str:
+    """Color only ordinary Summary text black, preserving semantic spans."""
+    if not content:
+        return content
+    font_span = re.compile(r"(<font\b[^>]*>.*?</font>)", flags=re.IGNORECASE | re.DOTALL)
+    return "".join(
+        part if font_span.fullmatch(part) else f"<font color='black'>{part}</font>"
+        for part in font_span.split(content)
+        if part
+    )
+
+
+def _parse_reset_at(value: object) -> datetime | None:
+    """Parse a quota timestamp and convert it to the system local timezone."""
+    try:
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            parsed = datetime.fromtimestamp(float(value), tz=UTC)
+        else:
+            text = str(value).strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+def _format_quota_reset_at(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Format a reset timestamp as explicit local absolute time for both locales."""
+    reset_at = _parse_reset_at(value)
+    if reset_at is None:
+        return None, None
+    current = (now or datetime.now().astimezone()).astimezone()
+    clock = f"{reset_at.hour:02d}:{reset_at.minute:02d}"
+    month = (
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    )[reset_at.month - 1]
+    if reset_at.year == current.year:
+        return f"{month} {reset_at.day}, {clock}", f"{reset_at.month}月{reset_at.day}日 {clock}"
+    return (
+        f"{month} {reset_at.day}, {reset_at.year} {clock}",
+        f"{reset_at.year}年{reset_at.month}月{reset_at.day}日 {clock}",
+    )
+
+
+def _format_quota_reset_label(
+    value: object,
+    *,
+    now: datetime | None = None,
+) -> tuple[str | None, str | None]:
+    """Format the compact reset label used beside the GPT quota ring.
+
+    Keep the normal state to a month/day so the two-line metric stays compact.
+    On the reset date, replace the date with a minute-precision countdown.
+    Both timestamps are compared after conversion to the local runtime
+    timezone, matching the absolute reset formatter above.
+    """
+    reset_at = _parse_reset_at(value)
+    if reset_at is None:
+        return None, None
+    current = (now or datetime.now().astimezone()).astimezone()
+    if reset_at.date() != current.date():
+        month = (
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        )[reset_at.month - 1]
+        if reset_at.year == current.year:
+            return f"{month} {reset_at.day}", f"{reset_at.month}月{reset_at.day}日"
+        return (
+            f"{month} {reset_at.day}, {reset_at.year}",
+            f"{reset_at.year}年{reset_at.month}月{reset_at.day}日",
+        )
+
+    remaining_seconds = (reset_at - current).total_seconds()
+    if remaining_seconds <= 0:
+        return "now", "立即"
+    total_minutes = max(1, int(remaining_seconds // 60))
+    hours, minutes = divmod(total_minutes, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}min")
+    countdown = " · ".join(parts)
+    return countdown, countdown
+
+
+def _build_footer_summary(
+    data: dict,
+    *,
+    is_error: bool,
+    is_aborted: bool,
+) -> tuple[list[str], list[str]]:
+    """Build the fixed compact summary independently of footer.fields."""
+    en_parts: list[str] = []
+    zh_parts: list[str] = []
+
+    for field in ("status", "elapsed", "model"):
+        en, zh = _render_footer_field(field, data, is_error, is_aborted, False)
+        if en:
+            en_parts.append(en)
+        if zh:
+            zh_parts.append(zh)
+
+    quota_en, quota_zh = _render_footer_field("gpt_quota", data, is_error, is_aborted, False)
+    if quota_en:
+        en_parts.append(quota_en)
+        if quota_zh:
+            zh_parts.append(quota_zh)
+    else:
+        balance_en, balance_zh = _render_footer_field("balance", data, is_error, is_aborted, False)
+        if balance_en:
+            en_parts.append(balance_en)
+        if balance_zh:
+            zh_parts.append(balance_zh)
+
+    return en_parts, zh_parts
+
+
+def _footer_summary_field_names(
+    data: dict,
+    *,
+    is_error: bool,
+    is_aborted: bool,
+) -> set[str]:
+    """Return footer fields already represented by the compact summary."""
+    fields: set[str] = set()
+    for field in ("status", "elapsed", "model"):
+        en, _ = _render_footer_field(field, data, is_error, is_aborted, False)
+        if en:
+            fields.add(field)
+
+    quota_en, _ = _render_footer_field("gpt_quota", data, is_error, is_aborted, False)
+    if quota_en:
+        fields.add("gpt_quota")
+    else:
+        balance_en, _ = _render_footer_field("balance", data, is_error, is_aborted, False)
+        if balance_en:
+            fields.add("balance")
+    return fields
+
+
+def _join_compact_footer_parts(parts: list[str]) -> str:
+    if not parts:
+        return ""
+    if parts[0] == "✅" and len(parts) > 1:
+        return parts[0] + " " + " · ".join(parts[1:])
+    return " · ".join(parts)
+
+
+def _render_run_details_field(
+    name: str,
+    data: dict,
+    is_error: bool,
+    is_aborted: bool,
+) -> tuple[str | None, str | None]:
+    """Render detail values without changing legacy footer semantics."""
+    if name == "status":
+        if is_error:
+            return _T["status_error"]
+        if is_aborted:
+            return _T["status_stopped"]
+        return _T["status_completed"]
+    return _render_footer_field(name, data, is_error, is_aborted, False)
+
+
+def _footer_field_label(name: str) -> tuple[str, str]:
+    """Return the existing/localized label for a supported footer field."""
+    if name == "elapsed":
+        return _T["elapsed"][0].format("").strip(), _T["elapsed"][1].format("").strip()
+    if name == "context":
+        return _T["context"][0].format("").strip(), _T["context"][1].format("").strip()
+    return _T.get(f"{name}_label", ("", ""))
+
+
+def _build_legacy_footer_elements(
+    footer_data: dict | None,
+    *,
+    is_error: bool = False,
+    is_aborted: bool = False,
+    fields: list[list[str]] | None = None,
+    show_label: bool = False,
+    text_size: str = "notation",
+) -> list[dict]:
+    """Fail-open compatibility presentation for unexpected Run Details errors."""
     if fields is None:
         fields = [["status", "elapsed", "context", "model"]]
 
     data = footer_data or {}
     en_lines: list[str] = []
     zh_lines: list[str] = []
-    # GPT quota is more useful than context in the footer. Keep context for
-    # non-GPT models (e.g. DeepSeek) where gpt_quota is empty/hidden.
-    hide_context = bool(data.get("gpt_quota"))
+    hide_context = bool(data.get("gpt_quota_remaining") or data.get("gpt_quota"))
     for row in fields:
         en_parts: list[str] = []
         zh_parts: list[str] = []
@@ -354,8 +1131,6 @@ def _build_footer_elements(
                 if zh:
                     zh_parts.append(zh)
         if en_parts:
-            # Keep completed footer compact: "✅ 26.5s · model ..." instead of
-            # "✅ · 26.5s · model ...". Error/stopped statuses keep separators.
             if en_parts[0] == "✅" and len(en_parts) > 1:
                 en_lines.append(en_parts[0] + " " + " · ".join(en_parts[1:]))
             else:
@@ -367,13 +1142,11 @@ def _build_footer_elements(
 
     if not en_lines:
         return []
-
     en_content = "\n".join(en_lines)
     zh_content = "\n".join(zh_lines)
     if is_error:
         en_content = f"<font color='red'>{en_content}</font>"
         zh_content = f"<font color='red'>{zh_content}</font>"
-
     return [
         {"tag": "hr"},
         {
@@ -415,19 +1188,24 @@ def _render_footer_field(
         return v, v
 
     if name == "tokens":
-        input_t = data.get("input_tokens", 0) or 0
-        output_t = data.get("output_tokens", 0) or 0
-        if input_t or output_t:
-            v = f"↑ {_compact(input_t)} ↓ {_compact(output_t)}"
+        input_t = _positive_int(data.get("input_tokens"))
+        output_t = _positive_int(data.get("output_tokens"))
+        parts = []
+        if input_t:
+            parts.append(f"↑ {_compact(input_t)}")
+        if output_t:
+            parts.append(f"↓ {_compact(output_t)}")
+        if parts:
+            v = " · ".join(parts)
             return v, v
         return None, None
 
     if name == "context":
-        used = data.get("context_used", 0) or 0
-        max_c = data.get("context_max", 0) or 0
+        used = _positive_int(data.get("context_used"))
+        max_c = _positive_int(data.get("context_max"))
         if max_c:
             pct = int(used / max_c * 100)
-            val = f"{_compact(used)}/{_compact(max_c)} ({pct}%)"
+            val = f"{_compact(used)} / {_compact(max_c)} · {pct}%"
             if show_label:
                 return _T["context"][0].format(val), _T["context"][1].format(val)
             return val, val
@@ -438,10 +1216,70 @@ def _render_footer_field(
         return v, v
 
     if name == "gpt_quota":
-        v = data.get("gpt_quota") or None
+        v = data.get("gpt_quota_remaining") or data.get("gpt_quota") or None
         return v, v
 
+    if name == "quota_reset":
+        reset_at = data.get("gpt_quota_reset_at")
+        if reset_at not in (None, ""):
+            return _format_quota_reset_at(reset_at)
+        # Keep compatibility with externally supplied absolute strings, but
+        # never render the retired compact countdown form.
+        legacy = data.get("gpt_quota_reset")
+        if isinstance(legacy, str) and legacy.strip() and not legacy.lstrip().startswith("↻"):
+            return legacy, legacy
+        return None, None
+
+    if name == "cache":
+        cache_read = _positive_int(data.get("cache_read_tokens"))
+        cache_write = _positive_int(data.get("cache_write_tokens"))
+        prompt_tokens = _positive_int(
+            data.get("cache_prompt_tokens") or data.get("input_tokens")
+        )
+        if not cache_read and not cache_write:
+            return None, None
+
+        en_parts: list[str] = []
+        zh_parts: list[str] = []
+        if cache_read:
+            if prompt_tokens:
+                hit_pct = round(cache_read / prompt_tokens * 100)
+                hit = f"{_compact(cache_read)} / {_compact(prompt_tokens)} · {hit_pct}%"
+                en_parts.append(f"Hit {hit}")
+                zh_parts.append(f"命中 {hit}")
+            else:
+                en_parts.append(f"Read {_compact(cache_read)}")
+                zh_parts.append(f"读取 {_compact(cache_read)}")
+        if cache_write:
+            en_parts.append(f"Write {_compact(cache_write)}")
+            zh_parts.append(f"写入 {_compact(cache_write)}")
+        return " · ".join(en_parts), " · ".join(zh_parts)
+
+    if name == "reasoning":
+        value = _positive_int(data.get("reasoning_tokens"))
+        if value:
+            rendered = _compact(value)
+            return rendered, rendered
+        return None, None
+
+    if name == "api_calls":
+        value = _positive_int(data.get("api_calls"))
+        if value:
+            rendered = str(value)
+            return rendered, rendered
+        return None, None
+
     return None, None
+
+
+def _positive_int(value: object) -> int:
+    if not isinstance(value, (str, int, float)):
+        return 0
+    try:
+        parsed = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return parsed if parsed > 0 else 0
 
 
 def _compact(n: int) -> str:

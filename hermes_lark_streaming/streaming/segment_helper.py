@@ -20,7 +20,8 @@ from .segments import Segment, SegmentType
 from .tooluse import ToolDisplayStep, tool_detail_for_display
 
 ELEMENT_THRESHOLD = 180  # 飞书硬上限 200，预留 20 给 footer + 波动
-FOOTER_RESERVE = 2  # footer 元素预留（hr + markdown）
+# Run Details: hr + collapsible_panel + header title + header icon + markdown.
+FOOTER_RESERVE = 5
 MERGED_REASONING_ELEMENT_ESTIMATE = 4
 
 

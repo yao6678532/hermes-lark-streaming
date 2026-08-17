@@ -38,6 +38,8 @@ from hermes_lark_streaming.patcher import (
     _stop_hook,
     _thinking_hook,
     _tool_hook,
+    _usage_baseline_hook,
+    _usage_hook,
 )
 from hermes_lark_streaming.streaming.session import CardSession
 
@@ -197,6 +199,31 @@ def _build_complete_hook_runner():
     return namespace["complete"]
 
 
+def _build_usage_hook_runner():
+    namespace: dict = {}
+    source = (
+        "def collect(ctx, _agent, result):\n"
+        f"{_usage_hook('    ')}"
+        "    return 'done'\n"
+    )
+    exec(compile(source, "<usage-hook-test>", "exec"), namespace)
+    return namespace["collect"]
+
+
+def _build_usage_pipeline_runner():
+    namespace: dict = {}
+    source = (
+        "def collect(ctx, agent, result, advance):\n"
+        f"{_usage_baseline_hook('    ')}"
+        "    advance(agent)\n"
+        "    _agent = agent\n"
+        f"{_usage_hook('    ')}"
+        "    return 'done'\n"
+    )
+    exec(compile(source, "<usage-pipeline-test>", "exec"), namespace)
+    return namespace["collect"]
+
+
 def _build_followup_complete_hook_runner():
     namespace: dict = {}
     source = (
@@ -208,9 +235,10 @@ def _build_followup_complete_hook_runner():
     return namespace["complete"]
 
 
-def _build_stop_hook_runner(key_name: str):
+def _build_stop_hook_runner(key_name: str, *, native_fallback: bool = False):
     namespace: dict = {}
-    source = f"async def stop(source, {key_name}):\n{_stop_hook('    ')}"
+    native_return = "    return 'native'\n" if native_fallback else ""
+    source = f"async def stop(source, {key_name}):\n{_stop_hook('    ')}{native_return}"
     exec(compile(source, "<stop-hook-test>", "exec"), namespace)
     return namespace["stop"]
 
@@ -723,7 +751,41 @@ async def test_generated_stop_hook_uses_available_session_key(key_name: str) -> 
     ) as on_session_aborted:
         await stop(source, "session:chat")
 
-    on_session_aborted.assert_awaited_once_with(session_key="session:chat")
+    on_session_aborted.assert_awaited_once_with(session_key="session:chat", stop_command=True)
+
+
+@pytest.mark.parametrize("handled, expected", [(True, None), (False, "native")])
+@pytest.mark.asyncio
+async def test_generated_stop_hook_suppresses_native_ack_only_after_card_success(
+    handled: bool, expected: str | None
+) -> None:
+    stop = _build_stop_hook_runner("quick_key", native_fallback=True)
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"))
+
+    with patch(
+        "hermes_lark_streaming.patch.on_session_aborted",
+        new_callable=AsyncMock,
+        return_value=handled,
+    ):
+        assert await stop(source, "session:chat") == expected
+
+
+@pytest.mark.asyncio
+async def test_generated_stop_hook_exception_keeps_native_ack(caplog: pytest.LogCaptureFixture) -> None:
+    stop = _build_stop_hook_runner("quick_key", native_fallback=True)
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"))
+
+    with (
+        caplog.at_level(logging.ERROR, logger="hermes_lark_streaming"),
+        patch(
+            "hermes_lark_streaming.patch.on_session_aborted",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("stop hook exploded"),
+        ),
+    ):
+        assert await stop(source, "session:chat") == "native"
+
+    assert any("injected hook failed: stop" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -749,6 +811,7 @@ async def test_generated_complete_hook_keeps_footer_in_card_without_native_resen
         )
 
     assert on_completed.await_args.kwargs["answer"] == "answer\n\nruntime footer"
+    assert "tokens" not in on_completed.await_args.kwargs
     assert result["already_sent"] is True
     assert response == "answer\n\nruntime footer"
     assert footer == ""
@@ -775,6 +838,79 @@ async def test_generated_complete_hook_suppresses_native_error_after_error_card(
     assert on_completed.await_args.kwargs["is_error"] is True
     assert result["failed"] is True
     assert response == ""
+
+
+def test_generated_usage_hook_forwards_only_current_turn_canonical_usage() -> None:
+    collect = _build_usage_hook_runner()
+    usage = {
+        "prompt_tokens": 12_400,
+        "output_tokens": 1_800,
+        "cache_read_tokens": 10_200,
+        "reasoning_tokens": 3_600,
+    }
+    ctx = SimpleNamespace(
+        event_message_id="message",
+        source=SimpleNamespace(platform=SimpleNamespace(value="feishu")),
+    )
+    agent = SimpleNamespace(
+        _last_turn_usage=usage,
+        session_input_tokens=999_999,
+    )
+
+    with patch("hermes_lark_streaming.patch.on_turn_usage") as on_turn_usage:
+        assert collect(ctx, agent, {"api_calls": 2}) == "done"
+
+    on_turn_usage.assert_called_once_with(
+        message_id="message",
+        usage=usage,
+        api_calls=2,
+    )
+
+
+def test_generated_usage_pipeline_forwards_whole_turn_counter_deltas() -> None:
+    collect = _build_usage_pipeline_runner()
+    ctx = SimpleNamespace(
+        event_message_id="message",
+        source=SimpleNamespace(platform=SimpleNamespace(value="feishu")),
+    )
+    agent = SimpleNamespace(
+        _last_turn_usage={
+            "prompt_tokens": 40_000,
+            "output_tokens": 900,
+            "cache_read_tokens": 30_000,
+            "reasoning_tokens": 400,
+        },
+        session_prompt_tokens=100_000,
+        session_input_tokens=30_000,
+        session_output_tokens=5_000,
+        session_cache_read_tokens=70_000,
+        session_cache_write_tokens=0,
+        session_reasoning_tokens=2_000,
+    )
+
+    def advance(current: SimpleNamespace) -> None:
+        current.session_prompt_tokens += 70_500
+        current.session_input_tokens += 18_200
+        current.session_output_tokens += 2_100
+        current.session_cache_read_tokens += 52_300
+        current.session_cache_write_tokens += 0
+        current.session_reasoning_tokens += 1_600
+
+    with patch("hermes_lark_streaming.patch.on_turn_usage") as on_turn_usage:
+        assert collect(ctx, agent, {"api_calls": 3}, advance) == "done"
+
+    on_turn_usage.assert_called_once_with(
+        message_id="message",
+        usage={
+            "prompt_tokens": 70_500,
+            "input_tokens": 18_200,
+            "output_tokens": 2_100,
+            "cache_read_tokens": 52_300,
+            "cache_write_tokens": 0,
+            "reasoning_tokens": 1_600,
+        },
+        api_calls=3,
+    )
 
 
 @pytest.mark.asyncio
@@ -852,6 +988,12 @@ class TestApplyRemove:
         assert "on_message_completed_wait(" in content
         assert "on_message_needs_text_fallback" in content
         assert "_lark_card_sent = await on_message_completed_wait(" in content
+        assert "# HERMES_LARK_USAGE_BASELINE_BEGIN" in content
+        assert "_lark_usage_baseline = capture_turn_usage_baseline(agent)" in content
+        assert "# HERMES_LARK_USAGE_BEGIN" in content
+        assert "_lark_turn_usage = current_turn_usage(" in content
+        assert "fallback=getattr(_agent, '_last_turn_usage', None)" in content
+        assert "on_turn_usage(" in content
         assert "agent_result.pop('already_sent', None)" in content
         assert "_lark_completion_id = agent_result.get('_hermes_lark_completion_id') or event.message_id" in content
         assert "message_id=_lark_completion_id" in content
@@ -905,6 +1047,9 @@ class TestApplyRemove:
         assert stop_call < stop_hook < stop_return
         assert "on_session_aborted" in content[stop_hook:stop_return]
         assert "await on_session_aborted" in content[stop_hook:stop_return]
+        assert "stop_command=True" in content[stop_hook:stop_return]
+        assert "return None" in content[stop_hook:stop_return]
+        assert "Stopped." not in content[stop_hook:stop_return]
 
     def test_apply_idempotent(self, run_copy: Path) -> None:
         patcher = _patcher(run_copy)

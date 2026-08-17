@@ -21,7 +21,7 @@ Inspired by [openclaw-lark](https://github.com/larksuite/openclaw-lark) and [her
 - **Tool use tracking** — Live tool call status with standard icons, result/error blocks
 - **CardKit v2.0** — Uses Feishu CardKit streaming API; card creation failures yield to the Hermes Gateway default reply
 - **Completion card** — Final card with token usage, duration, and context info
-- **Card style** — Configurable card header/footer toggle and body/footer text sizes
+- **Card style** — Configurable card header, terminal compact footer summary toggle, and body text size
 - **Message guard** — Auto-terminates updates when message is deleted/recalled
 - **Image resolution** — Detects markdown image references, downloads and re-uploads as Feishu img_key
 - **Abort handling** — Gracefully handles `/stop` command and message interrupts with aborted state card and automatic new session
@@ -109,7 +109,7 @@ streaming:
     enabled: true
     text_size: notation
     fields:
-      - [status, elapsed, context, model]
+      - [tokens, context, quota_reset, cache, reasoning, balance]
     show_label: false
   panel_expanded: false
 display:
@@ -118,7 +118,7 @@ display:
       show_tool_use: true
 ```
 
-See [CONFIGURATION.md](CONFIGURATION.md) for defaults, fallback behavior, profile scope, credentials, hot-reload boundaries, and supported footer fields.
+`streaming.footer.enabled` controls terminal compact Run Details, while `streaming.footer.fields` selects candidates for adaptive metrics and expanded details. The collapsed summary keeps only high-value metadata, for example `✅ 2m 2s · gpt-5.6-luna · 96%`; up to two valid GPT weekly quota, Context, and Cache metrics appear side by side as circular indicators, and subsequent details also use two columns. GPT quota remaining stays in the summary and its reset time moves to the details; explicit custom fields can hide metrics that are not listed. Tokens, Cache, and Reasoning usage come from Hermes' canonical metadata for the current turn. Missing provider metadata is skipped automatically and session-cumulative counters are not substituted. Details are collapsed by default, independent of `panel_expanded`, and are not dynamically rendered during streaming. Reasoning Panel and Tool Panel behavior is unchanged. See [CONFIGURATION.md](CONFIGURATION.md) for the full configuration reference and maintenance-field index.
 
 ---
 
