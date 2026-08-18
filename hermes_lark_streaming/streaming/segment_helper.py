@@ -178,6 +178,7 @@ def build_add_segment_action(
 def build_add_tool_panel_action(
     steps: list[ToolDisplayStep],
     *,
+    total_steps: int | None = None,
     expanded: bool = True,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
@@ -191,6 +192,7 @@ def build_add_tool_panel_action(
             "elements": [
                 _build_tool_panel(
                     steps,
+                    total_steps=total_steps,
                     expanded=expanded,
                     element_id=TOOL_PANEL_ELEMENT_ID,
                     show_tool_detail=show_tool_detail,
@@ -266,12 +268,14 @@ def build_tool_update_action(
     steps: list[ToolDisplayStep],
     expanded: bool = True,
     element_id: str = TOOL_PANEL_ELEMENT_ID,
+    total_steps: int | None = None,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
 ) -> dict[str, Any]:
     """Update the fixed tool panel's header, children, and expansion state."""
     panel = _build_tool_panel(
         steps,
+        total_steps=total_steps,
         expanded=expanded,
         element_id=None,
         show_tool_detail=show_tool_detail,

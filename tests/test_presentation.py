@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from hermes_lark_streaming.streaming.presentation import project_card_view
+from hermes_lark_streaming.streaming.presentation import (
+    ToolPresentationMode,
+    project_card_view,
+    project_tool_panel,
+)
 from hermes_lark_streaming.streaming.preview import InterimPreviewState
 from hermes_lark_streaming.streaming.reasoning import MergedReasoningState
 from hermes_lark_streaming.streaming.segments import SegmentState
@@ -108,3 +112,56 @@ def test_projection_does_not_mutate_logical_state() -> None:
     assert [(seg.text, seg.created, seg.dirty) for seg in state.segments] == before
     assert (preview.text, preview.dirty, preview.final_started) == before_preview
     assert steps[0] == before_step
+
+
+def test_rich_tool_projection_preserves_configured_full_view_when_it_fits() -> None:
+    steps = _steps(2)
+    snapshot = project_tool_panel(
+        steps, show_tool_detail=True, tool_detail_mode="full", element_budget=40,
+    )
+
+    assert snapshot.mode == ToolPresentationMode.FULL
+    assert snapshot.success_results_visible is True
+    assert snapshot.rendered_steps == snapshot.total_steps == 2
+
+
+def test_overflow_tool_projection_compacts_before_using_a_window() -> None:
+    tracker = ToolUseTracker()
+    for index in range(33):
+        tracker.record_start("exec", f"file-{index}")
+        tracker.record_end("exec", output=f"result-{index}")
+    steps = tracker.build_display_steps()
+
+    snapshot = project_tool_panel(
+        steps, show_tool_detail=True, tool_detail_mode="full", element_budget=170,
+    )
+
+    assert snapshot.degraded is True
+    assert snapshot.windowed is False
+    assert snapshot.total_steps == 33
+    assert snapshot.estimated_elements <= 170
+    assert all(step["result_block"] is None for step in snapshot.steps)
+    assert all(step["result_block"] is not None for step in steps)
+
+
+def test_tool_window_keeps_running_errors_then_recent_successes() -> None:
+    tracker = ToolUseTracker()
+    for index in range(100):
+        tracker.record_start("read", f"file-{index}")
+        tracker.record_end("read", output=f"result-{index}")
+    tracker.record_start("grep", "still-running")
+    tracker.record_start("read", "will-fail")
+    tracker.record_end("read", error="failure")
+    steps = tracker.build_display_steps()
+
+    snapshot = project_tool_panel(
+        steps, show_tool_detail=True, tool_detail_mode="full", element_budget=40,
+    )
+
+    assert snapshot.windowed is True
+    assert snapshot.mode == ToolPresentationMode.TITLE_ONLY
+    assert snapshot.total_steps == 102
+    assert snapshot.estimated_elements <= 40
+    assert {"grep", "read"} <= {step["name"] for step in snapshot.steps}
+    assert any(step["status"] == "error" for step in snapshot.steps)
+    assert any(step["status"] == "running" for step in snapshot.steps)

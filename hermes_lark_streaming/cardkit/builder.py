@@ -170,6 +170,7 @@ def _build_tool_panel(
     steps: list[ToolDisplayStep],
     elapsed_ms: float = 0,
     *,
+    total_steps: int | None = None,
     expanded: bool = True,
     element_id: str | None = TOOL_PANEL_ELEMENT_ID,
     show_tool_detail: bool = True,
@@ -177,14 +178,18 @@ def _build_tool_panel(
 ) -> dict:
     en_t, zh_t = _T["tool_use"]
     en_parts, zh_parts = [en_t], [zh_t]
-    if steps:
+    total = total_steps if total_steps is not None else len(steps)
+    if total:
         tpl_en, tpl_zh = _T["steps"]
-        en_parts.append(tpl_en.format(len(steps), "s" if len(steps) > 1 else ""))
-        zh_parts.append(tpl_zh.format(len(steps), ""))
+        en_parts.append(tpl_en.format(total, "s" if total > 1 else ""))
+        zh_parts.append(tpl_zh.format(total, ""))
         failed_count = sum(step.get("status") == "error" for step in steps)
         if failed_count:
             en_parts.append(f"{failed_count} failed")
             zh_parts.append(f"{failed_count} 个失败")
+        if len(steps) < total:
+            en_parts.append(f"Showing {len(steps)} recent")
+            zh_parts.append(f"显示最近 {len(steps)} 步")
 
     children: list[dict] = []
     for s in steps:
