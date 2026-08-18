@@ -20,11 +20,13 @@ from hermes_lark_streaming.cardkit.builder import (
     REASONING_TEXT_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
+    estimate_cardkit_elements,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
 from hermes_lark_streaming.patch import on_reasoning_delta
-from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elements
+from hermes_lark_streaming.streaming.presentation import project_tool_panel
+from hermes_lark_streaming.streaming.segment_helper import ELEMENT_THRESHOLD, FOOTER_RESERVE, estimate_segment_elements
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
 
@@ -1774,6 +1776,40 @@ class TestDoFlush:
         assert session.segment_state.segments[0].created is True
 
     @pytest.mark.asyncio
+    async def test_flush_renders_the_snapshot_policy_not_the_original_config(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_projection_flags")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_projection_flags"
+        session.element_count = 1
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        source_steps = session.tool_use.build_display_steps()
+        expected = project_tool_panel(
+            source_steps,
+            show_tool_detail=True,
+            tool_detail_mode="full",
+            element_budget=ELEMENT_THRESHOLD - FOOTER_RESERVE - 1,
+        )
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_flush(session)
+
+        actions = ctrl._client.cardkit_batch_update.await_args.args[1]
+        panel = next(
+            action["params"]["elements"][0]
+            for action in actions
+            if action["action"] == "add_elements"
+            and action["params"]["elements"][0].get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        actual_estimate = estimate_cardkit_elements({"body": {"elements": [panel]}})
+        assert expected.mode.value == "title_only"
+        assert actual_estimate == expected.estimated_elements
+        assert all("margin" not in element for element in panel["elements"])
+
+    @pytest.mark.asyncio
     async def test_split_preloads_meaningful_tool_snapshot_without_second_rollover(self) -> None:
         """An exhausted card creates its successor with a tool snapshot immediately."""
         ctrl = _setup_ctrl()
@@ -1816,6 +1852,45 @@ class TestDoFlush:
         assert session.tool_panel.created is True
         assert session.tool_panel.element_estimate > 0
         assert calls.count(("create", "")) == 1
+
+    @pytest.mark.asyncio
+    async def test_split_seal_and_preload_render_bounded_snapshot_policy(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_split_policy")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_policy"
+        session.card_msg_id = "msg_split_policy"
+        session.element_count = 175
+        session.segment_state.on_answer_delta("answer before split")
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_flush(session)
+
+        seal_card = ctrl._client.cardkit_update.await_args.args[1]
+        assert estimate_cardkit_elements(seal_card) <= ELEMENT_THRESHOLD
+        preload_actions: list[list[dict]] = []
+        for call in ctrl._client.cardkit_batch_update.await_args_list:
+            actions = call.args[1]
+            if any(
+                action["action"] == "add_elements"
+                and action["params"]["elements"][0].get("element_id") == TOOL_PANEL_ELEMENT_ID
+                for action in actions
+            ):
+                preload_actions.append(actions)
+        assert len(preload_actions) == 1
+        panel = next(
+            element
+            for action in preload_actions[0]
+            if action["action"] == "add_elements"
+            for element in action["params"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        assert estimate_cardkit_elements({"body": {"elements": [panel]}}) <= 174
+        assert all("margin" not in element for element in panel["elements"])
         assert session.segment_state.segments[1].created is True
 
     @pytest.mark.asyncio
@@ -2841,7 +2916,10 @@ class TestMergedReasoning:
 
 class TestDoCompleteCard:
     @pytest.mark.asyncio
-    async def test_terminal_projects_full_chronology_into_a_bounded_tool_panel(self) -> None:
+    @pytest.mark.parametrize("step_count", [50, 100])
+    async def test_terminal_projects_full_chronology_into_a_bounded_tool_panel(
+        self, step_count: int,
+    ) -> None:
         ctrl = _setup_ctrl()
         ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
         session = _make_session("msg_terminal_projection")
@@ -2850,10 +2928,10 @@ class TestDoCompleteCard:
         session.segment_state.on_reasoning_delta("reasoning")
         session.tool_use.record_start("exec", "before-final")
         session.tool_use.record_end("exec", output="preserved-result")
-        for index in range(49):
+        for index in range(step_count - 1):
             session.tool_use.record_start("exec", f"tool-{index}")
             session.tool_use.record_end("exec", output=f"result-{index}")
-        session.segment_state.on_tool_event(50)
+        session.segment_state.on_tool_event(step_count)
         session.interim_preview.replace("interim commentary")
         session.interim_preview.start_final()
         session.segment_state.on_answer_delta("true final answer")
@@ -2861,7 +2939,7 @@ class TestDoCompleteCard:
         source_steps = session.tool_use.build_display_steps()
         ctrl._sessions[session.message_id] = session
 
-        assert len(source_steps) == 50
+        assert len(source_steps) == step_count
         assert all(step["result_block"] is not None for step in source_steps)
         assert await ctrl._do_complete_card(session) is True
 
@@ -2875,8 +2953,8 @@ class TestDoCompleteCard:
             for element in card["body"]["elements"]
             if element.get("tag") == "markdown"
         )
-        assert "50 steps" in tool_panel["header"]["title"]["content"]
-        assert len(tool_panel["elements"]) < 50 * 3
+        assert f"{step_count} steps" in tool_panel["header"]["title"]["content"]
+        assert estimate_cardkit_elements(card) <= ELEMENT_THRESHOLD
         assert "true final answer" in body_text
         assert "interim commentary" not in body_text
         assert "Done" not in body_text

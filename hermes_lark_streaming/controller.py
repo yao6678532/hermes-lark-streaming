@@ -508,7 +508,7 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
-        _logger.info(
+        _logger.debug(
             "stream lane=answer msg=%s len=%d head=%r",
             session.message_id[:12],
             len(answer_text),
@@ -652,7 +652,7 @@ class StreamCardController(StreamingController):
             self._cleanup_session(session)
             return False
 
-        _logger.info(
+        _logger.debug(
             "on_completed_wait: msg=%s has_card=%s state=%s",
             message_id[:12],
             session.has_card,
@@ -888,7 +888,7 @@ class StreamCardController(StreamingController):
                 for seg in session.segment_state.segments
             )
         )
-        _logger.info(
+        _logger.debug(
             "completion payload msg=%s len=%d has_visible_answer=%s final_started=%s head=%r",
             session.message_id[:12],
             len(answer or ""),
@@ -900,7 +900,7 @@ class StreamCardController(StreamingController):
         if answer and session.segment_state and not has_visible_answer:
             final_answer = strip_reasoning_tags(answer)
             if final_answer.strip():
-                _logger.info(
+                _logger.debug(
                     "completion promote_final msg=%s len=%d head=%r",
                     session.message_id[:12],
                     len(final_answer),

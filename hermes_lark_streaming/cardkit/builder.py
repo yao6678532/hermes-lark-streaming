@@ -171,6 +171,7 @@ def _build_tool_panel(
     elapsed_ms: float = 0,
     *,
     total_steps: int | None = None,
+    total_failed_count: int | None = None,
     expanded: bool = True,
     element_id: str | None = TOOL_PANEL_ELEMENT_ID,
     show_tool_detail: bool = True,
@@ -183,13 +184,17 @@ def _build_tool_panel(
         tpl_en, tpl_zh = _T["steps"]
         en_parts.append(tpl_en.format(total, "s" if total > 1 else ""))
         zh_parts.append(tpl_zh.format(total, ""))
-        failed_count = sum(step.get("status") == "error" for step in steps)
+        failed_count = (
+            total_failed_count
+            if total_failed_count is not None
+            else sum(step.get("status") == "error" for step in steps)
+        )
         if failed_count:
             en_parts.append(f"{failed_count} failed")
             zh_parts.append(f"{failed_count} 个失败")
         if len(steps) < total:
-            en_parts.append(f"Showing {len(steps)} recent")
-            zh_parts.append(f"显示最近 {len(steps)} 步")
+            en_parts.append(f"Showing {len(steps)} / {total}")
+            zh_parts.append(f"显示 {len(steps)} / {total} 步")
 
     children: list[dict] = []
     for s in steps:
@@ -1397,6 +1402,7 @@ def build_complete_card(
     tool_detail_mode: str = "full",
     tool_panel_steps: list[ToolDisplayStep] | None = None,
     tool_total_steps: int | None = None,
+    tool_total_failed_count: int | None = None,
     width_mode: str = "default",
     merged_reasoning_text: str | None = None,
     merged_reasoning_elapsed_ms: float = 0,
@@ -1450,6 +1456,7 @@ def build_complete_card(
                     _build_tool_panel(
                         steps,
                         total_steps=tool_total_steps,
+                        total_failed_count=tool_total_failed_count,
                         expanded=panel_expanded,
                         element_id=TOOL_PANEL_ELEMENT_ID,
                         show_tool_detail=show_tool_detail,
@@ -1500,6 +1507,45 @@ def build_complete_card(
         header_status = "error" if is_error else "stopped" if is_aborted else "completed"
         card["header"] = _build_header(header_status)
     return card
+
+
+def estimate_cardkit_elements(card: dict[str, Any]) -> int:
+    """Recursively count rendered CardKit body structures for capacity checks."""
+    body = card.get("body")
+    if not isinstance(body, dict):
+        return 0
+    elements = body.get("elements")
+    if not isinstance(elements, list):
+        return 0
+    return sum(_count_cardkit_element(element) for element in elements if isinstance(element, dict))
+
+
+def _count_cardkit_element(element: dict[str, Any]) -> int:
+    """Use the same panel/div child convention as the live estimators."""
+    if not element.get("tag"):
+        return 0
+    count = 1
+    tag = element["tag"]
+    if tag == "collapsible_panel":
+        header = element.get("header")
+        if isinstance(header, dict):
+            for key in ("title", "icon"):
+                child = header.get(key)
+                if isinstance(child, dict):
+                    count += _count_cardkit_element(child)
+        children = element.get("elements")
+        if isinstance(children, list):
+            count += sum(_count_cardkit_element(child) for child in children if isinstance(child, dict))
+    elif tag == "div":
+        for key in ("icon", "text"):
+            child = element.get(key)
+            if isinstance(child, dict):
+                count += _count_cardkit_element(child)
+    elif tag in {"column_set", "column"}:
+        children = element.get("columns" if tag == "column_set" else "elements")
+        if isinstance(children, list):
+            count += sum(_count_cardkit_element(child) for child in children if isinstance(child, dict))
+    return count
 
 
 def _format_run_time(run_time: str) -> str:

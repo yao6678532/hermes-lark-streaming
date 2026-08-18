@@ -179,6 +179,7 @@ def build_add_tool_panel_action(
     steps: list[ToolDisplayStep],
     *,
     total_steps: int | None = None,
+    total_failed_count: int | None = None,
     expanded: bool = True,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
@@ -193,6 +194,7 @@ def build_add_tool_panel_action(
                 _build_tool_panel(
                     steps,
                     total_steps=total_steps,
+                    total_failed_count=total_failed_count,
                     expanded=expanded,
                     element_id=TOOL_PANEL_ELEMENT_ID,
                     show_tool_detail=show_tool_detail,
@@ -269,6 +271,7 @@ def build_tool_update_action(
     expanded: bool = True,
     element_id: str = TOOL_PANEL_ELEMENT_ID,
     total_steps: int | None = None,
+    total_failed_count: int | None = None,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
 ) -> dict[str, Any]:
@@ -276,6 +279,7 @@ def build_tool_update_action(
     panel = _build_tool_panel(
         steps,
         total_steps=total_steps,
+        total_failed_count=total_failed_count,
         expanded=expanded,
         element_id=None,
         show_tool_detail=show_tool_detail,

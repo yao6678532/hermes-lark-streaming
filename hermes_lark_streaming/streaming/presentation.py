@@ -49,6 +49,7 @@ class ToolPanelSnapshot:
     show_tool_detail: bool
     tool_detail_mode: str
     success_results_visible: bool
+    total_failed_count: int
     estimated_elements: int
     windowed: bool = False
 
@@ -114,11 +115,15 @@ def project_tool_panel(
         ])
     elif configured_mode == ToolPresentationMode.COMPACT:
         candidates.extend([
+            (ToolPresentationMode.COMPACT, True),
             (ToolPresentationMode.COMPACT, False),
             (ToolPresentationMode.TITLE_ONLY, False),
         ])
     else:
-        candidates.append((ToolPresentationMode.TITLE_ONLY, False))
+        candidates.extend([
+            (ToolPresentationMode.TITLE_ONLY, True),
+            (ToolPresentationMode.TITLE_ONLY, False),
+        ])
 
     for mode, success_results_visible in candidates:
         snapshot = _tool_snapshot(
@@ -164,6 +169,7 @@ def _tool_snapshot(
         show_tool_detail=show_detail,
         tool_detail_mode=detail_mode,
         success_results_visible=success_results_visible,
+        total_failed_count=sum(step.get("status") == "error" for step in all_steps),
         estimated_elements=0,
         windowed=windowed,
     )

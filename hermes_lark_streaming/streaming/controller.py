@@ -16,6 +16,7 @@ from ..cardkit.builder import (
     build_complete_card,
     build_cron_card,
     build_streaming_card_v2,
+    estimate_cardkit_elements,
 )
 from ..cardkit.markdown import (
     _downgrade_tables,
@@ -356,21 +357,21 @@ class StreamingController:
         normalized_source = str(source or "").strip().lower()
         if normalized_source == _INTERIM_COMMENTARY_SOURCE:
             if not text:
-                _logger.info(
+                _logger.debug(
                     "stream lane=commentary ignored=empty msg=%s len=0 final_started=%s",
                     session.message_id[:12],
                     session.interim_preview.final_started,
                 )
                 return False
             if session.interim_preview.final_started:
-                _logger.info(
+                _logger.debug(
                     "stream lane=commentary ignored=final_started msg=%s len=%d head=%r",
                     session.message_id[:12],
                     len(text),
                     text[:120],
                 )
                 return False
-            _logger.info(
+            _logger.debug(
                 "stream lane=commentary msg=%s len=%d final_started=%s head=%r",
                 session.message_id[:12],
                 len(text),
@@ -396,7 +397,7 @@ class StreamingController:
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
-            _logger.info(
+            _logger.debug(
                 "stream lane=thinking_answer msg=%s len=%d head=%r",
                 session.message_id[:12],
                 len(answer),
@@ -603,15 +604,19 @@ class StreamingController:
                     current_estimate = session.tool_panel.element_estimate
                     delta = panel_estimate - current_estimate
                     _logger.info(
-                        "tool_snapshot: msg=%s total_steps=%d rendered_steps=%d mode=%s "
-                        "estimated_elements=%d budget=%d degraded=%s",
+                        "tool_snapshot: msg=%s total_steps=%d rendered_steps=%d configured_mode=%s "
+                        "actual_mode=%s estimated_elements=%d budget=%d degraded=%s windowed=%s "
+                        "success_results_visible=%s",
                         session.message_id[:12],
                         presentation.total_steps,
                         presentation.rendered_steps,
+                        presentation.configured_mode,
                         presentation.mode,
                         panel_estimate,
                         tool_budget,
                         presentation.degraded,
+                        presentation.windowed,
+                        presentation.success_results_visible,
                     )
                     if (
                         panel_estimate > tool_budget
@@ -675,9 +680,10 @@ class StreamingController:
                             build_tool_update_action(
                                 steps=list(presentation.steps),
                                 total_steps=presentation.total_steps,
+                                total_failed_count=presentation.total_failed_count,
                                 expanded=self._tool_panel_expanded(session),
-                                show_tool_detail=show_tool_detail,
-                                tool_detail_mode=tool_detail_mode,
+                                show_tool_detail=presentation.show_tool_detail,
+                                tool_detail_mode=presentation.tool_detail_mode,
                             )
                         )
                     else:
@@ -685,9 +691,10 @@ class StreamingController:
                             build_add_tool_panel_action(
                                 list(presentation.steps),
                                 total_steps=presentation.total_steps,
+                                total_failed_count=presentation.total_failed_count,
                                 expanded=self._tool_panel_expanded(session),
-                                show_tool_detail=show_tool_detail,
-                                tool_detail_mode=tool_detail_mode,
+                                show_tool_detail=presentation.show_tool_detail,
+                                tool_detail_mode=presentation.tool_detail_mode,
                             )
                         )
                     tool_panel_segments = [
@@ -1044,26 +1051,30 @@ class StreamingController:
         panel_steps = all_steps[active_start:split_offset]
         if not panel_steps:
             return None
-        panel_estimate = estimate_tool_elements(
-            active_start,
-            split_offset,
-            all_steps,
+        panel_presentation = project_tool_panel(
+            panel_steps,
             show_tool_detail=show_tool_detail,
             tool_detail_mode=tool_detail_mode,
+            element_budget=max(0, ELEMENT_THRESHOLD - base_count - FOOTER_RESERVE),
         )
+        panel_estimate = panel_presentation.estimated_elements
         panel_action = (
             build_tool_update_action(
-                steps=panel_steps,
+                steps=list(panel_presentation.steps),
+                total_steps=panel_presentation.total_steps,
+                total_failed_count=panel_presentation.total_failed_count,
                 expanded=self._tool_panel_expanded(session),
-                show_tool_detail=show_tool_detail,
-                tool_detail_mode=tool_detail_mode,
+                show_tool_detail=panel_presentation.show_tool_detail,
+                tool_detail_mode=panel_presentation.tool_detail_mode,
             )
             if session.tool_panel.created
             else build_add_tool_panel_action(
-                panel_steps,
+                list(panel_presentation.steps),
+                total_steps=panel_presentation.total_steps,
+                total_failed_count=panel_presentation.total_failed_count,
                 expanded=self._tool_panel_expanded(session),
-                show_tool_detail=show_tool_detail,
-                tool_detail_mode=tool_detail_mode,
+                show_tool_detail=panel_presentation.show_tool_detail,
+                tool_detail_mode=panel_presentation.tool_detail_mode,
             )
         )
         actions.append(panel_action)
@@ -1076,7 +1087,7 @@ class StreamingController:
             session.tool_panel.revision,
             panel_estimate,
             tool_panel_segments,
-            list(panel_steps),
+            list(panel_presentation.steps),
         )
         if split_target_index == split_index + 1:
             segment_state.split_tool_segment(split_index, split_offset)
@@ -1147,6 +1158,27 @@ class StreamingController:
                 seg.elapsed_ms for seg in seal_segments if seg.type == SegmentType.REASONING
             )
 
+        seal_non_tool_card = build_complete_card(
+            segments=seal_segments,
+            all_tool_steps=all_steps,
+            footer_fields=[],
+            footer_show_label=False,
+            footer_enabled=False,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=False,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=False,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=seal_merged_text,
+            merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
+        )
+        seal_tool_snapshot = project_tool_panel(
+            all_steps,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
+            element_budget=max(0, ELEMENT_THRESHOLD - estimate_cardkit_elements(seal_non_tool_card)),
+        )
         seal_card = build_complete_card(
             segments=seal_segments,
             all_tool_steps=all_steps,
@@ -1158,8 +1190,11 @@ class StreamingController:
             body_text_size=self._cfg.body_text_size,
             add_empty_answer_fallback=False,
             show_tool_use=self._cfg.show_tool_use,
-            show_tool_detail=show_tool_detail,
-            tool_detail_mode=tool_detail_mode,
+            show_tool_detail=seal_tool_snapshot.show_tool_detail,
+            tool_detail_mode=seal_tool_snapshot.tool_detail_mode,
+            tool_panel_steps=list(seal_tool_snapshot.steps),
+            tool_total_steps=seal_tool_snapshot.total_steps,
+            tool_total_failed_count=seal_tool_snapshot.total_failed_count,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=seal_merged_text,
             merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
@@ -1233,9 +1268,10 @@ class StreamingController:
                 build_add_tool_panel_action(
                     list(next_presentation.steps),
                     total_steps=next_presentation.total_steps,
+                    total_failed_count=next_presentation.total_failed_count,
                     expanded=self._tool_panel_expanded(session),
-                    show_tool_detail=show_tool_detail,
-                    tool_detail_mode=tool_detail_mode,
+                    show_tool_detail=next_presentation.show_tool_detail,
+                    tool_detail_mode=next_presentation.tool_detail_mode,
                 )
             ]
             if not await self._do_batch_update(
@@ -1311,11 +1347,33 @@ class StreamingController:
             interim_preview=session.interim_preview,
             reasoning_mode=self._cfg.reasoning_mode,
         )
+        terminal_non_tool_card = build_complete_card(
+            segments=logical_segments,
+            all_tool_steps=all_tool_steps,
+            footer_data=session.footer,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            footer_fields=self._cfg.footer_fields,
+            footer_show_label=self._cfg.footer_show_label,
+            footer_enabled=self._cfg.footer_enabled,
+            footer_text_size=self._cfg.footer_text_size,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=self._cfg.header_enabled,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=False,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=(
+                final_view.reasoning_text if self._cfg.reasoning_mode == "merged" else None
+            ),
+            merged_reasoning_elapsed_ms=final_view.reasoning_elapsed_ms,
+        )
+        terminal_non_tool_estimate = estimate_cardkit_elements(terminal_non_tool_card)
         final_tool_snapshot = project_tool_panel(
             all_tool_steps,
             show_tool_detail=show_tool_detail,
             tool_detail_mode=tool_detail_mode,
-            element_budget=ELEMENT_THRESHOLD - FOOTER_RESERVE,
+            element_budget=max(0, ELEMENT_THRESHOLD - terminal_non_tool_estimate),
         )
 
         if session.image_resolver:
@@ -1340,10 +1398,11 @@ class StreamingController:
             body_text_size=self._cfg.body_text_size,
             add_empty_answer_fallback=False,
             show_tool_use=self._cfg.show_tool_use,
-            show_tool_detail=show_tool_detail,
-            tool_detail_mode=tool_detail_mode,
+            show_tool_detail=final_tool_snapshot.show_tool_detail,
+            tool_detail_mode=final_tool_snapshot.tool_detail_mode,
             tool_panel_steps=list(final_tool_snapshot.steps),
             tool_total_steps=final_tool_snapshot.total_steps,
+            tool_total_failed_count=final_tool_snapshot.total_failed_count,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=(
                 final_view.reasoning_text

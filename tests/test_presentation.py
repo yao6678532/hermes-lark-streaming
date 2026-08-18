@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hermes_lark_streaming.cardkit.builder import _build_tool_panel
+from hermes_lark_streaming.cardkit.builder import _build_tool_panel, estimate_cardkit_elements
 from hermes_lark_streaming.streaming.presentation import (
     ToolPresentationMode,
     project_card_view,
@@ -232,3 +232,87 @@ def test_final_tool_refresh_only_allows_running_or_error_state_transitions() -> 
     assert state.needs_final_refresh(("success", "error")) is True
     state.rendered_statuses = ("success", "running")
     assert state.needs_final_refresh(("success", "success")) is True
+
+
+def test_configured_compact_preserves_results_when_it_fits() -> None:
+    tracker = ToolUseTracker()
+    tracker.record_start("exec", "command")
+    tracker.record_end("exec", output="result")
+
+    snapshot = project_tool_panel(
+        tracker.build_display_steps(),
+        show_tool_detail=True,
+        tool_detail_mode="compact",
+        element_budget=20,
+    )
+
+    assert snapshot.mode == ToolPresentationMode.COMPACT
+    assert snapshot.degraded is False
+    assert snapshot.success_results_visible is True
+    assert snapshot.steps[0]["result_block"] is not None
+
+
+def test_hidden_detail_preserves_results_when_it_fits() -> None:
+    tracker = ToolUseTracker()
+    tracker.record_start("exec", "command")
+    tracker.record_end("exec", output="result")
+
+    snapshot = project_tool_panel(
+        tracker.build_display_steps(),
+        show_tool_detail=False,
+        tool_detail_mode="full",
+        element_budget=20,
+    )
+
+    assert snapshot.mode == ToolPresentationMode.TITLE_ONLY
+    assert snapshot.degraded is False
+    assert snapshot.show_tool_detail is False
+    assert snapshot.steps[0]["result_block"] is not None
+
+
+def test_compact_overflow_hides_results_without_mutating_the_source() -> None:
+    tracker = ToolUseTracker()
+    for index in range(10):
+        tracker.record_start("exec", f"command-{index}")
+        tracker.record_end("exec", output=f"result-{index}")
+    source = tracker.build_display_steps()
+
+    snapshot = project_tool_panel(
+        source,
+        show_tool_detail=True,
+        tool_detail_mode="compact",
+        element_budget=55,
+    )
+
+    assert snapshot.degraded is True
+    assert snapshot.success_results_visible is False
+    assert all(step["result_block"] is None for step in snapshot.steps)
+    assert all(step["result_block"] is not None for step in source)
+
+
+def test_window_title_uses_total_failure_count_not_rendered_subset() -> None:
+    tracker = ToolUseTracker()
+    for index in range(40):
+        tracker.record_start("exec", f"command-{index}")
+        tracker.record_end("exec", output="ok")
+    for index in range(3):
+        tracker.record_start("exec", f"failed-{index}")
+        tracker.record_end("exec", error="failed")
+    snapshot = project_tool_panel(
+        tracker.build_display_steps(),
+        show_tool_detail=True,
+        tool_detail_mode="full",
+        element_budget=30,
+    )
+    panel = _build_tool_panel(
+        list(snapshot.steps),
+        total_steps=snapshot.total_steps,
+        total_failed_count=snapshot.total_failed_count,
+        show_tool_detail=snapshot.show_tool_detail,
+        tool_detail_mode=snapshot.tool_detail_mode,
+    )
+
+    assert snapshot.windowed is True
+    assert snapshot.total_failed_count == 3
+    assert "3 failed" in panel["header"]["title"]["content"]
+    assert estimate_cardkit_elements({"body": {"elements": [panel]}}) == snapshot.estimated_elements
