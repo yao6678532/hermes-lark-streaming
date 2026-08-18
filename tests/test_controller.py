@@ -3392,6 +3392,80 @@ class TestInterimPreview:
         )
 
     @pytest.mark.asyncio
+    async def test_split_seal_without_answer_omits_done_but_keeps_reasoning(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_split_no_answer")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_no_answer"
+        session.card_msg_id = "msg_split_no_answer"
+        session.segment_state.on_reasoning_delta("sealed reasoning")
+        session.segment_state.segments[0].created = True
+        session.segment_state.segments[0].dirty = False
+
+        assert await ctrl._do_split_card(session, 1, [], set(), {}, []) is True
+
+        sealed_card = ctrl._client.cardkit_update.await_args.args[1]
+        body_text = str(sealed_card["body"]["elements"])
+        assert "sealed reasoning" in body_text
+        assert "Done" not in body_text
+        assert "完成" not in body_text
+
+    def test_whitespace_answer_does_not_start_final_or_clear_preview(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_whitespace")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_whitespace"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text=" ") is True
+
+        assert session.interim_preview.final_started is False
+        assert session.interim_preview.text == "Checking..."
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text="Final") is True
+
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
+
+    def test_completion_fallback_ignores_whitespace_answer_segment(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_completion_whitespace")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_completion_whitespace"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text=" ") is True
+
+        ctrl._apply_completion_payload(
+            session=session,
+            answer="Authoritative final",
+            duration=0,
+            model="",
+            tokens=None,
+            context=None,
+        )
+
+        assert session.interim_preview.final_started is True
+        answer_text = "".join(
+            seg.text for seg in session.segment_state.segments if seg.type == "answer"
+        )
+        assert "Authoritative final" in answer_text
+        assert "Checking..." not in answer_text
+
+    @pytest.mark.asyncio
     async def test_missing_preview_element_is_recreated_on_next_flush(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_preview_missing")

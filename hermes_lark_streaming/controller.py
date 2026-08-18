@@ -508,8 +508,15 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
+        _logger.info(
+            "stream lane=answer msg=%s len=%d head=%r",
+            session.message_id[:12],
+            len(answer_text),
+            answer_text[:120],
+        )
         self._pause_merged_reasoning(session)
-        session.interim_preview.start_final()
+        if answer_text.strip():
+            self._start_final(session, source="on_answer")
         self._append_answer_segment(session, answer_text)
         self._schedule_flush(session)
         return True
@@ -525,7 +532,7 @@ class StreamCardController(StreamingController):
         progress = getattr(session, "progress", None)
         if progress is not None:
             progress.clear()
-        session.interim_preview.start_final()
+        self._start_final(session, source="abort")
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
         _logger.info("on_aborted: msg=%s state=ABORTED", message_id[:12])
@@ -541,7 +548,7 @@ class StreamCardController(StreamingController):
             return False
 
         session.progress.clear()
-        session.interim_preview.start_final()
+        self._start_final(session, source="abort")
         session.state = SessionState.ABORTED
         if stop_command:
             session.footer["stop_continue_hint"] = True
@@ -567,7 +574,7 @@ class StreamCardController(StreamingController):
         session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
             old_session.progress.clear()
-            old_session.interim_preview.start_final()
+            self._start_final(old_session, source="abort")
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
             _logger.info(
@@ -661,6 +668,7 @@ class StreamCardController(StreamingController):
             context=context,
         )
         if is_error:
+            self._start_final(session, source="error")
             session.mark_failed()
 
         return await self._complete_session_wait(session)
@@ -873,12 +881,32 @@ class StreamCardController(StreamingController):
         tokens: dict | None,
         context: dict | None,
     ) -> None:
-        if answer and session.segment_state and not any(
-            seg.type == SegmentType.ANSWER for seg in session.segment_state.segments
-        ):
+        has_visible_answer = bool(
+            session.segment_state
+            and any(
+                seg.type == SegmentType.ANSWER and seg.text.strip()
+                for seg in session.segment_state.segments
+            )
+        )
+        _logger.info(
+            "completion payload msg=%s len=%d has_visible_answer=%s final_started=%s head=%r",
+            session.message_id[:12],
+            len(answer or ""),
+            has_visible_answer,
+            session.interim_preview.final_started,
+            (answer or "")[:160],
+        )
+
+        if answer and session.segment_state and not has_visible_answer:
             final_answer = strip_reasoning_tags(answer)
-            if final_answer:
-                session.interim_preview.start_final()
+            if final_answer.strip():
+                _logger.info(
+                    "completion promote_final msg=%s len=%d head=%r",
+                    session.message_id[:12],
+                    len(final_answer),
+                    final_answer[:160],
+                )
+                self._start_final(session, source="completion")
                 self._pause_merged_reasoning(session)
                 self._append_answer_segment(session, final_answer)
 

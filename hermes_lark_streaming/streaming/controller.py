@@ -176,6 +176,17 @@ class StreamingController:
         if self._cfg.reasoning_mode == "merged":
             session.merged_reasoning.pause()
 
+    def _start_final(self, session: CardSession, *, source: str) -> bool:
+        """Start the final lane and log the first transition with its caller."""
+        started = session.interim_preview.start_final()
+        if started:
+            _logger.info(
+                "preview final_start msg=%s source=%s",
+                session.message_id[:12],
+                source,
+            )
+        return started
+
     @staticmethod
     def _active_card_has_answer(session: CardSession) -> bool:
         """Return whether the current physical card already has answer text."""
@@ -345,9 +356,27 @@ class StreamingController:
         normalized_source = str(source or "").strip().lower()
         if normalized_source == _INTERIM_COMMENTARY_SOURCE:
             if not text:
+                _logger.info(
+                    "stream lane=commentary ignored=empty msg=%s len=0 final_started=%s",
+                    session.message_id[:12],
+                    session.interim_preview.final_started,
+                )
                 return False
             if session.interim_preview.final_started:
+                _logger.info(
+                    "stream lane=commentary ignored=final_started msg=%s len=%d head=%r",
+                    session.message_id[:12],
+                    len(text),
+                    text[:120],
+                )
                 return False
+            _logger.info(
+                "stream lane=commentary msg=%s len=%d final_started=%s head=%r",
+                session.message_id[:12],
+                len(text),
+                session.interim_preview.final_started,
+                text[:120],
+            )
             self._pause_merged_reasoning(session)
             if not session.interim_preview.replace(text):
                 return False
@@ -367,8 +396,15 @@ class StreamingController:
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
+            _logger.info(
+                "stream lane=thinking_answer msg=%s len=%d head=%r",
+                session.message_id[:12],
+                len(answer),
+                answer[:120],
+            )
             self._pause_merged_reasoning(session)
-            session.interim_preview.start_final()
+            if answer.strip():
+                self._start_final(session, source="thinking_answer")
             self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
@@ -1126,6 +1162,7 @@ class StreamingController:
             panel_expanded=self._cfg.panel_expanded,
             header_enabled=False,
             body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
             show_tool_use=self._cfg.show_tool_use,
             show_tool_detail=show_tool_detail,
             tool_detail_mode=tool_detail_mode,
@@ -1223,7 +1260,7 @@ class StreamingController:
             return False
 
         session.progress.clear()
-        session.interim_preview.start_final()
+        self._start_final(session, source="terminal")
         await session.flush.wait_for_flush()
         session.flush.mark_completed()
 

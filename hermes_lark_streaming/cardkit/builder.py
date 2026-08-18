@@ -1382,6 +1382,7 @@ def build_complete_card(
     footer_fields: list[list[str]] | None = None,
     footer_show_label: bool = True,
     footer_enabled: bool = True,
+    add_empty_answer_fallback: bool = True,
     footer_text_size: str = "notation",
     panel_expanded: bool = False,
     header_enabled: bool = False,
@@ -1449,7 +1450,7 @@ def build_complete_card(
             for chunk in _split_long_text(content):
                 elements.append({"tag": "markdown", "content": chunk, "text_size": body_text_size})
 
-    if not has_answer:
+    if not has_answer and add_empty_answer_fallback:
         elements.append({"tag": "markdown", "content": _T["done"][0], "text_size": body_text_size})
 
     if footer_enabled:
