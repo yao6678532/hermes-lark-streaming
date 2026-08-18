@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 from ..cardkit.builder import (
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
     build_background_card,
     build_complete_card,
@@ -33,8 +34,10 @@ from .image import ImageResolver
 from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
+    INTERIM_PREVIEW_ELEMENT_ESTIMATE,
     MERGED_REASONING_ELEMENT_ESTIMATE,
     active_tool_range,
+    build_add_interim_preview_action,
     build_add_merged_reasoning_action,
     build_add_segment_action,
     build_add_tool_panel_action,
@@ -267,6 +270,66 @@ class StreamingController:
 
         self._consume_merged_reasoning_segments(session)
 
+    async def _flush_interim_preview(self, session: CardSession) -> None:
+        """Create/update the replace-only commentary preview lane fail-open."""
+        assert self._client is not None
+        assert session.card_id is not None
+        state = session.interim_preview
+
+        if not state.created and state.text and not state.final_started:
+            session.sequence += 1
+            try:
+                await self._client.cardkit_batch_update(
+                    session.card_id,
+                    [
+                        build_add_interim_preview_action(
+                            text_size=self._cfg.body_text_size,
+                        )
+                    ],
+                    sequence=session.sequence,
+                )
+            except FeishuAPIError as error:
+                _logger.debug("CardKit interim preview create failed: %s", error, exc_info=True)
+                self._handle_flush_error(error)
+                return
+            except Exception:
+                _logger.debug("CardKit interim preview create failed", exc_info=True)
+                return
+            state.created = True
+            session.element_count += INTERIM_PREVIEW_ELEMENT_ESTIMATE
+
+        if not state.created or not state.dirty:
+            return
+
+        rendered_text = state.text
+        rendered_revision = state.revision
+        content = _downgrade_tables(optimize_markdown_style(rendered_text)) or " "
+        session.sequence += 1
+        try:
+            await self._client.cardkit_stream_element(
+                session.card_id,
+                STREAMING_ELEMENT_ID,
+                content,
+                sequence=session.sequence,
+            )
+        except FeishuAPIError as error:
+            missing_el_id = extract_missing_element_id(error)
+            if missing_el_id == STREAMING_ELEMENT_ID:
+                state.created = False
+                state.dirty = bool(state.text) and not state.final_started
+                session.element_count = max(
+                    0,
+                    session.element_count - INTERIM_PREVIEW_ELEMENT_ESTIMATE,
+                )
+            _logger.debug("CardKit interim preview stream failed: %s", error, exc_info=True)
+            self._handle_flush_error(error)
+            return
+        except Exception:
+            _logger.debug("CardKit interim preview stream failed", exc_info=True)
+            return
+
+        state.mark_rendered(rendered_revision)
+
     def _on_thinking_segment(
         self,
         session: CardSession,
@@ -281,13 +344,13 @@ class StreamingController:
 
         normalized_source = str(source or "").strip().lower()
         if normalized_source == _INTERIM_COMMENTARY_SOURCE:
-            # Hermes has already classified this as a complete, user-visible
-            # assistant message.  Keep commentary in body chronology; only
-            # reasoning_callback data is eligible for merged reasoning UI.
             if not text:
                 return False
+            if session.interim_preview.final_started:
+                return False
             self._pause_merged_reasoning(session)
-            self._append_answer_segment(session, text)
+            if not session.interim_preview.replace(text):
+                return False
             self._schedule_flush(session)
             return True
 
@@ -305,6 +368,7 @@ class StreamingController:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
             self._pause_merged_reasoning(session)
+            session.interim_preview.start_final()
             self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
@@ -376,6 +440,7 @@ class StreamingController:
             if (
                 (session.segment_state and session.segment_state.has_dirty)
                 or session.progress.dirty
+                or session.interim_preview.dirty
             ):
                 self._schedule_flush(session)
             _logger.info(
@@ -407,6 +472,13 @@ class StreamingController:
         show_tool_use = self._cfg.show_tool_use
         show_tool_detail = self._cfg.show_tool_detail
         tool_detail_mode = self._cfg.tool_detail_mode
+        pending_preview = (
+            INTERIM_PREVIEW_ELEMENT_ESTIMATE
+            if session.interim_preview.text
+            and not session.interim_preview.created
+            and not session.interim_preview.final_started
+            else 0
+        )
 
         await self._flush_progress(session)
 
@@ -478,7 +550,12 @@ class StreamingController:
                     current_estimate = session.tool_panel.element_estimate
                     delta = panel_estimate - current_estimate
                     if (
-                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                        session.element_count
+                        + new_el_total
+                        + pending_preview
+                        + delta
+                        + FOOTER_RESERVE
+                        > ELEMENT_THRESHOLD
                         and not session.split_disabled
                     ):
                         previous_split_index = session.split_index
@@ -518,7 +595,12 @@ class StreamingController:
                             new_el_total = 0
                             return await self._do_flush(session)
                     if (
-                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                        session.element_count
+                        + new_el_total
+                        + pending_preview
+                        + delta
+                        + FOOTER_RESERVE
+                        > ELEMENT_THRESHOLD
                         and session.element_count + new_el_total > 1
                         and not session.split_disabled
                     ):
@@ -591,7 +673,12 @@ class StreamingController:
                     tool_detail_mode=tool_detail_mode,
                 )
                 if (
-                    session.element_count + new_el_total + estimated + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                    session.element_count
+                    + new_el_total
+                    + pending_preview
+                    + estimated
+                    + FOOTER_RESERVE
+                    > ELEMENT_THRESHOLD
                     and session.element_count + new_el_total > 1
                     and not session.split_disabled
                 ):
@@ -642,6 +729,10 @@ class StreamingController:
             tool_panel_snapshot=tool_panel_snapshot,
         ):
             return
+
+        # Keep the transient commentary lane after structural reasoning/tool
+        # elements and before normal answer/segment text streaming.
+        await self._flush_interim_preview(session)
 
         # ── 步骤 2: stream_element 刷脏文本 ──
         for seg in segments[session.split_index:]:
@@ -1093,6 +1184,7 @@ class StreamingController:
         session.tool_panel.reset_render_state(
             dirty=any(seg.type == SegmentType.TOOL for seg in segments[split_idx:])
         )
+        session.interim_preview.reset_render_state()
         if merged_mode:
             # The new card replays the accumulated lane. Older sealed cards keep
             # only the merged reasoning that belongs to their chronology slice.
@@ -1131,6 +1223,7 @@ class StreamingController:
             return False
 
         session.progress.clear()
+        session.interim_preview.start_final()
         await session.flush.wait_for_flush()
         session.flush.mark_completed()
 

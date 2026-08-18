@@ -624,7 +624,7 @@ class TestGeneratedThinkingHook:
             source="interim_commentary",
         )
 
-    def test_gateway_style_interim_chain_preserves_body_text(self) -> None:
+    def test_gateway_style_interim_chain_replaces_preview_text(self) -> None:
         callback = _build_thinking_hook_runner()
         ctrl = StreamCardController()
         ctrl._cfg = MagicMock()
@@ -648,12 +648,8 @@ class TestGeneratedThinkingHook:
             for text in ("Planning", "Reading", "Confirming"):
                 assert callback(text, ctx, agent) is None
 
-        # SegmentState retains its normal same-type coalescing chronology;
-        # commentary is body text and never enters merged reasoning state.
-        assert [seg.text for seg in session.segment_state.segments] == [
-            "PlanningReadingConfirming",
-        ]
-        assert session.segment_state.segments[0].type == "answer"
+        assert session.segment_state.segments == []
+        assert session.interim_preview.text == "Confirming"
         assert session.merged_reasoning.text == ""
         loop.close()
 

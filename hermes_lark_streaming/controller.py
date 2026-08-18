@@ -509,6 +509,7 @@ class StreamCardController(StreamingController):
             return False
 
         self._pause_merged_reasoning(session)
+        session.interim_preview.start_final()
         self._append_answer_segment(session, answer_text)
         self._schedule_flush(session)
         return True
@@ -524,6 +525,7 @@ class StreamCardController(StreamingController):
         progress = getattr(session, "progress", None)
         if progress is not None:
             progress.clear()
+        session.interim_preview.start_final()
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
         _logger.info("on_aborted: msg=%s state=ABORTED", message_id[:12])
@@ -539,6 +541,7 @@ class StreamCardController(StreamingController):
             return False
 
         session.progress.clear()
+        session.interim_preview.start_final()
         session.state = SessionState.ABORTED
         if stop_command:
             session.footer["stop_continue_hint"] = True
@@ -564,6 +567,7 @@ class StreamCardController(StreamingController):
         session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
             old_session.progress.clear()
+            old_session.interim_preview.start_final()
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
             _logger.info(
@@ -874,8 +878,9 @@ class StreamCardController(StreamingController):
         ):
             final_answer = strip_reasoning_tags(answer)
             if final_answer:
+                session.interim_preview.start_final()
                 self._pause_merged_reasoning(session)
-                session.segment_state.on_answer_delta(final_answer)
+                self._append_answer_segment(session, final_answer)
 
         # 仅在 DeepSeek 模型下查询余额
         balance = ""

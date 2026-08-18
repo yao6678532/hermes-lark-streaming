@@ -11,6 +11,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from .flush import CARDKIT_MS, FlushController
+from .preview import InterimPreviewState
 from .progress import ProgressState
 from .reasoning import MergedReasoningState
 from .segments import Segment, SegmentState
@@ -58,6 +59,7 @@ class CardSession:
         "footer",
         "guard",
         "image_resolver",
+        "interim_preview",
         "merged_reasoning",
         "message_id",
         "progress",
@@ -104,6 +106,7 @@ class CardSession:
 
         self.image_resolver: ImageResolver | None = None
         self.segment_state: SegmentState | None = SegmentState()
+        self.interim_preview = InterimPreviewState()
         self.merged_reasoning = MergedReasoningState()
         self.progress = ProgressState()
         self.element_count: int = 0
@@ -120,6 +123,7 @@ class CardSession:
 
     def mark_failed(self) -> None:
         self.progress.clear()
+        self.interim_preview.start_final()
         self.state = SessionState.FAILED
 
     def active_segments(self) -> list[Segment]:

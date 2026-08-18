@@ -8,6 +8,7 @@ from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
     _build_reasoning_panel,
     _build_tool_panel,
@@ -23,6 +24,7 @@ ELEMENT_THRESHOLD = 180  # 飞书硬上限 200，预留 20 给 footer + 波动
 # Run Details: hr + collapsible_panel + header title + header icon + markdown.
 FOOTER_RESERVE = 5
 MERGED_REASONING_ELEMENT_ESTIMATE = 4
+INTERIM_PREVIEW_ELEMENT_ESTIMATE = 1
 
 
 def build_progress_update_action(snapshot: ProgressSnapshot) -> dict[str, Any]:
@@ -212,6 +214,23 @@ def build_add_merged_reasoning_action() -> dict[str, Any]:
                     expanded=True,
                     element_id=REASONING_ELEMENT_ID,
                     text_element_id=REASONING_TEXT_ELEMENT_ID,
+                )
+            ],
+        },
+    }
+
+
+def build_add_interim_preview_action(*, text_size: str = "normal_v2") -> dict[str, Any]:
+    """Create the fixed, lazy commentary preview element before the loader."""
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": _LOADING_ELEMENT_ID,
+            "elements": [
+                _streaming_element(
+                    element_id=STREAMING_ELEMENT_ID,
+                    text_size=text_size,
                 )
             ],
         },
