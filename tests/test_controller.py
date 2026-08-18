@@ -1891,7 +1891,31 @@ class TestDoFlush:
         )
         assert estimate_cardkit_elements({"body": {"elements": [panel]}}) <= 174
         assert all("margin" not in element for element in panel["elements"])
-        assert session.segment_state.segments[1].created is True
+
+    @pytest.mark.asyncio
+    async def test_split_seal_bounds_rich_tool_history(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_split_seal_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_seal_tools"
+        session.card_msg_id = "msg_split_seal_tools"
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        tool_segment = session.segment_state.segments[0]
+        tool_segment.created = True
+
+        assert await ctrl._do_split_card(session, 1, [], set(), {}, []) is True
+
+        seal_card = ctrl._client.cardkit_update.await_args.args[1]
+        seal_panel = next(
+            element for element in seal_card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        assert estimate_cardkit_elements(seal_card) <= ELEMENT_THRESHOLD
+        assert "50 steps" in seal_panel["header"]["title"]["content"]
+        assert all("margin" not in element for element in seal_panel["elements"])
 
     @pytest.mark.asyncio
     async def test_oversized_tool_chronology_uses_one_windowed_panel(self) -> None:
