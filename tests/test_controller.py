@@ -1774,8 +1774,8 @@ class TestDoFlush:
         assert session.segment_state.segments[0].created is True
 
     @pytest.mark.asyncio
-    async def test_tool_growth_counts_pending_new_segments_before_rollover(self) -> None:
-        """同一轮 flush 内，dirty tool 拆分判断要计入前面尚未落账的新 segment."""
+    async def test_split_preloads_meaningful_tool_snapshot_without_second_rollover(self) -> None:
+        """An exhausted card creates its successor with a tool snapshot immediately."""
         ctrl = _setup_ctrl()
         calls = _capture_split_calls(
             ctrl,
@@ -1813,6 +1813,9 @@ class TestDoFlush:
         assert len(session.segment_state.segments) == 2
         assert session.segment_state.segments[1].tool_offset == 0
         assert session.segment_state.segments[1].tool_end_offset == 0
+        assert session.tool_panel.created is True
+        assert session.tool_panel.element_estimate > 0
+        assert calls.count(("create", "")) == 1
         assert session.segment_state.segments[1].created is True
 
     @pytest.mark.asyncio
@@ -2837,6 +2840,48 @@ class TestMergedReasoning:
 
 
 class TestDoCompleteCard:
+    @pytest.mark.asyncio
+    async def test_terminal_projects_full_chronology_into_a_bounded_tool_panel(self) -> None:
+        ctrl = _setup_ctrl()
+        ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
+        session = _make_session("msg_terminal_projection")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_terminal_projection"
+        session.segment_state.on_reasoning_delta("reasoning")
+        session.tool_use.record_start("exec", "before-final")
+        session.tool_use.record_end("exec", output="preserved-result")
+        for index in range(49):
+            session.tool_use.record_start("exec", f"tool-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        session.interim_preview.replace("interim commentary")
+        session.interim_preview.start_final()
+        session.segment_state.on_answer_delta("true final answer")
+        session.footer = {"duration": 1.0}
+        source_steps = session.tool_use.build_display_steps()
+        ctrl._sessions[session.message_id] = session
+
+        assert len(source_steps) == 50
+        assert all(step["result_block"] is not None for step in source_steps)
+        assert await ctrl._do_complete_card(session) is True
+
+        card = ctrl._client.cardkit_update.await_args.args[1]
+        tool_panel = next(
+            element for element in card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        body_text = "\n".join(
+            element.get("content", "")
+            for element in card["body"]["elements"]
+            if element.get("tag") == "markdown"
+        )
+        assert "50 steps" in tool_panel["header"]["title"]["content"]
+        assert len(tool_panel["elements"]) < 50 * 3
+        assert "true final answer" in body_text
+        assert "interim commentary" not in body_text
+        assert "Done" not in body_text
+        assert _run_details_panel(card)
+
     @pytest.mark.asyncio
     async def test_closes_streaming_then_updates(self) -> None:
         ctrl = _setup_ctrl()

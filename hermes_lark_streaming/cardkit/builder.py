@@ -1395,6 +1395,8 @@ def build_complete_card(
     show_tool_use: bool = True,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
+    tool_panel_steps: list[ToolDisplayStep] | None = None,
+    tool_total_steps: int | None = None,
     width_mode: str = "default",
     merged_reasoning_text: str | None = None,
     merged_reasoning_elapsed_ms: float = 0,
@@ -1438,11 +1440,16 @@ def build_complete_card(
             if tool_rendered:
                 continue
             tool_rendered = True
-            steps = all_tool_steps[tool_start:tool_end]
+            steps = (
+                tool_panel_steps
+                if tool_panel_steps is not None
+                else all_tool_steps[tool_start:tool_end]
+            )
             if steps:
                 elements.append(
                     _build_tool_panel(
                         steps,
+                        total_steps=tool_total_steps,
                         expanded=panel_expanded,
                         element_id=TOOL_PANEL_ELEMENT_ID,
                         show_tool_detail=show_tool_detail,

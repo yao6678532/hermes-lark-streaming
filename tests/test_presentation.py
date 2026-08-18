@@ -11,6 +11,7 @@ from hermes_lark_streaming.streaming.presentation import (
 from hermes_lark_streaming.streaming.preview import InterimPreviewState
 from hermes_lark_streaming.streaming.reasoning import MergedReasoningState
 from hermes_lark_streaming.streaming.segments import SegmentState
+from hermes_lark_streaming.streaming.toolpanel import ToolPanelState
 from hermes_lark_streaming.streaming.tooluse import ToolUseTracker
 
 
@@ -221,3 +222,13 @@ def test_tool_snapshot_estimator_matches_compact_and_windowed_builder_shapes() -
     assert compact.estimated_elements <= 170
     assert windowed.windowed is True
     assert "50" in panel["header"]["title"]["content"]
+
+
+def test_final_tool_refresh_only_allows_running_or_error_state_transitions() -> None:
+    state = ToolPanelState(created=True, rendered_statuses=("success", "success"))
+
+    assert state.needs_final_refresh(("success", "success", "success")) is False
+    assert state.needs_final_refresh(("success", "running")) is True
+    assert state.needs_final_refresh(("success", "error")) is True
+    state.rendered_statuses = ("success", "running")
+    assert state.needs_final_refresh(("success", "success")) is True
