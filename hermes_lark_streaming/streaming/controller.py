@@ -31,6 +31,7 @@ from ..feishu import (
 from .diagnostics import compact_ids, extract_missing_element_id, segment_state_for_log, summarize_actions
 from .flush import CARDKIT_MS
 from .image import ImageResolver
+from .presentation import project_tool_panel
 from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
@@ -47,7 +48,6 @@ from .segment_helper import (
     estimate_segment_elements,
     estimate_tool_elements,
     find_tool_split_offset,
-    tool_segment_end,
 )
 from .segments import Segment, SegmentState, SegmentType
 from .session import SessionState
@@ -548,20 +548,28 @@ class StreamingController:
                     seg.dirty = False
                     continue
                 tool_panel_seen = True
-                tool_range = active_tool_range(segments, session.split_index, all_steps)
-                if tool_range is None:
+                if not all_steps:
                     seg.created = True
                     seg.dirty = False
                     continue
-                start, end = tool_range
-                steps = all_steps[start:end]
-                panel_estimate = estimate_tool_elements(
-                    start,
-                    end,
+                # The fixed panel is a bounded presentation of *all* logical
+                # tool history, not a physical copy of this card's chronology
+                # slice.  Remove its old estimate first to learn the budget
+                # available to the new projection.
+                tool_budget = (
+                    ELEMENT_THRESHOLD
+                    - FOOTER_RESERVE
+                    - pending_preview
+                    - new_el_total
+                    - (session.element_count - session.tool_panel.element_estimate)
+                )
+                presentation = project_tool_panel(
                     all_steps,
                     show_tool_detail=show_tool_detail,
                     tool_detail_mode=tool_detail_mode,
+                    element_budget=max(0, tool_budget),
                 )
+                panel_estimate = presentation.estimated_elements
                 if (
                     not session.tool_panel.created
                     and not session.tool_panel.dirty
@@ -585,59 +593,19 @@ class StreamingController:
                 if panel_needs_update:
                     current_estimate = session.tool_panel.element_estimate
                     delta = panel_estimate - current_estimate
+                    _logger.info(
+                        "tool_snapshot: msg=%s total_steps=%d rendered_steps=%d mode=%s "
+                        "estimated_elements=%d budget=%d degraded=%s",
+                        session.message_id[:12],
+                        presentation.total_steps,
+                        presentation.rendered_steps,
+                        presentation.mode,
+                        panel_estimate,
+                        tool_budget,
+                        presentation.degraded,
+                    )
                     if (
-                        session.element_count
-                        + new_el_total
-                        + pending_preview
-                        + delta
-                        + FOOTER_RESERVE
-                        > ELEMENT_THRESHOLD
-                        and not session.split_disabled
-                    ):
-                        previous_split_index = session.split_index
-                        previous_card_id = session.card_id
-                        rollover = await self._maybe_rollover_unified_tool_panel(
-                            session=session,
-                            split_index=i,
-                            all_steps=all_steps,
-                            actions=actions,
-                            new_el_ids=new_el_ids,
-                            new_el_estimates=new_el_estimates,
-                            tool_panel_segments=tool_panel_segments,
-                            pending_delta=new_el_total,
-                            show_tool_detail=show_tool_detail,
-                            tool_detail_mode=tool_detail_mode,
-                        )
-                        if rollover == "failed":
-                            return
-                        if rollover == "split":
-                            if session.split_index != previous_split_index or session.card_id != previous_card_id:
-                                actions = []
-                                new_el_ids = set()
-                                new_el_estimates = {}
-                                tool_panel_segments = []
-                                tool_panel_snapshot = None
-                                new_el_total = 0
-                                tool_panel_seen = False
-                                return await self._do_flush(session)
-                            # New-card creation can fail.  The existing card is
-                            # intentionally kept alive with split disabled; the
-                            # tool panel is then rendered on it in a second batch.
-                            actions = []
-                            new_el_ids = set()
-                            new_el_estimates = {}
-                            tool_panel_segments = []
-                            tool_panel_snapshot = None
-                            new_el_total = 0
-                            return await self._do_flush(session)
-                    if (
-                        session.element_count
-                        + new_el_total
-                        + pending_preview
-                        + delta
-                        + FOOTER_RESERVE
-                        > ELEMENT_THRESHOLD
-                        and session.element_count + new_el_total > 1
+                        panel_estimate > tool_budget
                         and not session.split_disabled
                     ):
                         previous_split_index = session.split_index
@@ -672,7 +640,8 @@ class StreamingController:
                     if session.tool_panel.created:
                         actions.append(
                             build_tool_update_action(
-                                steps=steps,
+                                steps=list(presentation.steps),
+                                total_steps=presentation.total_steps,
                                 expanded=self._tool_panel_expanded(session),
                                 show_tool_detail=show_tool_detail,
                                 tool_detail_mode=tool_detail_mode,
@@ -681,7 +650,8 @@ class StreamingController:
                     else:
                         actions.append(
                             build_add_tool_panel_action(
-                                steps,
+                                list(presentation.steps),
+                                total_steps=presentation.total_steps,
                                 expanded=self._tool_panel_expanded(session),
                                 show_tool_detail=show_tool_detail,
                                 tool_detail_mode=tool_detail_mode,
@@ -696,7 +666,7 @@ class StreamingController:
                         session.tool_panel.revision,
                         panel_estimate,
                         tool_panel_segments,
-                        list(steps),
+                        list(presentation.steps),
                     )
                     new_el_total += delta
                 continue
@@ -842,17 +812,9 @@ class StreamingController:
         pre_flush_reasoning_elapsed = {
             seg.el_id: seg.elapsed_ms for seg in segments if seg.type == SegmentType.REASONING
         }
+        pre_flush_tool_steps = session.tool_use.build_display_steps()
         pre_flush_tool_offsets = {
             seg.el_id: seg.tool_end_offset for seg in updated_tool_segs
-        }
-        pre_flush_tool_steps = session.tool_use.build_display_steps()
-        pre_flush_tool_slices = {
-            seg.el_id: pre_flush_tool_steps[seg.tool_offset:tool_segment_end(seg, pre_flush_tool_steps)]
-            for seg in updated_tool_segs
-        }
-        pre_flush_tool_panel_offsets = {
-            seg.el_id: (seg.tool_offset, seg.tool_end_offset)
-            for seg in (tool_panel_snapshot[2] if tool_panel_snapshot else [])
         }
         try:
             await self._client.cardkit_batch_update(
@@ -879,35 +841,28 @@ class StreamingController:
                         seg.dirty = True
             current_tool_steps = session.tool_use.build_display_steps()
             for seg in updated_tool_segs:
-                offset_ok = pre_flush_tool_offsets.get(seg.el_id, -1) == seg.tool_end_offset
-                current_tool_slice = current_tool_steps[
-                    seg.tool_offset:tool_segment_end(seg, current_tool_steps)
-                ]
-                tool_slice_ok = pre_flush_tool_slices.get(seg.el_id) == current_tool_slice
                 if seg.el_id in new_el_estimates:
                     estimate = new_el_estimates[seg.el_id]
                     session.element_count += estimate - seg.element_estimate
                     seg.element_estimate = estimate
-                if seg.created and offset_ok and tool_slice_ok:
+                if (
+                    seg.created
+                    and pre_flush_tool_steps == current_tool_steps
+                    and pre_flush_tool_offsets.get(seg.el_id) == seg.tool_end_offset
+                ):
                     seg.dirty = False
             if tool_panel_snapshot is not None:
-                revision, estimate, panel_segments, rendered_steps = tool_panel_snapshot
+                revision, estimate, panel_segments, _rendered_steps = tool_panel_snapshot
                 session.element_count += estimate - session.tool_panel.element_estimate
-                current_range = active_tool_range(segments, session.split_index, current_tool_steps)
-                current_steps = (
-                    current_tool_steps[current_range[0]:current_range[1]]
-                    if current_range is not None
-                    else []
-                )
                 current = session.tool_panel.mark_rendered(revision, estimate)
-                if current_steps != rendered_steps:
+                offsets_changed = any(
+                    pre_flush_tool_offsets.get(panel_seg.el_id) != panel_seg.tool_end_offset
+                    for panel_seg in panel_segments
+                )
+                if pre_flush_tool_steps != current_tool_steps or offsets_changed:
                     session.tool_panel.dirty = True
                 for panel_seg in panel_segments:
                     panel_seg.created = True
-                    offsets_changed = pre_flush_tool_panel_offsets.get(panel_seg.el_id) != (
-                        panel_seg.tool_offset,
-                        panel_seg.tool_end_offset,
-                    )
                     panel_seg.dirty = session.tool_panel.dirty or not current or offsets_changed
         except FeishuAPIError as e:
             missing_el_id = extract_missing_element_id(e)

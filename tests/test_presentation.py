@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hermes_lark_streaming.cardkit.builder import _build_tool_panel
 from hermes_lark_streaming.streaming.presentation import (
     ToolPresentationMode,
     project_card_view,
@@ -165,3 +166,58 @@ def test_tool_window_keeps_running_errors_then_recent_successes() -> None:
     assert {"grep", "read"} <= {step["name"] for step in snapshot.steps}
     assert any(step["status"] == "error" for step in snapshot.steps)
     assert any(step["status"] == "running" for step in snapshot.steps)
+
+
+def _rendered_tool_panel_element_count(panel: dict) -> int:
+    """Count the CardKit structures represented by the tool estimator."""
+    count = 3  # panel, header title, and header icon
+    for child in panel["elements"]:
+        count += 1 + int("icon" in child) + int("text" in child)
+    return count
+
+
+def test_tool_snapshot_estimator_matches_full_builder_shape() -> None:
+    tracker = ToolUseTracker()
+    tracker.record_start("exec", "run command")
+    tracker.record_end("exec", output="result")
+    snapshot = project_tool_panel(
+        tracker.build_display_steps(),
+        show_tool_detail=True,
+        tool_detail_mode="full",
+        element_budget=30,
+    )
+    panel = _build_tool_panel(
+        list(snapshot.steps),
+        total_steps=snapshot.total_steps,
+        show_tool_detail=snapshot.show_tool_detail,
+        tool_detail_mode=snapshot.tool_detail_mode,
+    )
+
+    assert snapshot.mode == ToolPresentationMode.FULL
+    assert _rendered_tool_panel_element_count(panel) == snapshot.estimated_elements
+
+
+def test_tool_snapshot_estimator_matches_compact_and_windowed_builder_shapes() -> None:
+    tracker = ToolUseTracker()
+    for index in range(50):
+        tracker.record_start("exec", f"run-{index}")
+        tracker.record_end("exec", output=f"result-{index}")
+    steps = tracker.build_display_steps()
+    compact = project_tool_panel(
+        steps, show_tool_detail=True, tool_detail_mode="full", element_budget=170,
+    )
+    windowed = project_tool_panel(
+        steps, show_tool_detail=True, tool_detail_mode="full", element_budget=40,
+    )
+
+    for snapshot in (compact, windowed):
+        panel = _build_tool_panel(
+            list(snapshot.steps),
+            total_steps=snapshot.total_steps,
+            show_tool_detail=snapshot.show_tool_detail,
+            tool_detail_mode=snapshot.tool_detail_mode,
+        )
+        assert _rendered_tool_panel_element_count(panel) == snapshot.estimated_elements
+    assert compact.estimated_elements <= 170
+    assert windowed.windowed is True
+    assert "50" in panel["header"]["title"]["content"]

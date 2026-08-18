@@ -1740,8 +1740,8 @@ class TestDoFlush:
         assert session.split_index == 5
 
     @pytest.mark.asyncio
-    async def test_tool_growth_rolls_over_at_step_boundary(self) -> None:
-        """同一个 tool segment 增长超阈值时，在 step 边界拆到新卡继续更新."""
+    async def test_tool_growth_updates_one_bounded_panel_on_the_same_card(self) -> None:
+        """Tool chronology growth updates the fixed panel instead of rolling over."""
         ctrl = _setup_ctrl()
         calls = _capture_split_calls(
             ctrl,
@@ -1758,7 +1758,7 @@ class TestDoFlush:
         tool_seg = session.segment_state.segments[0]
         tool_seg.created = True
         tool_seg.element_estimate = estimate_segment_elements(tool_seg, session.tool_use.build_display_steps())
-        session.element_count = 174
+        session.element_count = 1
 
         for idx in range(1, 4):
             session.tool_use.record_start("read", f"file{idx}")
@@ -1767,20 +1767,11 @@ class TestDoFlush:
 
         await ctrl._do_flush(session)
 
-        assert calls == [
-            ("batch", "card_tool_old"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_old"),
-            ("seal", "card_tool_old"),
-            ("batch", "card_tool_next"),
-        ]
-        assert session.card_id == "card_tool_next"
-        assert session.split_index == 1
-        assert len(session.segment_state.segments) == 2
-        assert session.segment_state.segments[0].tool_end_offset == 1
-        assert session.segment_state.segments[1].tool_offset == 1
-        assert session.segment_state.segments[1].created is True
+        assert calls == [("batch", "card_tool_old")]
+        assert session.card_id == "card_tool_old"
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
 
     @pytest.mark.asyncio
     async def test_tool_growth_counts_pending_new_segments_before_rollover(self) -> None:
@@ -1825,14 +1816,10 @@ class TestDoFlush:
         assert session.segment_state.segments[1].created is True
 
     @pytest.mark.asyncio
-    async def test_oversized_new_tool_segment_splits_across_multiple_cards(self) -> None:
-        """单次 flush 内 tool steps 很多时，未创建的 tool segment 也会连续分片拆卡."""
+    async def test_oversized_tool_chronology_uses_one_windowed_panel(self) -> None:
+        """Many tools remain one physical card after bounded projection."""
         ctrl = _setup_ctrl()
-        calls = _capture_split_calls(
-            ctrl,
-            cards=["card_tool_page_2", "card_tool_page_3"],
-            messages=["msg_tool_page_2", "msg_tool_page_3"],
-        )
+        calls = _capture_split_calls(ctrl)
 
         session = _make_session("msg_tool_many")
         session.state = SessionState.STREAMING
@@ -1848,31 +1835,17 @@ class TestDoFlush:
 
         await ctrl._do_flush(session)
 
-        assert calls == [
-            ("batch", "card_tool_page_1"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_page_1"),
-            ("seal", "card_tool_page_1"),
-            ("batch", "card_tool_page_2"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_page_2"),
-            ("seal", "card_tool_page_2"),
-            ("batch", "card_tool_page_3"),
-        ]
-        assert session.card_id == "card_tool_page_3"
-        assert session.card_msg_id == "msg_tool_page_3"
-        assert session.split_index == 2
-        assert len(session.segment_state.segments) == 3
-        assert [s.tool_offset for s in session.segment_state.segments] == [0, 57, 114]
-        assert [s.tool_end_offset for s in session.segment_state.segments] == [57, 114, 0]
-        assert all(s.created for s in session.segment_state.segments)
-        assert session.segment_state.segments[-1].element_estimate + session.element_count <= 180
+        assert calls == [("batch", "card_tool_page_1")]
+        assert session.card_id == "card_tool_page_1"
+        assert session.card_msg_id == "msg_tool_page_1"
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
+        assert session.tool_panel.element_estimate <= 174
 
     @pytest.mark.asyncio
-    async def test_tool_rollover_create_failure_falls_back_on_current_card(self) -> None:
-        """tool rollover 新卡创建失败后，在当前卡保留 step 分界并禁用后续拆卡重试."""
+    async def test_tool_split_create_failure_keeps_current_card_as_safe_fallback(self) -> None:
+        """A genuinely exhausted physical card remains fail-open if split creation fails."""
         ctrl = _setup_ctrl()
         batch_card_ids = _capture_split_calls(ctrl, create_error=RuntimeError("create failed"))
         client = ctrl._client
@@ -1898,11 +1871,9 @@ class TestDoFlush:
         assert session.card_id == "card_tool_current"
         assert session.split_index == 0
         assert session.split_disabled is True
-        assert len(session.segment_state.segments) == 2
-        assert session.segment_state.segments[0].tool_end_offset == 1
-        assert session.segment_state.segments[1].tool_offset == 1
-        assert session.segment_state.segments[1].created is True
-        assert batch_card_ids == [("batch", "card_tool_current"), ("batch", "card_tool_current")]
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
+        assert batch_card_ids == [("batch", "card_tool_current")]
         client.cardkit_close_streaming.assert_not_called()
         client.cardkit_update.assert_not_called()
 
