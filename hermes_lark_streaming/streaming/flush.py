@@ -44,13 +44,40 @@ class FlushController:
     def last_update_time(self) -> float:
         return self._last_update_time
 
-    def schedule_update(self, do_flush: Callable[[], Awaitable[None]]) -> None:
+    @property
+    def flush_in_progress(self) -> bool:
+        """Whether a CardKit flush callback is currently executing."""
+        return self._flush_in_progress
+
+    @property
+    def has_pending_timer(self) -> bool:
+        """Whether a delayed flush timer is waiting to run."""
+        return self._pending_timer is not None
+
+    def schedule_update(
+        self,
+        do_flush: Callable[[], Awaitable[None]],
+        *,
+        urgent: bool = False,
+    ) -> None:
         """请求一次节流后的卡片刷新.
 
         do_flush: async callable，执行实际 API 调用.
+
+        urgent: cancel a pending delay and dispatch promptly. The normal
+            mutual-exclusion/reflush path still serializes the callback.
         """
         if self._completed or not self._card_message_ready:
             return
+
+        if urgent:
+            self._cancel_timer()
+            if self._flush_in_progress:
+                self._needs_reflush = True
+            else:
+                self._do_flush_task(do_flush)
+            return
+
         now = time.monotonic()
         elapsed = now - self._last_update_time
 

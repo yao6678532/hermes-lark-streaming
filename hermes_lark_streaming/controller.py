@@ -509,10 +509,9 @@ class StreamCardController(StreamingController):
             return False
 
         _logger.debug(
-            "stream lane=answer msg=%s len=%d head=%r",
+            "answer_lane_start msg=%s source=on_answer visible_len=%d",
             session.message_id[:12],
             len(answer_text),
-            answer_text[:120],
         )
         self._pause_merged_reasoning(session)
         if answer_text.strip():

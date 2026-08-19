@@ -92,12 +92,12 @@ class StreamingController:
     _cleanup_session: Callable[[CardSession], None]
     _flush_deferred_background_reviews: Callable[[CardSession], None]
 
-    def _schedule_flush(self, session: CardSession) -> None:
+    def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
             return
         if session.guard.should_skip("_schedule_flush"):
             return
-        session.flush.schedule_update(lambda: self._do_flush(session))
+        session.flush.schedule_update(lambda: self._do_flush(session), urgent=urgent)
 
     async def _flush_progress(self, session: CardSession) -> None:
         """Update the fixed status element while preserving concurrent events."""
@@ -179,12 +179,25 @@ class StreamingController:
 
     def _start_final(self, session: CardSession, *, source: str) -> bool:
         """Start the final lane and log the first transition with its caller."""
+        preview = session.interim_preview
+        previous_revision = preview.revision
+        was_created = preview.created
+        was_dirty = preview.dirty
+        had_text = bool(preview.text)
         started = session.interim_preview.start_final()
         if started:
             _logger.info(
-                "preview final_start msg=%s source=%s",
+                "preview_final_start msg=%s source=%s previous_revision=%d "
+                "was_created=%s was_dirty=%s had_text=%s "
+                "flush_in_progress=%s pending_flush=%s",
                 session.message_id[:12],
                 source,
+                previous_revision,
+                was_created,
+                was_dirty,
+                had_text,
+                session.flush.flush_in_progress,
+                session.flush.has_pending_timer,
             )
         return started
 
@@ -288,6 +301,15 @@ class StreamingController:
         assert session.card_id is not None
         state = session.interim_preview
 
+        _logger.debug(
+            "commentary_flush_start msg=%s revision=%d created=%s dirty=%s final_started=%s",
+            session.message_id[:12],
+            state.revision,
+            state.created,
+            state.dirty,
+            state.final_started,
+        )
+
         if not state.created and state.text and not state.final_started:
             session.sequence += 1
             try:
@@ -341,6 +363,11 @@ class StreamingController:
             return
 
         state.mark_rendered(rendered_revision)
+        _logger.debug(
+            "commentary_rendered msg=%s revision=%d",
+            session.message_id[:12],
+            rendered_revision,
+        )
 
     def _on_thinking_segment(
         self,
@@ -365,23 +392,27 @@ class StreamingController:
                 return False
             if session.interim_preview.final_started:
                 _logger.debug(
-                    "stream lane=commentary ignored=final_started msg=%s len=%d head=%r",
+                    "stream lane=commentary ignored=final_started msg=%s len=%d",
                     session.message_id[:12],
                     len(text),
-                    text[:120],
                 )
                 return False
-            _logger.debug(
-                "stream lane=commentary msg=%s len=%d final_started=%s head=%r",
-                session.message_id[:12],
-                len(text),
-                session.interim_preview.final_started,
-                text[:120],
-            )
             self._pause_merged_reasoning(session)
             if not session.interim_preview.replace(text):
                 return False
-            self._schedule_flush(session)
+            preview = session.interim_preview
+            _logger.debug(
+                "commentary_received msg=%s revision=%d created=%s dirty=%s "
+                "final_started=%s flush_in_progress=%s pending_flush=%s",
+                session.message_id[:12],
+                preview.revision,
+                preview.created,
+                preview.dirty,
+                preview.final_started,
+                session.flush.flush_in_progress,
+                session.flush.has_pending_timer,
+            )
+            self._schedule_flush(session, urgent=True)
             return True
 
         activity = self._uses_activity_reasoning_presentation(
@@ -398,10 +429,9 @@ class StreamingController:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
             _logger.debug(
-                "stream lane=thinking_answer msg=%s len=%d head=%r",
+                "answer_lane_start msg=%s source=thinking_answer visible_len=%d",
                 session.message_id[:12],
                 len(answer),
-                answer[:120],
             )
             self._pause_merged_reasoning(session)
             if answer.strip():
@@ -479,7 +509,10 @@ class StreamingController:
                 or session.progress.dirty
                 or session.interim_preview.dirty
             ):
-                self._schedule_flush(session)
+                self._schedule_flush(
+                    session,
+                    urgent=session.interim_preview.dirty,
+                )
             _logger.info(
                 "CardKit card created: msg=%s card_id=%s",
                 session.message_id[:12],

@@ -3324,6 +3324,234 @@ class TestInterimPreview:
         assert [seg for seg in session.segment_state.segments if seg.type == "answer"] == []
 
     @pytest.mark.asyncio
+    async def test_urgent_commentary_flushes_before_final_after_long_gap(self) -> None:
+        """A delayed preview must receive one presentation turn before final clears it."""
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_urgent", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_urgent"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="stage 1",
+            source="interim_commentary",
+        ) is True
+
+        await asyncio.sleep(0.02)
+        assert any(
+            call.args[1] == STREAMING_ELEMENT_ID and call.args[2] == "stage 1"
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        )
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        await ctrl._do_flush(session)
+
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["stage 1", " "]
+        assert [seg.text for seg in session.segment_state.segments if seg.type == "answer"] == [
+            "final answer"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_urgent_commentary_flush_remains_latest_only(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_latest", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_latest"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        for text in ("commentary A", "commentary B", "commentary C"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text=text,
+                source="interim_commentary",
+            ) is True
+
+        await asyncio.sleep(0.02)
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["commentary C"]
+
+    @pytest.mark.asyncio
+    async def test_newer_commentary_during_preview_flush_reflushes_latest_revision(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_reflush", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_reflush"
+        session.flush.set_card_message_ready(True)
+        session.interim_preview.replace("commentary A")
+        session.interim_preview.created = True
+        ctrl._sessions[session.message_id] = session
+
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        streamed: list[str] = []
+
+        async def stream_element(_card_id: str, _element_id: str, content: str, **_kwargs: object) -> None:
+            streamed.append(content)
+            if len(streamed) == 1:
+                first_stream_started.set()
+                await release_first_stream.wait()
+
+        ctrl._client.cardkit_stream_element.side_effect = stream_element
+        task = asyncio.create_task(
+            session.flush._do_flush(lambda: ctrl._do_flush(session))
+        )
+        await asyncio.wait_for(first_stream_started.wait(), timeout=0.1)
+
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="commentary B",
+            source="interim_commentary",
+        ) is True
+        assert session.flush.flush_in_progress is True
+
+        release_first_stream.set()
+        await task
+        await asyncio.sleep(0.02)
+
+        assert streamed == ["commentary A", "commentary B"]
+        assert session.interim_preview.dirty is False
+
+    @pytest.mark.asyncio
+    async def test_final_during_preview_flush_clears_preview_and_keeps_answer(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_final_race", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_final_race"
+        session.flush.set_card_message_ready(True)
+        session.interim_preview.replace("commentary A")
+        session.interim_preview.created = True
+        ctrl._sessions[session.message_id] = session
+
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        streamed: list[tuple[str, str]] = []
+
+        async def stream_element(
+            _card_id: str,
+            element_id: str,
+            content: str,
+            **_kwargs: object,
+        ) -> None:
+            streamed.append((element_id, content))
+            if len(streamed) == 1:
+                first_stream_started.set()
+                await release_first_stream.wait()
+
+        ctrl._client.cardkit_stream_element.side_effect = stream_element
+        task = asyncio.create_task(
+            session.flush._do_flush(lambda: ctrl._do_flush(session))
+        )
+        await asyncio.wait_for(first_stream_started.wait(), timeout=0.1)
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        assert session.interim_preview.final_started is True
+        release_first_stream.set()
+        await task
+        await asyncio.sleep(0.15)
+
+        assert (STREAMING_ELEMENT_ID, " ") in streamed
+        assert any(content == "final answer" for _element_id, content in streamed)
+        assert session.interim_preview.text == ""
+
+    @pytest.mark.asyncio
+    async def test_tool_heavy_run_keeps_commentary_in_the_live_preview_lane(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_tool_heavy", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_tool_heavy"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="search",
+            status="started",
+        ) is True
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="searching repository",
+            source="interim_commentary",
+        ) is True
+        await asyncio.sleep(0.02)
+
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="search",
+            status="completed",
+            detail="found result",
+        ) is True
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="read_file",
+            status="started",
+        ) is True
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="checking implementation",
+            source="interim_commentary",
+        ) is True
+        await asyncio.sleep(0.02)
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        await ctrl._do_flush(session)
+
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["searching repository", "checking implementation", " "]
+        assert all(
+            "searching repository" not in seg.text and "checking implementation" not in seg.text
+            for seg in session.segment_state.segments
+            if seg.type == "answer"
+        )
+
+    def test_answer_callback_latches_final_before_later_tool_and_commentary_events(self) -> None:
+        """Documents the current callback contract; no heuristic reclassification."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_early_answer")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_early_answer"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="commentary before answer callback",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text="answer-like callback") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="search",
+                status="started",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="late commentary",
+                source="interim_commentary",
+            ) is False
+
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
+
+    @pytest.mark.asyncio
     async def test_final_answer_clears_preview_and_ignores_late_commentary(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_preview_final")
@@ -3427,7 +3655,7 @@ class TestInterimPreview:
             ) is True
             schedule.reset_mock()
             await ctrl._do_create_card(session)
-            schedule.assert_called_once_with(session)
+            schedule.assert_called_once_with(session, urgent=True)
 
         await ctrl._do_flush(session)
         assert session.interim_preview.created is True
