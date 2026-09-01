@@ -1545,6 +1545,17 @@ class TestBuildSegmentCompleteCard:
         card2 = build_complete_card(segments=[_seg("reasoning", "")], all_tool_steps=[])
         assert any("Done" in str(e) or "完成" in str(e) for e in card2["body"]["elements"])
 
+    def test_empty_answer_fallback_can_be_disabled_for_split_seals(self) -> None:
+        card = build_complete_card(
+            segments=[_seg("reasoning", "sealed reasoning")],
+            all_tool_steps=[],
+            add_empty_answer_fallback=False,
+        )
+        body_text = str(card["body"]["elements"])
+        assert "sealed reasoning" in body_text
+        assert "Done" not in body_text
+        assert "完成" not in body_text
+
     def test_answer_only_no_done(self) -> None:
         card = build_complete_card(
             segments=[_seg("answer", "hello world")],

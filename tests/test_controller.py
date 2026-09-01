@@ -18,12 +18,15 @@ from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
+    estimate_cardkit_elements,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
 from hermes_lark_streaming.patch import on_reasoning_delta
-from hermes_lark_streaming.streaming.segment_helper import estimate_segment_elements
+from hermes_lark_streaming.streaming.presentation import project_tool_panel
+from hermes_lark_streaming.streaming.segment_helper import ELEMENT_THRESHOLD, FOOTER_RESERVE, estimate_segment_elements
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
 
@@ -1190,7 +1193,7 @@ class TestDoCreateCard:
             assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
 
         assert [seg.text for seg in session.segment_state.segments if seg.type == "answer"] == [
-            "commentaryfinal answer"
+            "final answer"
         ]
         assert await ctrl._do_complete_card(session) is True
         assert session.progress.visible is False
@@ -1206,7 +1209,8 @@ class TestDoCreateCard:
             for element in complete_card["body"]["elements"]
             if element.get("tag") == "markdown"
         )
-        assert "commentaryfinal answer" in body_text
+        assert "final answer" in body_text
+        assert "commentary" not in body_text
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = _run_details_text(details)
@@ -1738,8 +1742,8 @@ class TestDoFlush:
         assert session.split_index == 5
 
     @pytest.mark.asyncio
-    async def test_tool_growth_rolls_over_at_step_boundary(self) -> None:
-        """同一个 tool segment 增长超阈值时，在 step 边界拆到新卡继续更新."""
+    async def test_tool_growth_updates_one_bounded_panel_on_the_same_card(self) -> None:
+        """Tool chronology growth updates the fixed panel instead of rolling over."""
         ctrl = _setup_ctrl()
         calls = _capture_split_calls(
             ctrl,
@@ -1756,7 +1760,7 @@ class TestDoFlush:
         tool_seg = session.segment_state.segments[0]
         tool_seg.created = True
         tool_seg.element_estimate = estimate_segment_elements(tool_seg, session.tool_use.build_display_steps())
-        session.element_count = 174
+        session.element_count = 1
 
         for idx in range(1, 4):
             session.tool_use.record_start("read", f"file{idx}")
@@ -1765,24 +1769,49 @@ class TestDoFlush:
 
         await ctrl._do_flush(session)
 
-        assert calls == [
-            ("batch", "card_tool_old"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_old"),
-            ("seal", "card_tool_old"),
-            ("batch", "card_tool_next"),
-        ]
-        assert session.card_id == "card_tool_next"
-        assert session.split_index == 1
-        assert len(session.segment_state.segments) == 2
-        assert session.segment_state.segments[0].tool_end_offset == 1
-        assert session.segment_state.segments[1].tool_offset == 1
-        assert session.segment_state.segments[1].created is True
+        assert calls == [("batch", "card_tool_old")]
+        assert session.card_id == "card_tool_old"
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
 
     @pytest.mark.asyncio
-    async def test_tool_growth_counts_pending_new_segments_before_rollover(self) -> None:
-        """同一轮 flush 内，dirty tool 拆分判断要计入前面尚未落账的新 segment."""
+    async def test_flush_renders_the_snapshot_policy_not_the_original_config(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_projection_flags")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_projection_flags"
+        session.element_count = 1
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        source_steps = session.tool_use.build_display_steps()
+        expected = project_tool_panel(
+            source_steps,
+            show_tool_detail=True,
+            tool_detail_mode="full",
+            element_budget=ELEMENT_THRESHOLD - FOOTER_RESERVE - 1,
+        )
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_flush(session)
+
+        actions = ctrl._client.cardkit_batch_update.await_args.args[1]
+        panel = next(
+            action["params"]["elements"][0]
+            for action in actions
+            if action["action"] == "add_elements"
+            and action["params"]["elements"][0].get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        actual_estimate = estimate_cardkit_elements({"body": {"elements": [panel]}})
+        assert expected.mode.value == "title_only"
+        assert actual_estimate == expected.estimated_elements
+        assert all("margin" not in element for element in panel["elements"])
+
+    @pytest.mark.asyncio
+    async def test_split_preloads_meaningful_tool_snapshot_without_second_rollover(self) -> None:
+        """An exhausted card creates its successor with a tool snapshot immediately."""
         ctrl = _setup_ctrl()
         calls = _capture_split_calls(
             ctrl,
@@ -1820,17 +1849,79 @@ class TestDoFlush:
         assert len(session.segment_state.segments) == 2
         assert session.segment_state.segments[1].tool_offset == 0
         assert session.segment_state.segments[1].tool_end_offset == 0
-        assert session.segment_state.segments[1].created is True
+        assert session.tool_panel.created is True
+        assert session.tool_panel.element_estimate > 0
+        assert calls.count(("create", "")) == 1
 
     @pytest.mark.asyncio
-    async def test_oversized_new_tool_segment_splits_across_multiple_cards(self) -> None:
-        """单次 flush 内 tool steps 很多时，未创建的 tool segment 也会连续分片拆卡."""
+    async def test_split_seal_and_preload_render_bounded_snapshot_policy(self) -> None:
         ctrl = _setup_ctrl()
-        calls = _capture_split_calls(
-            ctrl,
-            cards=["card_tool_page_2", "card_tool_page_3"],
-            messages=["msg_tool_page_2", "msg_tool_page_3"],
+        session = _make_session("msg_split_policy")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_policy"
+        session.card_msg_id = "msg_split_policy"
+        session.element_count = 175
+        session.segment_state.on_answer_delta("answer before split")
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        ctrl._sessions[session.message_id] = session
+
+        await ctrl._do_flush(session)
+
+        seal_card = ctrl._client.cardkit_update.await_args.args[1]
+        assert estimate_cardkit_elements(seal_card) <= ELEMENT_THRESHOLD
+        preload_actions: list[list[dict]] = []
+        for call in ctrl._client.cardkit_batch_update.await_args_list:
+            actions = call.args[1]
+            if any(
+                action["action"] == "add_elements"
+                and action["params"]["elements"][0].get("element_id") == TOOL_PANEL_ELEMENT_ID
+                for action in actions
+            ):
+                preload_actions.append(actions)
+        assert len(preload_actions) == 1
+        panel = next(
+            element
+            for action in preload_actions[0]
+            if action["action"] == "add_elements"
+            for element in action["params"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
         )
+        assert estimate_cardkit_elements({"body": {"elements": [panel]}}) <= 174
+        assert all("margin" not in element for element in panel["elements"])
+
+    @pytest.mark.asyncio
+    async def test_split_seal_bounds_rich_tool_history(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_split_seal_tools")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_seal_tools"
+        session.card_msg_id = "msg_split_seal_tools"
+        for index in range(50):
+            session.tool_use.record_start("exec", f"command-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(50)
+        tool_segment = session.segment_state.segments[0]
+        tool_segment.created = True
+
+        assert await ctrl._do_split_card(session, 1, [], set(), {}, []) is True
+
+        seal_card = ctrl._client.cardkit_update.await_args.args[1]
+        seal_panel = next(
+            element for element in seal_card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        assert estimate_cardkit_elements(seal_card) <= ELEMENT_THRESHOLD
+        assert "50 steps" in seal_panel["header"]["title"]["content"]
+        assert all("margin" not in element for element in seal_panel["elements"])
+
+    @pytest.mark.asyncio
+    async def test_oversized_tool_chronology_uses_one_windowed_panel(self) -> None:
+        """Many tools remain one physical card after bounded projection."""
+        ctrl = _setup_ctrl()
+        calls = _capture_split_calls(ctrl)
 
         session = _make_session("msg_tool_many")
         session.state = SessionState.STREAMING
@@ -1846,31 +1937,17 @@ class TestDoFlush:
 
         await ctrl._do_flush(session)
 
-        assert calls == [
-            ("batch", "card_tool_page_1"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_page_1"),
-            ("seal", "card_tool_page_1"),
-            ("batch", "card_tool_page_2"),
-            ("create", ""),
-            ("reply", ""),
-            ("close", "card_tool_page_2"),
-            ("seal", "card_tool_page_2"),
-            ("batch", "card_tool_page_3"),
-        ]
-        assert session.card_id == "card_tool_page_3"
-        assert session.card_msg_id == "msg_tool_page_3"
-        assert session.split_index == 2
-        assert len(session.segment_state.segments) == 3
-        assert [s.tool_offset for s in session.segment_state.segments] == [0, 57, 114]
-        assert [s.tool_end_offset for s in session.segment_state.segments] == [57, 114, 0]
-        assert all(s.created for s in session.segment_state.segments)
-        assert session.segment_state.segments[-1].element_estimate + session.element_count <= 180
+        assert calls == [("batch", "card_tool_page_1")]
+        assert session.card_id == "card_tool_page_1"
+        assert session.card_msg_id == "msg_tool_page_1"
+        assert session.split_index == 0
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
+        assert session.tool_panel.element_estimate <= 174
 
     @pytest.mark.asyncio
-    async def test_tool_rollover_create_failure_falls_back_on_current_card(self) -> None:
-        """tool rollover 新卡创建失败后，在当前卡保留 step 分界并禁用后续拆卡重试."""
+    async def test_tool_split_create_failure_keeps_current_card_as_safe_fallback(self) -> None:
+        """A genuinely exhausted physical card remains fail-open if split creation fails."""
         ctrl = _setup_ctrl()
         batch_card_ids = _capture_split_calls(ctrl, create_error=RuntimeError("create failed"))
         client = ctrl._client
@@ -1896,11 +1973,9 @@ class TestDoFlush:
         assert session.card_id == "card_tool_current"
         assert session.split_index == 0
         assert session.split_disabled is True
-        assert len(session.segment_state.segments) == 2
-        assert session.segment_state.segments[0].tool_end_offset == 1
-        assert session.segment_state.segments[1].tool_offset == 1
-        assert session.segment_state.segments[1].created is True
-        assert batch_card_ids == [("batch", "card_tool_current"), ("batch", "card_tool_current")]
+        assert len(session.segment_state.segments) == 1
+        assert session.segment_state.segments[0].created is True
+        assert batch_card_ids == [("batch", "card_tool_current")]
         client.cardkit_close_streaming.assert_not_called()
         client.cardkit_update.assert_not_called()
 
@@ -2244,7 +2319,7 @@ class TestMergedReasoning:
             source=source,
         ) is expected
 
-    def test_interim_commentary_goes_to_body_without_touching_merged_reasoning(self) -> None:
+    def test_interim_commentary_uses_preview_without_touching_merged_reasoning(self) -> None:
         ctrl = _setup_ctrl()
         _configure_merged(ctrl, show_reasoning=False)
         session = _make_session("msg_codex_commentary")
@@ -2258,8 +2333,8 @@ class TestMergedReasoning:
                 source="interim_commentary",
             ) is True
         assert session.merged_reasoning.text == ""
-        assert [seg.type for seg in session.segment_state.segments] == ["answer"]
-        assert session.segment_state.segments[0].text == "第 1 阶段\uFF1A读取项目配置"
+        assert [seg.type for seg in session.segment_state.segments] == []
+        assert session.interim_preview.text == "第 1 阶段\uFF1A读取项目配置"
 
     def test_native_reasoning_without_runtime_metadata_appends_safely(self) -> None:
         ctrl = _setup_ctrl()
@@ -2351,11 +2426,9 @@ class TestMergedReasoning:
         answer_segments = [
             seg.text for seg in session.segment_state.segments if seg.type == "answer"
         ]
-        assert answer_segments == [
-            f"{_COMMENTARY_STAGE_1}{_COMMENTARY_CONFIRMED_1}",
-            _COMMENTARY_STAGE_2,
-            _FINAL_ANSWER,
-        ]
+        assert answer_segments == [_FINAL_ANSWER]
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
         assert len(session.tool_use.build_display_steps()) == 2
         assert session.merged_reasoning.active_since is None
 
@@ -2408,14 +2481,11 @@ class TestMergedReasoning:
             for element in complete_card["body"]["elements"]
             if element.get("tag") == "markdown"
         )
-        for text in (
-            _COMMENTARY_STAGE_1,
-            _COMMENTARY_CONFIRMED_1,
-            _COMMENTARY_STAGE_2,
-            "第 3 阶段\uFF1A比较与总结",
-            "最终结论……",
-        ):
-            assert text in body_text
+        assert _COMMENTARY_STAGE_1 not in body_text
+        assert _COMMENTARY_CONFIRMED_1 not in body_text
+        assert _COMMENTARY_STAGE_2 not in body_text
+        assert "第 3 阶段\uFF1A比较与总结" in body_text
+        assert "最终结论……" in body_text
         details = _run_details_panel(complete_card)
         assert details["expanded"] is False
         details_text = _run_details_text(details)
@@ -2870,6 +2940,51 @@ class TestMergedReasoning:
 
 class TestDoCompleteCard:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("step_count", [50, 100])
+    async def test_terminal_projects_full_chronology_into_a_bounded_tool_panel(
+        self, step_count: int,
+    ) -> None:
+        ctrl = _setup_ctrl()
+        ctrl._cfg._raw["streaming"]["reasoning_mode"] = "merged"
+        session = _make_session("msg_terminal_projection")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_terminal_projection"
+        session.segment_state.on_reasoning_delta("reasoning")
+        session.tool_use.record_start("exec", "before-final")
+        session.tool_use.record_end("exec", output="preserved-result")
+        for index in range(step_count - 1):
+            session.tool_use.record_start("exec", f"tool-{index}")
+            session.tool_use.record_end("exec", output=f"result-{index}")
+        session.segment_state.on_tool_event(step_count)
+        session.interim_preview.replace("interim commentary")
+        session.interim_preview.start_final()
+        session.segment_state.on_answer_delta("true final answer")
+        session.footer = {"duration": 1.0}
+        source_steps = session.tool_use.build_display_steps()
+        ctrl._sessions[session.message_id] = session
+
+        assert len(source_steps) == step_count
+        assert all(step["result_block"] is not None for step in source_steps)
+        assert await ctrl._do_complete_card(session) is True
+
+        card = ctrl._client.cardkit_update.await_args.args[1]
+        tool_panel = next(
+            element for element in card["body"]["elements"]
+            if element.get("element_id") == TOOL_PANEL_ELEMENT_ID
+        )
+        body_text = "\n".join(
+            element.get("content", "")
+            for element in card["body"]["elements"]
+            if element.get("tag") == "markdown"
+        )
+        assert f"{step_count} steps" in tool_panel["header"]["title"]["content"]
+        assert estimate_cardkit_elements(card) <= ELEMENT_THRESHOLD
+        assert "true final answer" in body_text
+        assert "interim commentary" not in body_text
+        assert "Done" not in body_text
+        assert _run_details_panel(card)
+
+    @pytest.mark.asyncio
     async def test_closes_streaming_then_updates(self) -> None:
         ctrl = _setup_ctrl()
         ctrl._cfg._raw["streaming"]["width_mode"] = "compact"
@@ -2998,7 +3113,7 @@ class TestOnThinking:
         assert types == ["reasoning", "answer"]
 
     @pytest.mark.asyncio
-    async def test_interim_commentary_marks_tool_panel_only_on_first_answer(self) -> None:
+    async def test_interim_commentary_does_not_start_tool_panel_answer(self) -> None:
         ctrl = _setup_ctrl()
         session = _make_session("msg_commentary_panel")
         session.state = SessionState.STREAMING
@@ -3040,7 +3155,7 @@ class TestOnThinking:
             action for action in tool_panel_actions()
             if action["action"] == "partial_update_element"
         ]
-        assert first_partials[-1]["params"]["partial_element"]["expanded"] is False
+        assert first_partials[-1]["params"]["partial_element"]["expanded"] is True
 
         with patch.object(ctrl, "_schedule_flush"):
             ctrl._on_thinking_segment(
@@ -3058,9 +3173,10 @@ class TestOnThinking:
         answer_segments = [
             seg for seg in session.segment_state.segments if seg.type == "answer"
         ]
-        assert answer_segments[0].text == "commentary onecommentary two"
+        assert answer_segments == []
+        assert session.interim_preview.text == "commentary two"
         assert any(
-            "commentary onecommentary two" in call.args[2]
+            call.args[1] == STREAMING_ELEMENT_ID and call.args[2] == "commentary two"
             for call in ctrl._client.cardkit_stream_element.await_args_list
         )
 
@@ -3173,6 +3289,590 @@ class TestOnThinking:
 
         assert len(session.segment_state.segments) == 1
         assert session.segment_state.segments[0].type == "reasoning"
+
+
+class TestInterimPreview:
+    def _added_elements(self, ctrl: StreamCardController) -> list[dict]:
+        return [
+            element
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            for element in action.get("params", {}).get("elements", [])
+        ]
+
+    @pytest.mark.asyncio
+    async def test_commentary_is_replace_only_and_never_an_answer_segment(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_replace")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_replace"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking repo...",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Found handler...",
+                source="interim_commentary",
+            ) is True
+
+        assert session.interim_preview.text == "Found handler..."
+        assert [seg for seg in session.segment_state.segments if seg.type == "answer"] == []
+
+    @pytest.mark.asyncio
+    async def test_urgent_commentary_flushes_before_final_after_long_gap(self) -> None:
+        """A delayed preview must receive one presentation turn before final clears it."""
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_urgent", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_urgent"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="stage 1",
+            source="interim_commentary",
+        ) is True
+
+        await asyncio.sleep(0.02)
+        assert any(
+            call.args[1] == STREAMING_ELEMENT_ID and call.args[2] == "stage 1"
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        )
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        await ctrl._do_flush(session)
+
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["stage 1", " "]
+        assert [seg.text for seg in session.segment_state.segments if seg.type == "answer"] == [
+            "final answer"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_urgent_commentary_flush_remains_latest_only(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_latest", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_latest"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        for text in ("commentary A", "commentary B", "commentary C"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text=text,
+                source="interim_commentary",
+            ) is True
+
+        await asyncio.sleep(0.02)
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["commentary C"]
+
+    @pytest.mark.asyncio
+    async def test_newer_commentary_during_preview_flush_reflushes_latest_revision(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_reflush", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_reflush"
+        session.flush.set_card_message_ready(True)
+        session.interim_preview.replace("commentary A")
+        session.interim_preview.created = True
+        ctrl._sessions[session.message_id] = session
+
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        streamed: list[str] = []
+
+        async def stream_element(_card_id: str, _element_id: str, content: str, **_kwargs: object) -> None:
+            streamed.append(content)
+            if len(streamed) == 1:
+                first_stream_started.set()
+                await release_first_stream.wait()
+
+        ctrl._client.cardkit_stream_element.side_effect = stream_element
+        task = asyncio.create_task(
+            session.flush._do_flush(lambda: ctrl._do_flush(session))
+        )
+        await asyncio.wait_for(first_stream_started.wait(), timeout=0.1)
+
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="commentary B",
+            source="interim_commentary",
+        ) is True
+        assert session.flush.flush_in_progress is True
+
+        release_first_stream.set()
+        await task
+        await asyncio.sleep(0.02)
+
+        assert streamed == ["commentary A", "commentary B"]
+        assert session.interim_preview.dirty is False
+
+    @pytest.mark.asyncio
+    async def test_final_during_preview_flush_clears_preview_and_keeps_answer(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_final_race", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_final_race"
+        session.flush.set_card_message_ready(True)
+        session.interim_preview.replace("commentary A")
+        session.interim_preview.created = True
+        ctrl._sessions[session.message_id] = session
+
+        first_stream_started = asyncio.Event()
+        release_first_stream = asyncio.Event()
+        streamed: list[tuple[str, str]] = []
+
+        async def stream_element(
+            _card_id: str,
+            element_id: str,
+            content: str,
+            **_kwargs: object,
+        ) -> None:
+            streamed.append((element_id, content))
+            if len(streamed) == 1:
+                first_stream_started.set()
+                await release_first_stream.wait()
+
+        ctrl._client.cardkit_stream_element.side_effect = stream_element
+        task = asyncio.create_task(
+            session.flush._do_flush(lambda: ctrl._do_flush(session))
+        )
+        await asyncio.wait_for(first_stream_started.wait(), timeout=0.1)
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        assert session.interim_preview.final_started is True
+        release_first_stream.set()
+        await task
+        await asyncio.sleep(0.15)
+
+        assert (STREAMING_ELEMENT_ID, " ") in streamed
+        assert any(content == "final answer" for _element_id, content in streamed)
+        assert session.interim_preview.text == ""
+
+    @pytest.mark.asyncio
+    async def test_tool_heavy_run_keeps_commentary_in_the_live_preview_lane(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("msg_preview_tool_heavy", "chat", asyncio.get_running_loop())
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_tool_heavy"
+        session.flush.set_card_message_ready(True)
+        session.flush._last_update_time = time.monotonic() - 3.0
+        ctrl._sessions[session.message_id] = session
+
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="search",
+            status="started",
+        ) is True
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="searching repository",
+            source="interim_commentary",
+        ) is True
+        await asyncio.sleep(0.02)
+
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="search",
+            status="completed",
+            detail="found result",
+        ) is True
+        assert ctrl.on_tool_update(
+            message_id=session.message_id,
+            tool_name="read_file",
+            status="started",
+        ) is True
+        assert ctrl.on_thinking(
+            message_id=session.message_id,
+            text="checking implementation",
+            source="interim_commentary",
+        ) is True
+        await asyncio.sleep(0.02)
+
+        assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
+        await ctrl._do_flush(session)
+
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["searching repository", "checking implementation", " "]
+        assert all(
+            "searching repository" not in seg.text and "checking implementation" not in seg.text
+            for seg in session.segment_state.segments
+            if seg.type == "answer"
+        )
+
+    def test_answer_callback_latches_final_before_later_tool_and_commentary_events(self) -> None:
+        """Documents the current callback contract; no heuristic reclassification."""
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_early_answer")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_early_answer"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="commentary before answer callback",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text="answer-like callback") is True
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="search",
+                status="started",
+            ) is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="late commentary",
+                source="interim_commentary",
+            ) is False
+
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
+
+    @pytest.mark.asyncio
+    async def test_final_answer_clears_preview_and_ignores_late_commentary(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_final")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_final"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            ) is True
+        await ctrl._do_flush(session)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text="Final") is True
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Late commentary",
+                source="interim_commentary",
+            ) is False
+
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
+        assert [seg.text for seg in session.segment_state.segments if seg.type == "answer"] == [
+            "Final"
+        ]
+        await ctrl._do_flush(session)
+
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["Checking...", " "]
+
+    @pytest.mark.asyncio
+    async def test_preview_uses_one_fixed_element_and_preserves_progress_lane(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl, show_tool_use=False)
+        session = _make_session("msg_preview_fixed")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_fixed"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="First commentary",
+                source="interim_commentary",
+            ) is True
+        await ctrl._do_flush(session)
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Latest commentary",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=180,
+                iteration=7,
+            ) is True
+        await ctrl._do_flush(session)
+
+        preview_adds = [
+            element for element in self._added_elements(ctrl)
+            if element.get("element_id") == STREAMING_ELEMENT_ID
+        ]
+        assert len(preview_adds) == 1
+        preview_streams = [
+            call.args[2]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+            if call.args[1] == STREAMING_ELEMENT_ID
+        ]
+        assert preview_streams == ["First commentary", "Latest commentary"]
+        progress_actions = [
+            action
+            for call in ctrl._client.cardkit_batch_update.await_args_list
+            for action in call.args[1]
+            if action.get("params", {}).get("element_id") == _LOADING_ELEMENT_ID
+        ]
+        assert progress_actions[-1]["params"]["partial_element"]["content"] == (
+            "Working · 3 min · Round 7"
+        )
+
+    @pytest.mark.asyncio
+    async def test_commentary_received_during_creation_is_flushed_after_card_ready(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_creating")
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush") as schedule:
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Queued while creating",
+                source="interim_commentary",
+            ) is True
+            schedule.reset_mock()
+            await ctrl._do_create_card(session)
+            schedule.assert_called_once_with(session, urgent=True)
+
+        await ctrl._do_flush(session)
+        assert session.interim_preview.created is True
+        assert any(
+            element.get("element_id") == STREAMING_ELEMENT_ID
+            for element in self._added_elements(ctrl)
+        )
+
+    @pytest.mark.asyncio
+    async def test_completion_fallback_promotes_only_authoritative_answer(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_fallback")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_fallback"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            )
+            ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Confirmed...",
+                source="interim_commentary",
+            )
+
+        ctrl._apply_completion_payload(
+            session=session,
+            answer="Authoritative final",
+            duration=0,
+            model="",
+            tokens=None,
+            context=None,
+        )
+        assert session.interim_preview.final_started is True
+        assert [seg.text for seg in session.segment_state.segments if seg.type == "answer"] == [
+            "Authoritative final"
+        ]
+
+        await ctrl._do_complete_card(session)
+        card = ctrl._client.cardkit_update.await_args.args[1]
+        body_text = "\n".join(
+            element.get("content", "")
+            for element in card["body"]["elements"]
+            if element.get("tag") == "markdown"
+        )
+        assert "Authoritative final" in body_text
+        assert "Checking..." not in body_text
+        assert "Confirmed..." not in body_text
+
+    @pytest.mark.asyncio
+    async def test_split_recreates_live_preview_but_seals_no_commentary(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_split")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_old"
+        session.card_msg_id = "msg_preview_old"
+        session.element_count = 2
+        session.interim_preview.replace("Latest before split")
+        session.interim_preview.created = True
+        session.interim_preview.mark_rendered(session.interim_preview.revision)
+
+        assert await ctrl._do_split_card(session, 0, [], set(), {}, []) is True
+
+        sealed_card = ctrl._client.cardkit_update.await_args.args[1]
+        assert not any(
+            element.get("element_id") == STREAMING_ELEMENT_ID
+            for element in sealed_card["body"]["elements"]
+        )
+        assert session.interim_preview.text == "Latest before split"
+        assert session.interim_preview.created is False
+        assert session.interim_preview.dirty is True
+
+        await ctrl._do_flush(session)
+        assert any(
+            element.get("element_id") == STREAMING_ELEMENT_ID
+            for element in self._added_elements(ctrl)
+        )
+
+    @pytest.mark.asyncio
+    async def test_split_seal_without_answer_omits_done_but_keeps_reasoning(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_split_no_answer")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_split_no_answer"
+        session.card_msg_id = "msg_split_no_answer"
+        session.segment_state.on_reasoning_delta("sealed reasoning")
+        session.segment_state.segments[0].created = True
+        session.segment_state.segments[0].dirty = False
+
+        assert await ctrl._do_split_card(session, 1, [], set(), {}, []) is True
+
+        sealed_card = ctrl._client.cardkit_update.await_args.args[1]
+        body_text = str(sealed_card["body"]["elements"])
+        assert "sealed reasoning" in body_text
+        assert "Done" not in body_text
+        assert "完成" not in body_text
+
+    def test_whitespace_answer_does_not_start_final_or_clear_preview(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_whitespace")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_whitespace"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text=" ") is True
+
+        assert session.interim_preview.final_started is False
+        assert session.interim_preview.text == "Checking..."
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_answer(message_id=session.message_id, text="Final") is True
+
+        assert session.interim_preview.final_started is True
+        assert session.interim_preview.text == ""
+
+    def test_completion_fallback_ignores_whitespace_answer_segment(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_completion_whitespace")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_completion_whitespace"
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(ctrl, "_schedule_flush"):
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Checking...",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text=" ") is True
+
+        ctrl._apply_completion_payload(
+            session=session,
+            answer="Authoritative final",
+            duration=0,
+            model="",
+            tokens=None,
+            context=None,
+        )
+
+        assert session.interim_preview.final_started is True
+        answer_text = "".join(
+            seg.text for seg in session.segment_state.segments if seg.type == "answer"
+        )
+        assert "Authoritative final" in answer_text
+        assert "Checking..." not in answer_text
+
+    @pytest.mark.asyncio
+    async def test_missing_preview_element_is_recreated_on_next_flush(self) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session("msg_preview_missing")
+        session.state = SessionState.STREAMING
+        session.card_id = "card_preview_missing"
+        session.element_count = 1
+        ctrl._sessions[session.message_id] = session
+        with patch.object(ctrl, "_schedule_flush"):
+            ctrl.on_thinking(
+                message_id=session.message_id,
+                text="Recover me",
+                source="interim_commentary",
+            )
+
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=[
+                FeishuAPIError(
+                    "code=300313, msg=not find elementID : streaming_content;",
+                    300313,
+                ),
+                None,
+            ]
+        )
+        await ctrl._do_flush(session)
+        assert session.interim_preview.created is False
+        assert session.interim_preview.dirty is True
+        assert session.element_count == 1
+
+        await ctrl._do_flush(session)
+        assert session.interim_preview.created is True
+        assert session.interim_preview.dirty is False
+        assert len([
+            element for element in self._added_elements(ctrl)
+            if element.get("element_id") == STREAMING_ELEMENT_ID
+        ]) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("terminal_state", [SessionState.FAILED, SessionState.ABORTED])
+    async def test_terminal_error_or_abort_card_has_no_preview(
+        self,
+        terminal_state: SessionState,
+    ) -> None:
+        ctrl = _setup_ctrl()
+        session = _make_session(f"msg_preview_{terminal_state.value}")
+        session.state = SessionState.STREAMING
+        session.card_id = f"card_preview_{terminal_state.value}"
+        session.interim_preview.replace("Transient commentary")
+        if terminal_state == SessionState.FAILED:
+            session.mark_failed()
+        else:
+            session.interim_preview.start_final()
+            session.state = terminal_state
+
+        assert await ctrl._do_complete_card(session) is True
+        card = ctrl._client.cardkit_update.await_args.args[1]
+        body_text = "\n".join(
+            element.get("content", "")
+            for element in card["body"]["elements"]
+            if element.get("tag") == "markdown"
+        )
+        assert "Transient commentary" not in body_text
 
 
 class TestCronDeliver:

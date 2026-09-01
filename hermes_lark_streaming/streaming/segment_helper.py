@@ -8,6 +8,7 @@ from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
     _build_reasoning_panel,
     _build_tool_panel,
@@ -23,6 +24,7 @@ ELEMENT_THRESHOLD = 180  # 飞书硬上限 200，预留 20 给 footer + 波动
 # Run Details: hr + collapsible_panel + header title + header icon + markdown.
 FOOTER_RESERVE = 5
 MERGED_REASONING_ELEMENT_ESTIMATE = 4
+INTERIM_PREVIEW_ELEMENT_ESTIMATE = 1
 
 
 def build_progress_update_action(snapshot: ProgressSnapshot) -> dict[str, Any]:
@@ -176,6 +178,8 @@ def build_add_segment_action(
 def build_add_tool_panel_action(
     steps: list[ToolDisplayStep],
     *,
+    total_steps: int | None = None,
+    total_failed_count: int | None = None,
     expanded: bool = True,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
@@ -189,6 +193,8 @@ def build_add_tool_panel_action(
             "elements": [
                 _build_tool_panel(
                     steps,
+                    total_steps=total_steps,
+                    total_failed_count=total_failed_count,
                     expanded=expanded,
                     element_id=TOOL_PANEL_ELEMENT_ID,
                     show_tool_detail=show_tool_detail,
@@ -212,6 +218,23 @@ def build_add_merged_reasoning_action() -> dict[str, Any]:
                     expanded=True,
                     element_id=REASONING_ELEMENT_ID,
                     text_element_id=REASONING_TEXT_ELEMENT_ID,
+                )
+            ],
+        },
+    }
+
+
+def build_add_interim_preview_action(*, text_size: str = "normal_v2") -> dict[str, Any]:
+    """Create the fixed, lazy commentary preview element before the loader."""
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": _LOADING_ELEMENT_ID,
+            "elements": [
+                _streaming_element(
+                    element_id=STREAMING_ELEMENT_ID,
+                    text_size=text_size,
                 )
             ],
         },
@@ -247,12 +270,16 @@ def build_tool_update_action(
     steps: list[ToolDisplayStep],
     expanded: bool = True,
     element_id: str = TOOL_PANEL_ELEMENT_ID,
+    total_steps: int | None = None,
+    total_failed_count: int | None = None,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
 ) -> dict[str, Any]:
     """Update the fixed tool panel's header, children, and expansion state."""
     panel = _build_tool_panel(
         steps,
+        total_steps=total_steps,
+        total_failed_count=total_failed_count,
         expanded=expanded,
         element_id=None,
         show_tool_detail=show_tool_detail,

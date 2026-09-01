@@ -508,7 +508,14 @@ class StreamCardController(StreamingController):
         if not answer_text:
             return False
 
+        _logger.debug(
+            "answer_lane_start msg=%s source=on_answer visible_len=%d",
+            session.message_id[:12],
+            len(answer_text),
+        )
         self._pause_merged_reasoning(session)
+        if answer_text.strip():
+            self._start_final(session, source="on_answer")
         self._append_answer_segment(session, answer_text)
         self._schedule_flush(session)
         return True
@@ -524,6 +531,7 @@ class StreamCardController(StreamingController):
         progress = getattr(session, "progress", None)
         if progress is not None:
             progress.clear()
+        self._start_final(session, source="abort")
         session.state = SessionState.ABORTED
         session.flush.mark_completed()
         _logger.info("on_aborted: msg=%s state=ABORTED", message_id[:12])
@@ -539,6 +547,7 @@ class StreamCardController(StreamingController):
             return False
 
         session.progress.clear()
+        self._start_final(session, source="abort")
         session.state = SessionState.ABORTED
         if stop_command:
             session.footer["stop_continue_hint"] = True
@@ -564,6 +573,7 @@ class StreamCardController(StreamingController):
         session_key = session_key or (old_session.session_key if old_session is not None else None)
         if old_session is not None:
             old_session.progress.clear()
+            self._start_final(old_session, source="abort")
             old_session.state = SessionState.ABORTED
             old_session.flush.mark_completed()
             _logger.info(
@@ -641,7 +651,7 @@ class StreamCardController(StreamingController):
             self._cleanup_session(session)
             return False
 
-        _logger.info(
+        _logger.debug(
             "on_completed_wait: msg=%s has_card=%s state=%s",
             message_id[:12],
             session.has_card,
@@ -657,6 +667,7 @@ class StreamCardController(StreamingController):
             context=context,
         )
         if is_error:
+            self._start_final(session, source="error")
             session.mark_failed()
 
         return await self._complete_session_wait(session)
@@ -869,13 +880,34 @@ class StreamCardController(StreamingController):
         tokens: dict | None,
         context: dict | None,
     ) -> None:
-        if answer and session.segment_state and not any(
-            seg.type == SegmentType.ANSWER for seg in session.segment_state.segments
-        ):
+        has_visible_answer = bool(
+            session.segment_state
+            and any(
+                seg.type == SegmentType.ANSWER and seg.text.strip()
+                for seg in session.segment_state.segments
+            )
+        )
+        _logger.debug(
+            "completion payload msg=%s len=%d has_visible_answer=%s final_started=%s head=%r",
+            session.message_id[:12],
+            len(answer or ""),
+            has_visible_answer,
+            session.interim_preview.final_started,
+            (answer or "")[:160],
+        )
+
+        if answer and session.segment_state and not has_visible_answer:
             final_answer = strip_reasoning_tags(answer)
-            if final_answer:
+            if final_answer.strip():
+                _logger.debug(
+                    "completion promote_final msg=%s len=%d head=%r",
+                    session.message_id[:12],
+                    len(final_answer),
+                    final_answer[:160],
+                )
+                self._start_final(session, source="completion")
                 self._pause_merged_reasoning(session)
-                session.segment_state.on_answer_delta(final_answer)
+                self._append_answer_segment(session, final_answer)
 
         # 仅在 DeepSeek 模型下查询余额
         balance = ""

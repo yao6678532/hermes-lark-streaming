@@ -123,6 +123,49 @@ class TestScheduleUpdate:
         await asyncio.sleep(BATCH_AFTER_GAP_MS + 0.05)
         assert count == 1
 
+    @pytest.mark.asyncio
+    async def test_urgent_update_preempts_long_gap_batch_delay(self) -> None:
+        ctrl = _make_async()
+        ctrl.set_card_message_ready(True)
+        flushed = asyncio.Event()
+
+        async def do_flush() -> None:
+            flushed.set()
+
+        ctrl._last_update_time = time.monotonic() - LONG_GAP_MS - 1.0
+        ctrl.schedule_update(do_flush)
+        assert ctrl._pending_timer is not None
+
+        ctrl.schedule_update(do_flush, urgent=True)
+
+        assert ctrl._pending_timer is None
+        await asyncio.wait_for(flushed.wait(), timeout=0.1)
+
+    @pytest.mark.asyncio
+    async def test_urgent_update_during_flush_requests_reflush(self) -> None:
+        ctrl = _make_async()
+        ctrl.set_card_message_ready(True)
+        release_first_flush = asyncio.Event()
+        flush_count = 0
+
+        async def do_flush() -> None:
+            nonlocal flush_count
+            flush_count += 1
+            if flush_count == 1:
+                await release_first_flush.wait()
+
+        task = asyncio.create_task(ctrl._do_flush(do_flush))
+        await asyncio.sleep(0)
+        assert ctrl.flush_in_progress is True
+
+        ctrl.schedule_update(do_flush, urgent=True)
+        assert ctrl._needs_reflush is True
+
+        release_first_flush.set()
+        await task
+        await asyncio.sleep(0)
+        assert flush_count == 2
+
 
 class TestFlushNow:
     @pytest.mark.asyncio

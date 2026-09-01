@@ -10,11 +10,13 @@ from typing import TYPE_CHECKING, Any
 from ..cardkit.builder import (
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
     build_background_card,
     build_complete_card,
     build_cron_card,
     build_streaming_card_v2,
+    estimate_cardkit_elements,
 )
 from ..cardkit.markdown import (
     _downgrade_tables,
@@ -30,11 +32,14 @@ from ..feishu import (
 from .diagnostics import compact_ids, extract_missing_element_id, segment_state_for_log, summarize_actions
 from .flush import CARDKIT_MS
 from .image import ImageResolver
+from .presentation import CardViewSnapshot, ToolPanelSnapshot, project_card_view, project_tool_panel
 from .segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
+    INTERIM_PREVIEW_ELEMENT_ESTIMATE,
     MERGED_REASONING_ELEMENT_ESTIMATE,
     active_tool_range,
+    build_add_interim_preview_action,
     build_add_merged_reasoning_action,
     build_add_segment_action,
     build_add_tool_panel_action,
@@ -44,7 +49,6 @@ from .segment_helper import (
     estimate_segment_elements,
     estimate_tool_elements,
     find_tool_split_offset,
-    tool_segment_end,
 )
 from .segments import Segment, SegmentState, SegmentType
 from .session import SessionState
@@ -88,12 +92,12 @@ class StreamingController:
     _cleanup_session: Callable[[CardSession], None]
     _flush_deferred_background_reviews: Callable[[CardSession], None]
 
-    def _schedule_flush(self, session: CardSession) -> None:
+    def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
             return
         if session.guard.should_skip("_schedule_flush"):
             return
-        session.flush.schedule_update(lambda: self._do_flush(session))
+        session.flush.schedule_update(lambda: self._do_flush(session), urgent=urgent)
 
     async def _flush_progress(self, session: CardSession) -> None:
         """Update the fixed status element while preserving concurrent events."""
@@ -172,6 +176,30 @@ class StreamingController:
     def _pause_merged_reasoning(self, session: CardSession) -> None:
         if self._cfg.reasoning_mode == "merged":
             session.merged_reasoning.pause()
+
+    def _start_final(self, session: CardSession, *, source: str) -> bool:
+        """Start the final lane and log the first transition with its caller."""
+        preview = session.interim_preview
+        previous_revision = preview.revision
+        was_created = preview.created
+        was_dirty = preview.dirty
+        had_text = bool(preview.text)
+        started = session.interim_preview.start_final()
+        if started:
+            _logger.info(
+                "preview_final_start msg=%s source=%s previous_revision=%d "
+                "was_created=%s was_dirty=%s had_text=%s "
+                "flush_in_progress=%s pending_flush=%s",
+                session.message_id[:12],
+                source,
+                previous_revision,
+                was_created,
+                was_dirty,
+                had_text,
+                session.flush.flush_in_progress,
+                session.flush.has_pending_timer,
+            )
+        return started
 
     @staticmethod
     def _active_card_has_answer(session: CardSession) -> bool:
@@ -267,6 +295,80 @@ class StreamingController:
 
         self._consume_merged_reasoning_segments(session)
 
+    async def _flush_interim_preview(self, session: CardSession) -> None:
+        """Create/update the replace-only commentary preview lane fail-open."""
+        assert self._client is not None
+        assert session.card_id is not None
+        state = session.interim_preview
+
+        _logger.debug(
+            "commentary_flush_start msg=%s revision=%d created=%s dirty=%s final_started=%s",
+            session.message_id[:12],
+            state.revision,
+            state.created,
+            state.dirty,
+            state.final_started,
+        )
+
+        if not state.created and state.text and not state.final_started:
+            session.sequence += 1
+            try:
+                await self._client.cardkit_batch_update(
+                    session.card_id,
+                    [
+                        build_add_interim_preview_action(
+                            text_size=self._cfg.body_text_size,
+                        )
+                    ],
+                    sequence=session.sequence,
+                )
+            except FeishuAPIError as error:
+                _logger.debug("CardKit interim preview create failed: %s", error, exc_info=True)
+                self._handle_flush_error(error)
+                return
+            except Exception:
+                _logger.debug("CardKit interim preview create failed", exc_info=True)
+                return
+            state.created = True
+            session.element_count += INTERIM_PREVIEW_ELEMENT_ESTIMATE
+
+        if not state.created or not state.dirty:
+            return
+
+        rendered_text = state.text
+        rendered_revision = state.revision
+        content = _downgrade_tables(optimize_markdown_style(rendered_text)) or " "
+        session.sequence += 1
+        try:
+            await self._client.cardkit_stream_element(
+                session.card_id,
+                STREAMING_ELEMENT_ID,
+                content,
+                sequence=session.sequence,
+            )
+        except FeishuAPIError as error:
+            missing_el_id = extract_missing_element_id(error)
+            if missing_el_id == STREAMING_ELEMENT_ID:
+                state.created = False
+                state.dirty = bool(state.text) and not state.final_started
+                session.element_count = max(
+                    0,
+                    session.element_count - INTERIM_PREVIEW_ELEMENT_ESTIMATE,
+                )
+            _logger.debug("CardKit interim preview stream failed: %s", error, exc_info=True)
+            self._handle_flush_error(error)
+            return
+        except Exception:
+            _logger.debug("CardKit interim preview stream failed", exc_info=True)
+            return
+
+        state.mark_rendered(rendered_revision)
+        _logger.debug(
+            "commentary_rendered msg=%s revision=%d",
+            session.message_id[:12],
+            rendered_revision,
+        )
+
     def _on_thinking_segment(
         self,
         session: CardSession,
@@ -281,14 +383,36 @@ class StreamingController:
 
         normalized_source = str(source or "").strip().lower()
         if normalized_source == _INTERIM_COMMENTARY_SOURCE:
-            # Hermes has already classified this as a complete, user-visible
-            # assistant message.  Keep commentary in body chronology; only
-            # reasoning_callback data is eligible for merged reasoning UI.
             if not text:
+                _logger.debug(
+                    "stream lane=commentary ignored=empty msg=%s len=0 final_started=%s",
+                    session.message_id[:12],
+                    session.interim_preview.final_started,
+                )
+                return False
+            if session.interim_preview.final_started:
+                _logger.debug(
+                    "stream lane=commentary ignored=final_started msg=%s len=%d",
+                    session.message_id[:12],
+                    len(text),
+                )
                 return False
             self._pause_merged_reasoning(session)
-            self._append_answer_segment(session, text)
-            self._schedule_flush(session)
+            if not session.interim_preview.replace(text):
+                return False
+            preview = session.interim_preview
+            _logger.debug(
+                "commentary_received msg=%s revision=%d created=%s dirty=%s "
+                "final_started=%s flush_in_progress=%s pending_flush=%s",
+                session.message_id[:12],
+                preview.revision,
+                preview.created,
+                preview.dirty,
+                preview.final_started,
+                session.flush.flush_in_progress,
+                session.flush.has_pending_timer,
+            )
+            self._schedule_flush(session, urgent=True)
             return True
 
         activity = self._uses_activity_reasoning_presentation(
@@ -304,7 +428,14 @@ class StreamingController:
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
+            _logger.debug(
+                "answer_lane_start msg=%s source=thinking_answer visible_len=%d",
+                session.message_id[:12],
+                len(answer),
+            )
             self._pause_merged_reasoning(session)
+            if answer.strip():
+                self._start_final(session, source="thinking_answer")
             self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
@@ -376,8 +507,12 @@ class StreamingController:
             if (
                 (session.segment_state and session.segment_state.has_dirty)
                 or session.progress.dirty
+                or session.interim_preview.dirty
             ):
-                self._schedule_flush(session)
+                self._schedule_flush(
+                    session,
+                    urgent=session.interim_preview.dirty,
+                )
             _logger.info(
                 "CardKit card created: msg=%s card_id=%s",
                 session.message_id[:12],
@@ -407,6 +542,13 @@ class StreamingController:
         show_tool_use = self._cfg.show_tool_use
         show_tool_detail = self._cfg.show_tool_detail
         tool_detail_mode = self._cfg.tool_detail_mode
+        pending_preview = (
+            INTERIM_PREVIEW_ELEMENT_ESTIMATE
+            if session.interim_preview.text
+            and not session.interim_preview.created
+            and not session.interim_preview.final_started
+            else 0
+        )
 
         await self._flush_progress(session)
 
@@ -440,20 +582,28 @@ class StreamingController:
                     seg.dirty = False
                     continue
                 tool_panel_seen = True
-                tool_range = active_tool_range(segments, session.split_index, all_steps)
-                if tool_range is None:
+                if not all_steps:
                     seg.created = True
                     seg.dirty = False
                     continue
-                start, end = tool_range
-                steps = all_steps[start:end]
-                panel_estimate = estimate_tool_elements(
-                    start,
-                    end,
+                # The fixed panel is a bounded presentation of *all* logical
+                # tool history, not a physical copy of this card's chronology
+                # slice.  Remove its old estimate first to learn the budget
+                # available to the new projection.
+                tool_budget = (
+                    ELEMENT_THRESHOLD
+                    - FOOTER_RESERVE
+                    - pending_preview
+                    - new_el_total
+                    - (session.element_count - session.tool_panel.element_estimate)
+                )
+                presentation = project_tool_panel(
                     all_steps,
                     show_tool_detail=show_tool_detail,
                     tool_detail_mode=tool_detail_mode,
+                    element_budget=max(0, tool_budget),
                 )
+                panel_estimate = presentation.estimated_elements
                 if (
                     not session.tool_panel.created
                     and not session.tool_panel.dirty
@@ -474,54 +624,53 @@ class StreamingController:
                         if tool_seg.type == SegmentType.TOOL
                     )
                 )
+                source_statuses = tuple(str(step.get("status", "")) for step in all_steps)
+                if (
+                    panel_needs_update
+                    and session.interim_preview.final_started
+                    and session.tool_panel.created
+                    and not session.tool_panel.final_answer_refresh_pending
+                    and not session.tool_panel.needs_final_refresh(source_statuses)
+                ):
+                    panel_needs_update = False
                 if panel_needs_update:
                     current_estimate = session.tool_panel.element_estimate
                     delta = panel_estimate - current_estimate
+                    _logger.info(
+                        "tool_snapshot: msg=%s total_steps=%d rendered_steps=%d configured_mode=%s "
+                        "actual_mode=%s estimated_elements=%d budget=%d degraded=%s windowed=%s "
+                        "success_results_visible=%s",
+                        session.message_id[:12],
+                        presentation.total_steps,
+                        presentation.rendered_steps,
+                        presentation.configured_mode,
+                        presentation.mode,
+                        panel_estimate,
+                        tool_budget,
+                        presentation.degraded,
+                        presentation.windowed,
+                        presentation.success_results_visible,
+                    )
                     if (
-                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                        panel_estimate > tool_budget
                         and not session.split_disabled
                     ):
-                        previous_split_index = session.split_index
-                        previous_card_id = session.card_id
-                        rollover = await self._maybe_rollover_unified_tool_panel(
-                            session=session,
-                            split_index=i,
-                            all_steps=all_steps,
-                            actions=actions,
-                            new_el_ids=new_el_ids,
-                            new_el_estimates=new_el_estimates,
-                            tool_panel_segments=tool_panel_segments,
-                            pending_delta=new_el_total,
+                        next_presentation = project_tool_panel(
+                            all_steps,
                             show_tool_detail=show_tool_detail,
                             tool_detail_mode=tool_detail_mode,
+                            element_budget=ELEMENT_THRESHOLD - FOOTER_RESERVE - 1,
                         )
-                        if rollover == "failed":
+                        if not next_presentation.steps:
+                            _logger.warning(
+                                "CardKit split skipped: no meaningful tool snapshot msg=%s "
+                                "estimate=%d threshold=%d",
+                                session.message_id[:12],
+                                panel_estimate,
+                                ELEMENT_THRESHOLD,
+                            )
+                            session.split_disabled = True
                             return
-                        if rollover == "split":
-                            if session.split_index != previous_split_index or session.card_id != previous_card_id:
-                                actions = []
-                                new_el_ids = set()
-                                new_el_estimates = {}
-                                tool_panel_segments = []
-                                tool_panel_snapshot = None
-                                new_el_total = 0
-                                tool_panel_seen = False
-                                return await self._do_flush(session)
-                            # New-card creation can fail.  The existing card is
-                            # intentionally kept alive with split disabled; the
-                            # tool panel is then rendered on it in a second batch.
-                            actions = []
-                            new_el_ids = set()
-                            new_el_estimates = {}
-                            tool_panel_segments = []
-                            tool_panel_snapshot = None
-                            new_el_total = 0
-                            return await self._do_flush(session)
-                    if (
-                        session.element_count + new_el_total + delta + FOOTER_RESERVE > ELEMENT_THRESHOLD
-                        and session.element_count + new_el_total > 1
-                        and not session.split_disabled
-                    ):
                         previous_split_index = session.split_index
                         previous_card_id = session.card_id
                         split_ok = await self._do_split_card(
@@ -531,6 +680,14 @@ class StreamingController:
                             new_el_ids,
                             new_el_estimates,
                             tool_panel_segments,
+                            next_tool_snapshot=(
+                                next_presentation,
+                                [
+                                    tool_seg
+                                    for tool_seg in segments[i:]
+                                    if tool_seg.type == SegmentType.TOOL
+                                ],
+                            ),
                             show_tool_detail=show_tool_detail,
                             tool_detail_mode=tool_detail_mode,
                         )
@@ -554,19 +711,23 @@ class StreamingController:
                     if session.tool_panel.created:
                         actions.append(
                             build_tool_update_action(
-                                steps=steps,
+                                steps=list(presentation.steps),
+                                total_steps=presentation.total_steps,
+                                total_failed_count=presentation.total_failed_count,
                                 expanded=self._tool_panel_expanded(session),
-                                show_tool_detail=show_tool_detail,
-                                tool_detail_mode=tool_detail_mode,
+                                show_tool_detail=presentation.show_tool_detail,
+                                tool_detail_mode=presentation.tool_detail_mode,
                             )
                         )
                     else:
                         actions.append(
                             build_add_tool_panel_action(
-                                steps,
+                                list(presentation.steps),
+                                total_steps=presentation.total_steps,
+                                total_failed_count=presentation.total_failed_count,
                                 expanded=self._tool_panel_expanded(session),
-                                show_tool_detail=show_tool_detail,
-                                tool_detail_mode=tool_detail_mode,
+                                show_tool_detail=presentation.show_tool_detail,
+                                tool_detail_mode=presentation.tool_detail_mode,
                             )
                         )
                     tool_panel_segments = [
@@ -578,7 +739,7 @@ class StreamingController:
                         session.tool_panel.revision,
                         panel_estimate,
                         tool_panel_segments,
-                        list(steps),
+                        list(presentation.steps),
                     )
                     new_el_total += delta
                 continue
@@ -591,7 +752,12 @@ class StreamingController:
                     tool_detail_mode=tool_detail_mode,
                 )
                 if (
-                    session.element_count + new_el_total + estimated + FOOTER_RESERVE > ELEMENT_THRESHOLD
+                    session.element_count
+                    + new_el_total
+                    + pending_preview
+                    + estimated
+                    + FOOTER_RESERVE
+                    > ELEMENT_THRESHOLD
                     and session.element_count + new_el_total > 1
                     and not session.split_disabled
                 ):
@@ -642,6 +808,10 @@ class StreamingController:
             tool_panel_snapshot=tool_panel_snapshot,
         ):
             return
+
+        # Keep the transient commentary lane after structural reasoning/tool
+        # elements and before normal answer/segment text streaming.
+        await self._flush_interim_preview(session)
 
         # ── 步骤 2: stream_element 刷脏文本 ──
         for seg in segments[session.split_index:]:
@@ -696,9 +866,9 @@ class StreamingController:
         new_el_ids: set[str],
         new_el_estimates: dict[str, int],
         updated_tool_segs: list[Segment],
-        *,
-        tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
-    ) -> bool:
+    *,
+    tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
+) -> bool:
         """执行 batch_update 并处理快照/标记。返回 False 表示失败."""
         assert self._client is not None
         assert session.card_id is not None
@@ -715,17 +885,9 @@ class StreamingController:
         pre_flush_reasoning_elapsed = {
             seg.el_id: seg.elapsed_ms for seg in segments if seg.type == SegmentType.REASONING
         }
+        pre_flush_tool_steps = session.tool_use.build_display_steps()
         pre_flush_tool_offsets = {
             seg.el_id: seg.tool_end_offset for seg in updated_tool_segs
-        }
-        pre_flush_tool_steps = session.tool_use.build_display_steps()
-        pre_flush_tool_slices = {
-            seg.el_id: pre_flush_tool_steps[seg.tool_offset:tool_segment_end(seg, pre_flush_tool_steps)]
-            for seg in updated_tool_segs
-        }
-        pre_flush_tool_panel_offsets = {
-            seg.el_id: (seg.tool_offset, seg.tool_end_offset)
-            for seg in (tool_panel_snapshot[2] if tool_panel_snapshot else [])
         }
         try:
             await self._client.cardkit_batch_update(
@@ -751,36 +913,34 @@ class StreamingController:
                     if seg.type in (SegmentType.REASONING, SegmentType.ANSWER) and seg.text:
                         seg.dirty = True
             current_tool_steps = session.tool_use.build_display_steps()
+            current_statuses = tuple(str(step.get("status", "")) for step in current_tool_steps)
             for seg in updated_tool_segs:
-                offset_ok = pre_flush_tool_offsets.get(seg.el_id, -1) == seg.tool_end_offset
-                current_tool_slice = current_tool_steps[
-                    seg.tool_offset:tool_segment_end(seg, current_tool_steps)
-                ]
-                tool_slice_ok = pre_flush_tool_slices.get(seg.el_id) == current_tool_slice
                 if seg.el_id in new_el_estimates:
                     estimate = new_el_estimates[seg.el_id]
                     session.element_count += estimate - seg.element_estimate
                     seg.element_estimate = estimate
-                if seg.created and offset_ok and tool_slice_ok:
+                if (
+                    seg.created
+                    and pre_flush_tool_steps == current_tool_steps
+                    and pre_flush_tool_offsets.get(seg.el_id) == seg.tool_end_offset
+                ):
                     seg.dirty = False
             if tool_panel_snapshot is not None:
-                revision, estimate, panel_segments, rendered_steps = tool_panel_snapshot
+                revision, estimate, panel_segments, _rendered_steps = tool_panel_snapshot
                 session.element_count += estimate - session.tool_panel.element_estimate
-                current_range = active_tool_range(segments, session.split_index, current_tool_steps)
-                current_steps = (
-                    current_tool_steps[current_range[0]:current_range[1]]
-                    if current_range is not None
-                    else []
+                current = session.tool_panel.mark_rendered(
+                    revision,
+                    estimate,
+                    statuses=current_statuses,
                 )
-                current = session.tool_panel.mark_rendered(revision, estimate)
-                if current_steps != rendered_steps:
+                offsets_changed = any(
+                    pre_flush_tool_offsets.get(panel_seg.el_id) != panel_seg.tool_end_offset
+                    for panel_seg in panel_segments
+                )
+                if pre_flush_tool_steps != current_tool_steps or offsets_changed:
                     session.tool_panel.dirty = True
                 for panel_seg in panel_segments:
                     panel_seg.created = True
-                    offsets_changed = pre_flush_tool_panel_offsets.get(panel_seg.el_id) != (
-                        panel_seg.tool_offset,
-                        panel_seg.tool_end_offset,
-                    )
                     panel_seg.dirty = session.tool_panel.dirty or not current or offsets_changed
         except FeishuAPIError as e:
             missing_el_id = extract_missing_element_id(e)
@@ -924,26 +1084,30 @@ class StreamingController:
         panel_steps = all_steps[active_start:split_offset]
         if not panel_steps:
             return None
-        panel_estimate = estimate_tool_elements(
-            active_start,
-            split_offset,
-            all_steps,
+        panel_presentation = project_tool_panel(
+            panel_steps,
             show_tool_detail=show_tool_detail,
             tool_detail_mode=tool_detail_mode,
+            element_budget=max(0, ELEMENT_THRESHOLD - base_count - FOOTER_RESERVE),
         )
+        panel_estimate = panel_presentation.estimated_elements
         panel_action = (
             build_tool_update_action(
-                steps=panel_steps,
+                steps=list(panel_presentation.steps),
+                total_steps=panel_presentation.total_steps,
+                total_failed_count=panel_presentation.total_failed_count,
                 expanded=self._tool_panel_expanded(session),
-                show_tool_detail=show_tool_detail,
-                tool_detail_mode=tool_detail_mode,
+                show_tool_detail=panel_presentation.show_tool_detail,
+                tool_detail_mode=panel_presentation.tool_detail_mode,
             )
             if session.tool_panel.created
             else build_add_tool_panel_action(
-                panel_steps,
+                list(panel_presentation.steps),
+                total_steps=panel_presentation.total_steps,
+                total_failed_count=panel_presentation.total_failed_count,
                 expanded=self._tool_panel_expanded(session),
-                show_tool_detail=show_tool_detail,
-                tool_detail_mode=tool_detail_mode,
+                show_tool_detail=panel_presentation.show_tool_detail,
+                tool_detail_mode=panel_presentation.tool_detail_mode,
             )
         )
         actions.append(panel_action)
@@ -956,7 +1120,7 @@ class StreamingController:
             session.tool_panel.revision,
             panel_estimate,
             tool_panel_segments,
-            list(panel_steps),
+            list(panel_presentation.steps),
         )
         if split_target_index == split_index + 1:
             segment_state.split_tool_segment(split_index, split_offset)
@@ -983,6 +1147,7 @@ class StreamingController:
         updated_tool_segs: list[Segment],
         *,
         tool_panel_snapshot: tuple[int, int, list[Segment], list[ToolDisplayStep]] | None = None,
+        next_tool_snapshot: tuple[ToolPanelSnapshot, list[Segment]] | None = None,
         show_tool_detail: bool = True,
         tool_detail_mode: str = "full",
     ) -> bool:
@@ -1026,6 +1191,27 @@ class StreamingController:
                 seg.elapsed_ms for seg in seal_segments if seg.type == SegmentType.REASONING
             )
 
+        seal_non_tool_card = build_complete_card(
+            segments=seal_segments,
+            all_tool_steps=all_steps,
+            footer_fields=[],
+            footer_show_label=False,
+            footer_enabled=False,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=False,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=False,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=seal_merged_text,
+            merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
+        )
+        seal_tool_snapshot = project_tool_panel(
+            all_steps,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
+            element_budget=max(0, ELEMENT_THRESHOLD - estimate_cardkit_elements(seal_non_tool_card)),
+        )
         seal_card = build_complete_card(
             segments=seal_segments,
             all_tool_steps=all_steps,
@@ -1035,9 +1221,13 @@ class StreamingController:
             panel_expanded=self._cfg.panel_expanded,
             header_enabled=False,
             body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
             show_tool_use=self._cfg.show_tool_use,
-            show_tool_detail=show_tool_detail,
-            tool_detail_mode=tool_detail_mode,
+            show_tool_detail=seal_tool_snapshot.show_tool_detail,
+            tool_detail_mode=seal_tool_snapshot.tool_detail_mode,
+            tool_panel_steps=list(seal_tool_snapshot.steps),
+            tool_total_steps=seal_tool_snapshot.total_steps,
+            tool_total_failed_count=seal_tool_snapshot.total_failed_count,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=seal_merged_text,
             merged_reasoning_elapsed_ms=seal_merged_elapsed_ms,
@@ -1093,11 +1283,46 @@ class StreamingController:
         session.tool_panel.reset_render_state(
             dirty=any(seg.type == SegmentType.TOOL for seg in segments[split_idx:])
         )
+        session.interim_preview.reset_render_state()
         if merged_mode:
             # The new card replays the accumulated lane. Older sealed cards keep
             # only the merged reasoning that belongs to their chronology slice.
             session.merged_reasoning.reset_render_state()
             await self._flush_merged_reasoning(session)
+        if next_tool_snapshot is not None:
+            next_presentation, next_panel_segments = next_tool_snapshot
+            if not next_presentation.steps:
+                _logger.warning(
+                    "CardKit split created no follow-up payload: msg=%s", session.message_id[:12],
+                )
+                session.split_disabled = True
+                return True
+            next_actions = [
+                build_add_tool_panel_action(
+                    list(next_presentation.steps),
+                    total_steps=next_presentation.total_steps,
+                    total_failed_count=next_presentation.total_failed_count,
+                    expanded=self._tool_panel_expanded(session),
+                    show_tool_detail=next_presentation.show_tool_detail,
+                    tool_detail_mode=next_presentation.tool_detail_mode,
+                )
+            ]
+            if not await self._do_batch_update(
+                session,
+                segments,
+                next_actions,
+                set(),
+                {},
+                next_panel_segments,
+                tool_panel_snapshot=(
+                    session.tool_panel.revision,
+                    next_presentation.estimated_elements,
+                    next_panel_segments,
+                    list(next_presentation.steps),
+                ),
+            ):
+                session.split_disabled = True
+                return False
         _logger.info(
             "CardKit split: msg=%s old_card=%s sealed=%d split_idx=%d new_card=%s",
             session.message_id[:12],
@@ -1131,6 +1356,7 @@ class StreamingController:
             return False
 
         session.progress.clear()
+        self._start_final(session, source="terminal")
         await session.flush.wait_for_flush()
         session.flush.mark_completed()
 
@@ -1146,17 +1372,16 @@ class StreamingController:
         if self._cfg.reasoning_mode == "merged":
             session.merged_reasoning.finalize()
 
-        active_segments = session.active_segments()
-
-        if session.image_resolver:
-            await _resolve_answer_images(
-                active_segments,
-                session.image_resolver,
-                log_prefix="CardKit",
-            )
-
-        card = build_complete_card(
-            segments=active_segments,
+        logical_segments = segment_state.segments if segment_state is not None else []
+        final_view: CardViewSnapshot = project_card_view(
+            segments=logical_segments,
+            all_tool_steps=all_tool_steps,
+            merged_reasoning=session.merged_reasoning,
+            interim_preview=session.interim_preview,
+            reasoning_mode=self._cfg.reasoning_mode,
+        )
+        terminal_non_tool_card = build_complete_card(
+            segments=logical_segments,
             all_tool_steps=all_tool_steps,
             footer_data=session.footer,
             is_error=is_error,
@@ -1168,16 +1393,56 @@ class StreamingController:
             panel_expanded=self._cfg.panel_expanded,
             header_enabled=self._cfg.header_enabled,
             body_text_size=self._cfg.body_text_size,
-            show_tool_use=self._cfg.show_tool_use,
-            show_tool_detail=show_tool_detail,
-            tool_detail_mode=tool_detail_mode,
+            add_empty_answer_fallback=False,
+            show_tool_use=False,
             width_mode=self._cfg.width_mode,
             merged_reasoning_text=(
-                session.merged_reasoning.text
+                final_view.reasoning_text if self._cfg.reasoning_mode == "merged" else None
+            ),
+            merged_reasoning_elapsed_ms=final_view.reasoning_elapsed_ms,
+        )
+        terminal_non_tool_estimate = estimate_cardkit_elements(terminal_non_tool_card)
+        final_tool_snapshot = project_tool_panel(
+            all_tool_steps,
+            show_tool_detail=show_tool_detail,
+            tool_detail_mode=tool_detail_mode,
+            element_budget=max(0, ELEMENT_THRESHOLD - terminal_non_tool_estimate),
+        )
+
+        if session.image_resolver:
+            await _resolve_answer_images(
+                logical_segments,
+                session.image_resolver,
+                log_prefix="CardKit",
+            )
+
+        card = build_complete_card(
+            segments=logical_segments,
+            all_tool_steps=all_tool_steps,
+            footer_data=session.footer,
+            is_error=is_error,
+            is_aborted=is_aborted,
+            footer_fields=self._cfg.footer_fields,
+            footer_show_label=self._cfg.footer_show_label,
+            footer_enabled=self._cfg.footer_enabled,
+            footer_text_size=self._cfg.footer_text_size,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=self._cfg.header_enabled,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=self._cfg.show_tool_use,
+            show_tool_detail=final_tool_snapshot.show_tool_detail,
+            tool_detail_mode=final_tool_snapshot.tool_detail_mode,
+            tool_panel_steps=list(final_tool_snapshot.steps),
+            tool_total_steps=final_tool_snapshot.total_steps,
+            tool_total_failed_count=final_tool_snapshot.total_failed_count,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=(
+                final_view.reasoning_text
                 if self._cfg.reasoning_mode == "merged"
                 else None
             ),
-            merged_reasoning_elapsed_ms=session.merged_reasoning.elapsed_ms,
+            merged_reasoning_elapsed_ms=final_view.reasoning_elapsed_ms,
         )
 
         streaming_closed = False
