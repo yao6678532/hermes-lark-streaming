@@ -330,6 +330,10 @@ class StreamCardController(StreamingController):
             return None
         return session
 
+    def has_active_session(self, message_id: str | None) -> bool:
+        """Return whether a non-terminal CardKit session owns ``message_id``."""
+        return bool(message_id and self._get_active_session(message_id))
+
     def _fire_and_forget(
         self,
         coro: Coroutine[Any, Any, Any],
@@ -431,17 +435,37 @@ class StreamCardController(StreamingController):
         if not self.enabled:
             return False
         session = self._get_active_session(message_id)
-        if session is None or session.guard.should_skip("on_thinking"):
+        if session is None:
+            _logger.debug(
+                "route interim msg=%s session_found=False claimed=False reason=no_active_session",
+                str(message_id or "")[:24],
+            )
+            return False
+        if session.guard.should_skip("on_thinking"):
+            _logger.debug(
+                "route interim msg=%s session_found=True guard_skip=True claimed=False reason=guard_skip",
+                session.message_id[:24],
+            )
             return False
 
         if session.segment_state is None:
+            _logger.debug(
+                "route interim msg=%s session_found=True guard_skip=False claimed=False reason=no_segment_state",
+                session.message_id[:24],
+            )
             return False
-        return self._on_thinking_segment(
+        claimed = self._on_thinking_segment(
             session,
             text,
             api_mode=api_mode,
             source=source,
         )
+        if not claimed:
+            _logger.debug(
+                "route interim msg=%s session_found=True guard_skip=False claimed=False reason=rejected",
+                session.message_id[:24],
+            )
+        return claimed
 
     def on_reasoning(self, *, message_id: str, text: str, api_mode: str = "") -> bool:
         """Route native reasoning presentation by its Hermes API-mode semantics."""

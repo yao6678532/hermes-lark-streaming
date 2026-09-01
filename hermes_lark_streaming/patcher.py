@@ -42,6 +42,7 @@ _HOOK_NAMES = [
     "PROGRESS",
     "USAGE_BASELINE",
     "USAGE",
+    "STATUS",
 ]
 MARKERS: list[tuple[str, str]] = [(f"# {PREFIX}_{n}_BEGIN", f"# {PREFIX}_{n}_END") for n in _HOOK_NAMES]
 
@@ -64,6 +65,7 @@ MK_CLARIFY_ACTION, MK_CLARIFY_ACTION_END = MARKERS[15]
 MK_PROGRESS, MK_PROGRESS_END = MARKERS[16]
 MK_USAGE_BASELINE, MK_USAGE_BASELINE_END = MARKERS[17]
 MK_USAGE, MK_USAGE_END = MARKERS[18]
+MK_STATUS, MK_STATUS_END = MARKERS[19]
 
 _BACKUP_SUFFIX = ".hermes_lark.bak"
 
@@ -489,15 +491,39 @@ def _thinking_hook(indent: str) -> str:
             "    except NameError:",
             "        _lark_message_id = event_message_id",
             "        _lark_run_current = _run_still_current",
-            "    if (text and not already_streamed and _lark_run_current()",
-            "            and on_thinking_delta(",
-            "                message_id=_lark_message_id,",
-            "                text=text,",
-            "                api_mode=getattr(agent, 'api_mode', ''),",
-            "                source='interim_commentary',",
-            "            )):",
+            "    _lark_run_current_ok = True",
+            "    if text and not already_streamed:",
+            "        _lark_run_current_ok = _lark_run_current()",
+            "    if on_thinking_delta(",
+            "            message_id=_lark_message_id,",
+            "            text=text,",
+            "            api_mode=getattr(agent, 'api_mode', ''),",
+            "            source='interim_commentary',",
+            "            already_streamed=already_streamed,",
+            "            run_current=_lark_run_current_ok,",
+            "        ):",
             "        return",
             *_hook_exception_lines("thinking"),
+        ],
+    )
+
+
+def _status_hook(indent: str) -> str:
+    return _make_hook(
+        indent,
+        MK_STATUS,
+        MK_STATUS_END,
+        [
+            "try:",
+            "    from hermes_lark_streaming.patch import on_gateway_status_observed",
+            "    on_gateway_status_observed(",
+            "        event_type=event_type,",
+            "        message=prepared_message,",
+            "        message_id=getattr(ctx, 'event_message_id', None),",
+            "        session_key=getattr(ctx, 'session_key', None),",
+            "        source=getattr(ctx, 'source', None),",
+            "    )",
+            *_hook_exception_lines("status"),
         ],
     )
 
@@ -959,6 +985,10 @@ class Patcher:
             raise PatcherError(
                 "Cannot find current-turn usage baseline anchor in run.py — Hermes version may be incompatible"
             )
+        if _find_status_observer_site(tree, lines) is None:
+            raise PatcherError(
+                "Cannot find gateway status callback anchor in run.py — Hermes version may be incompatible"
+            )
 
     def apply(self) -> None:
         if self.is_fully_patched():
@@ -1020,6 +1050,7 @@ class Patcher:
                 _find_turn_usage_baseline_site(tree, lines),
             ),
             ("usage", "current-turn usage", _find_turn_usage_site(tree, lines)),
+            ("status", "gateway status callback", _find_status_observer_site(tree, lines)),
         ]
         hook_defs.extend(
             ("answer", f"answer callback {index}", loc)
@@ -1056,6 +1087,7 @@ class Patcher:
             "progress": _progress_hook,
             "usage_baseline": _usage_baseline_hook,
             "usage": _usage_hook,
+            "status": _status_hook,
         }
         for idx, indent, fn_name in sites:
             hook = _HOOK_FNS[fn_name](indent)
@@ -1268,6 +1300,47 @@ def _find_background_review_site(tree: ast.Module, lines: list[str]) -> tuple[in
     for i, line in enumerate(lines):
         if line.strip() == "agent.background_review_callback = _bg_review_send":
             return i + 1, _safe_indent(lines, i)
+    return None
+
+
+def _find_status_observer_site(tree: ast.Module, lines: list[str]) -> tuple[int, str] | None:
+    """Locate the native status send boundary in ``_status_callback_sync``."""
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) or node.name != "_status_callback_sync":
+            continue
+
+        has_preparation = any(
+            isinstance(child, ast.Assign)
+            and len(child.targets) == 1
+            and isinstance(child.targets[0], ast.Name)
+            and child.targets[0].id == "prepared_message"
+            and any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "_prepare_gateway_status_message"
+                for call in ast.walk(child.value)
+            )
+            for child in ast.walk(node)
+        )
+        if not has_preparation:
+            continue
+
+        for child in ast.walk(node):
+            if not (
+                isinstance(child, ast.Assign)
+                and len(child.targets) == 1
+                and isinstance(child.targets[0], ast.Name)
+                and child.targets[0].id == "_fut"
+                and isinstance(child.value, ast.Call)
+            ):
+                continue
+            if any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "_send_or_update_status_coro"
+                for call in ast.walk(child.value)
+            ):
+                return child.lineno - 1, _safe_indent(lines, child.lineno - 1)
     return None
 
 

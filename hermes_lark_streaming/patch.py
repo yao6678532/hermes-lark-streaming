@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Callable
+from contextlib import suppress
 from functools import wraps
 from inspect import iscoroutinefunction
 from typing import Any
@@ -24,6 +26,31 @@ from .interactions.clarify import (
 )
 
 _logger = logging.getLogger("hermes_lark_streaming")
+
+_ROUTE_PREVIEW_LIMIT = 120
+_SENSITIVE_ROUTE_RE = re.compile(
+    r"(?i)\bbearer\s+\S+|\b(?:token|secret|api[_-]?key)\s*[:=]\s*\S+|\bsk-[A-Za-z0-9_-]+"
+)
+
+
+def _route_preview(value: Any) -> str:
+    """Return a short, single-line preview for route diagnostics."""
+    compact = " ".join(str(value or "").split())
+    compact = _SENSITIVE_ROUTE_RE.sub("[redacted]", compact)
+    if len(compact) > _ROUTE_PREVIEW_LIMIT:
+        return compact[:_ROUTE_PREVIEW_LIMIT] + "..."
+    return compact
+
+
+def _route_id(value: Any) -> str:
+    """Keep route identifiers useful in logs without dumping long values."""
+    return str(value or "")[:48]
+
+
+def _source_platform(source: Any) -> str:
+    platform = getattr(source, "platform", None)
+    value = getattr(platform, "value", platform)
+    return str(value or "").strip().lower()
 
 _TURN_USAGE_COUNTERS: dict[str, tuple[str, ...]] = {
     # ``prompt_tokens`` is the provider-reported prompt total.  Hermes'
@@ -480,24 +507,92 @@ def on_answer_delta(*, ctrl: Any, message_id: str, text: str) -> bool:
     return bool(ctrl.on_answer(message_id=message_id, text=text))
 
 
-@_safe_hook(default_return=False, log_level="debug")
 def on_thinking_delta(
     *,
-    ctrl: Any,
     message_id: str,
     text: str,
     api_mode: str = "",
     source: str = "",
+    already_streamed: bool = False,
+    run_current: bool = True,
 ) -> bool:
     """[注入点 5] _interim_assistant_cb — classified thinking/commentary."""
-    return bool(
-        ctrl.on_thinking(
-            message_id=message_id,
-            text=text,
-            api_mode=api_mode,
-            source=source,
+    claimed = False
+    reason = "eligible"
+    try:
+        if already_streamed:
+            reason = "guard_skip"
+        elif not run_current:
+            reason = "stale_run"
+        elif not text:
+            reason = "empty"
+        else:
+            ctrl = get_controller()
+            if not ctrl.enabled:
+                reason = "disabled"
+            else:
+                claimed = bool(
+                    ctrl.on_thinking(
+                        message_id=message_id,
+                        text=text,
+                        api_mode=api_mode,
+                        source=source,
+                    )
+                )
+                reason = "claimed" if claimed else "rejected"
+    except Exception:
+        reason = "hook_error"
+        _logger.debug("on_thinking_delta error", exc_info=True)
+
+    with suppress(Exception):
+        _logger.debug(
+            "route interim entered=True msg=%s already_streamed=%s run_current=%s "
+            "claimed=%s reason=%s text_preview=%r",
+            _route_id(message_id),
+            already_streamed,
+            run_current,
+            claimed,
+            reason,
+            _route_preview(text),
         )
-    )
+    return claimed
+
+
+def on_gateway_status_observed(
+    *,
+    event_type: str,
+    message: Any,
+    message_id: str | None = None,
+    session_key: str | None = None,
+    source: Any = None,
+) -> None:
+    """Observe Hermes' native gateway status route without claiming it."""
+    try:
+        platform = _source_platform(source)
+        if platform not in {"feishu", "lark"}:
+            return
+
+        ctrl = get_controller()
+        card_session = False
+        if getattr(ctrl, "enabled", False) and message_id:
+            has_active_session = getattr(ctrl, "has_active_session", None)
+            if callable(has_active_session):
+                card_session = bool(has_active_session(message_id))
+
+        _logger.debug(
+            "route status event_type=%s message_id=%s session_key=%s card_session=%s "
+            "source=%s message_preview=%r",
+            event_type,
+            _route_id(message_id),
+            _route_id(session_key),
+            card_session,
+            platform,
+            _route_preview(message),
+        )
+    except Exception:
+        # This hook is observation-only and must fail open to Hermes' sender.
+        with suppress(Exception):
+            _logger.debug("gateway status route observer failed", exc_info=True)
 
 
 @_safe_hook(default_return=False, log_level="debug")
