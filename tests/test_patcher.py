@@ -24,6 +24,8 @@ from hermes_lark_streaming.patcher import (
     MARKERS,
     MK_CRON_DELIVER,
     MK_CRON_DELIVER_END,
+    MK_STATUS,
+    MK_STATUS_END,
     CronPatcher,
     FeishuAdapterPatcher,
     Patcher,
@@ -35,6 +37,7 @@ from hermes_lark_streaming.patcher import (
     _followup_complete_hook,
     _progress_hook,
     _remove_block,
+    _status_hook,
     _stop_hook,
     _thinking_hook,
     _tool_hook,
@@ -60,6 +63,14 @@ V020_CRON = V020_FIXTURE_DIR / "cron" / "scheduler.py"
 V020_FEISHU_ADAPTER = V020_FIXTURE_DIR / "plugins" / "platforms" / "feishu" / "adapter.py"
 V020_RELEASE_COMMIT = "3c27eb6234bf91b8ceee9e9071591b31e9b148cb"
 V020_FEISHU_ADAPTER_SHA256 = "55cbb66fa60abdd3710a3476c197b31d46dc3ff13ec401c23557ee6465f96029"
+V021_FIXTURE_DIR = Path(__file__).parent / "fixtures" / "hermes-v0.21.0"
+V021_RUN = V021_FIXTURE_DIR / "gateway" / "run.py"
+V021_CRON = V021_FIXTURE_DIR / "cron" / "scheduler.py"
+V021_FEISHU_ADAPTER = V021_FIXTURE_DIR / "plugins" / "platforms" / "feishu" / "adapter.py"
+V021_RELEASE_COMMIT = "29112bef099274229cadff79cdff7bf7b99c4b77"
+V021_RUN_SHA256 = "cc9714959b6724f2e15979576599f87254b470368a29c6395740049e92b671dc"
+V021_CRON_SHA256 = "a2c003544489c5a9eb729b4964cc56c6c5fed066b94217d44545b8d897de6b12"
+V021_FEISHU_ADAPTER_SHA256 = "9fd07cbce987c4c8f5f0616f7adb72a344884453e0fd1800bb33bbee075a73c3"
 
 def _ensure_sample() -> Path:
     src = RUN_BAK if RUN_BAK.exists() else RUN_SRC
@@ -133,6 +144,33 @@ def v020_feishu_adapter_copy(tmp_path: Path) -> Path:
     return dst
 
 
+@pytest.fixture()
+def v021_run_copy(tmp_path: Path) -> Path:
+    assert V021_RUN.exists(), f"missing pinned Hermes v0.21.0 fixture: {V021_RUN}"
+    assert hashlib.sha256(V021_RUN.read_bytes()).hexdigest() == V021_RUN_SHA256
+    dst = tmp_path / "run.py"
+    shutil.copy2(V021_RUN, dst)
+    return dst
+
+
+@pytest.fixture()
+def v021_scheduler_copy(tmp_path: Path) -> Path:
+    assert V021_CRON.exists(), f"missing pinned Hermes v0.21.0 fixture: {V021_CRON}"
+    assert hashlib.sha256(V021_CRON.read_bytes()).hexdigest() == V021_CRON_SHA256
+    dst = tmp_path / "scheduler.py"
+    shutil.copy2(V021_CRON, dst)
+    return dst
+
+
+@pytest.fixture()
+def v021_feishu_adapter_copy(tmp_path: Path) -> Path:
+    assert V021_FEISHU_ADAPTER.exists(), f"missing pinned Hermes v0.21.0 Feishu adapter: {V021_FEISHU_ADAPTER}"
+    assert hashlib.sha256(V021_FEISHU_ADAPTER.read_bytes()).hexdigest() == V021_FEISHU_ADAPTER_SHA256
+    dst = tmp_path / "adapter.py"
+    shutil.copy2(V021_FEISHU_ADAPTER, dst)
+    return dst
+
+
 def _patcher(path: Path) -> Patcher:
     return Patcher(run_path=path)
 
@@ -185,6 +223,17 @@ def _build_thinking_hook_runner():
         "    return 'native'\n"
     )
     exec(compile(source, "<thinking-hook-test>", "exec"), namespace)
+    return namespace["callback"]
+
+
+def _build_status_hook_runner():
+    namespace: dict = {}
+    source = (
+        "def callback(ctx, event_type, prepared_message):\n"
+        f"{_status_hook('    ')}"
+        "    return 'native'\n"
+    )
+    exec(compile(source, "<status-hook-test>", "exec"), namespace)
     return namespace["callback"]
 
 
@@ -385,8 +434,8 @@ class TestVerify:
 
     def test_verify_fails_when_clarify_send_callback_moves(self, run_copy: Path) -> None:
         content = run_copy.read_text(encoding="utf-8").replace(
-            "def _clarify_callback_sync(question: str, choices) -> str:",
-            "def _clarify_callback_moved(question: str, choices) -> str:",
+            "def _clarify_callback_sync(",
+            "def _clarify_callback_moved(",
             1,
         )
         run_copy.write_text(content, encoding="utf-8")
@@ -502,6 +551,73 @@ class TestHermesV020Compatibility:
         v020_feishu_adapter_copy.write_text(content, encoding="utf-8")
         with pytest.raises(PatcherError, match="approval card anchor"):
             _feishu_patcher(v020_feishu_adapter_copy).verify_target()
+
+
+class TestHermesV021Compatibility:
+    """Compatibility baseline pinned to the exact Hermes Agent v0.21.0 release."""
+
+    def test_gateway_fixture_is_pristine_release_and_round_trips(self, v021_run_copy: Path) -> None:
+        pristine = v021_run_copy.read_bytes()
+        patcher = _patcher(v021_run_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        content = v021_run_copy.read_text(encoding="utf-8")
+        ast.parse(content)
+        answer_count = sum(
+            isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)) and node.name == "_stream_delta_cb"
+            for node in ast.walk(ast.parse(pristine.decode("utf-8")))
+        )
+        for begin, end in MARKERS:
+            expected = answer_count if begin == "# HERMES_LARK_ANSWER_BEGIN" else 1
+            assert content.count(begin) == expected
+            assert content.count(end) == expected
+        assert patcher.is_fully_patched()
+        after_first = v021_run_copy.read_bytes()
+
+        patcher.apply()
+        assert v021_run_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v021_run_copy.read_bytes() == pristine
+
+    def test_cron_fixture_round_trips(self, v021_scheduler_copy: Path) -> None:
+        pristine = v021_scheduler_copy.read_bytes()
+        patcher = _cron_patcher(v021_scheduler_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        content = v021_scheduler_copy.read_text(encoding="utf-8")
+        ast.parse(content)
+        assert content.count(MK_CRON_DELIVER) == 1
+        assert content.count(MK_CRON_DELIVER_END) == 1
+        after_first = v021_scheduler_copy.read_bytes()
+
+        patcher.apply()
+        assert v021_scheduler_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v021_scheduler_copy.read_bytes() == pristine
+
+    def test_feishu_approval_adapter_round_trips(self, v021_feishu_adapter_copy: Path) -> None:
+        pristine = v021_feishu_adapter_copy.read_bytes()
+        patcher = _feishu_patcher(v021_feishu_adapter_copy)
+
+        patcher.verify_target()
+        patcher.apply()
+        patcher.verify_target()
+        content = v021_feishu_adapter_copy.read_text(encoding="utf-8")
+        ast.parse(content)
+        assert content.count("# HERMES_LARK_APPROVAL_UI_BEGIN") == 1
+        assert content.count("# HERMES_LARK_APPROVAL_UI_END") == 1
+        assert content.count("# HERMES_LARK_APPROVAL_ACTION_BEGIN") == 1
+        assert content.count("# HERMES_LARK_APPROVAL_ACTION_END") == 1
+        after_first = v021_feishu_adapter_copy.read_bytes()
+
+        patcher.apply()
+        assert v021_feishu_adapter_copy.read_bytes() == after_first
+        patcher.remove()
+        assert v021_feishu_adapter_copy.read_bytes() == pristine
 
 
 def test_approval_transform_hook_fails_open_to_hermes_card() -> None:
@@ -622,6 +738,8 @@ class TestGeneratedThinkingHook:
             text="Planning",
             api_mode="codex_responses",
             source="interim_commentary",
+            already_streamed=False,
+            run_current=True,
         )
 
     def test_gateway_style_interim_chain_replaces_preview_text(self) -> None:
@@ -652,6 +770,158 @@ class TestGeneratedThinkingHook:
         assert session.interim_preview.text == "Confirming"
         assert session.merged_reasoning.text == ""
         loop.close()
+
+
+class TestGeneratedStatusHook:
+    def test_observer_runs_and_preserves_native_status_send(self) -> None:
+        callback = _build_status_hook_runner()
+        ctx = SimpleNamespace(
+            event_message_id="status-message",
+            session_key="feishu:chat",
+            source=SimpleNamespace(platform=SimpleNamespace(value="feishu")),
+        )
+
+        with patch("hermes_lark_streaming.patch.on_gateway_status_observed") as observer:
+            result = callback(ctx, "lifecycle", "Context compression deferred")
+
+        assert result == "native"
+        observer.assert_called_once_with(
+            event_type="lifecycle",
+            message="Context compression deferred",
+            message_id="status-message",
+            session_key="feishu:chat",
+            source=ctx.source,
+        )
+
+    def test_observer_failure_preserves_native_status_send(self) -> None:
+        callback = _build_status_hook_runner()
+        ctx = SimpleNamespace()
+
+        with patch(
+            "hermes_lark_streaming.patch.on_gateway_status_observed",
+            side_effect=RuntimeError("observer failed"),
+        ):
+            assert callback(ctx, "retry", "Please retry") == "native"
+
+
+class TestRouteDiagnostics:
+    def test_interim_claim_true_and_false_are_logged_without_changing_bool_contract(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        from hermes_lark_streaming.patch import on_thinking_delta
+
+        for claimed in (True, False):
+            ctrl = MagicMock()
+            ctrl.enabled = True
+            ctrl.on_thinking.return_value = claimed
+            with (
+                patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+                caplog.at_level(logging.DEBUG, logger="hermes_lark_streaming"),
+            ):
+                result = on_thinking_delta(
+                    message_id="om_interim",
+                    text="first line\nsecond line",
+                    already_streamed=False,
+                    run_current=True,
+                )
+
+            assert result is claimed
+            assert any(
+                "route interim entered=True" in record.message
+                and "msg=om_interim" in record.message
+                and f"claimed={claimed}" in record.message
+                and "text_preview='first line second line'" in record.message
+                for record in caplog.records
+            )
+            caplog.clear()
+
+    def test_interim_guard_skip_and_empty_are_not_claimed(self, caplog: pytest.LogCaptureFixture) -> None:
+        from hermes_lark_streaming.patch import on_thinking_delta
+
+        ctrl = MagicMock()
+        ctrl.enabled = True
+        with (
+            patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+            caplog.at_level(logging.DEBUG, logger="hermes_lark_streaming"),
+        ):
+            assert on_thinking_delta(
+                message_id="om_interim",
+                text="commentary",
+                already_streamed=True,
+            ) is False
+            assert on_thinking_delta(message_id="om_interim", text="") is False
+
+        ctrl.on_thinking.assert_not_called()
+        assert any("reason=guard_skip" in record.message for record in caplog.records)
+        assert any("reason=empty" in record.message for record in caplog.records)
+
+    def test_interim_missing_session_is_logged_by_controller(self, caplog: pytest.LogCaptureFixture) -> None:
+        from hermes_lark_streaming.patch import on_thinking_delta
+
+        ctrl = StreamCardController()
+        ctrl._cfg = SimpleNamespace(enabled=True, feishu_app_id="app", env_app_id="")
+        with (
+            patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+            caplog.at_level(logging.DEBUG, logger="hermes_lark_streaming"),
+        ):
+            assert on_thinking_delta(message_id="missing", text="commentary") is False
+
+        assert any("session_found=False" in record.message for record in caplog.records)
+        assert any("reason=no_active_session" in record.message for record in caplog.records)
+
+    def test_interim_diagnostic_logging_failure_does_not_change_claim(self) -> None:
+        from hermes_lark_streaming import patch as patch_module
+        from hermes_lark_streaming.patch import on_thinking_delta
+
+        ctrl = MagicMock()
+        ctrl.enabled = True
+        ctrl.on_thinking.return_value = True
+        with (
+            patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+            patch.object(patch_module._logger, "debug", side_effect=RuntimeError("logging failed")),
+        ):
+            assert on_thinking_delta(message_id="msg", text="commentary") is True
+
+    def test_status_observer_is_feishu_only_and_fail_open(self, caplog: pytest.LogCaptureFixture) -> None:
+        from hermes_lark_streaming.patch import on_gateway_status_observed
+
+        ctrl = MagicMock()
+        ctrl.enabled = True
+        ctrl.has_active_session.return_value = True
+        source = SimpleNamespace(platform=SimpleNamespace(value="feishu"))
+        with (
+            patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+            caplog.at_level(logging.DEBUG, logger="hermes_lark_streaming"),
+        ):
+            on_gateway_status_observed(
+                event_type="lifecycle",
+                message="Context compression deferred\nnext",
+                message_id="om_status",
+                session_key="session:chat",
+                source=source,
+            )
+
+        assert ctrl.has_active_session.call_args.args == ("om_status",)
+        record = next(record for record in caplog.records if "route status" in record.message)
+        assert "card_session=True" in record.message
+        assert "message_preview='Context compression deferred next'" in record.message
+
+        ctrl.has_active_session.side_effect = RuntimeError("state unavailable")
+        on_gateway_status_observed(
+            event_type="retry",
+            message="retry",
+            message_id="om_status",
+            source=source,
+        )
+
+        non_feishu = SimpleNamespace(platform=SimpleNamespace(value="slack"))
+        with patch("hermes_lark_streaming.patch.get_controller") as get_controller:
+            on_gateway_status_observed(
+                event_type="lifecycle",
+                message="ignored",
+                source=non_feishu,
+            )
+        get_controller.assert_not_called()
 
 
 class TestGeneratedToolHook:
@@ -998,6 +1268,9 @@ class TestApplyRemove:
         assert "on_answer_delta(message_id=_lark_message_id" in content
         assert "on_thinking_delta(" in content
         assert "source='interim_commentary'" in content
+        assert MK_STATUS in content
+        assert MK_STATUS_END in content
+        assert "on_gateway_status_observed(" in content
         assert "on_reasoning_delta(" in content
         assert "# HERMES_LARK_PROGRESS_BEGIN" in content
         assert "on_long_running_progress(" in content
@@ -1025,12 +1298,9 @@ class TestApplyRemove:
             )
             if index >= 0
         )
-        official_clarify_callback = content.index("def _clarify_callback_sync(question: str, choices) -> str:")
+        official_clarify_callback = content.find("def _clarify_callback_sync(")
         assert status_adapter_init < clarify_send_hook
-        enclosing_run_sync = content.rfind("def run_sync():", 0, official_clarify_callback)
-        assert enclosing_run_sync >= 0
-        assert clarify_send_hook < enclosing_run_sync
-        assert clarify_send_hook < official_clarify_callback
+        assert official_clarify_callback >= 0
 
         quick_key = content.index("_quick_key = self._session_key_for_source(source)")
         clarify_action_hook = content.index("# HERMES_LARK_CLARIFY_ACTION_BEGIN", quick_key)
