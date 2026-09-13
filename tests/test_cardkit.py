@@ -10,8 +10,11 @@ import pytest
 
 from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
+    AGENT_STATUS_DIVIDER_ELEMENT_ID,
+    AGENT_STATUS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    RUN_DETAILS_DIVIDER_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
     _build_footer_elements,
     _build_header,
@@ -1536,6 +1539,50 @@ def _seg(seg_type: str, text: str = "", **kwargs: int | float) -> Segment:
 
 
 class TestBuildSegmentCompleteCard:
+    def test_no_agent_status_keeps_existing_layout(self) -> None:
+        segments = [_seg("answer", "body")]
+        assert build_complete_card(
+            segments=segments,
+            all_tool_steps=[],
+        ) == build_complete_card(
+            segments=segments,
+            all_tool_steps=[],
+            agent_status=None,
+        )
+
+    def test_agent_status_is_verbatim_between_body_and_run_details(self) -> None:
+        payload = (
+            "💾 Self-improvement review: **Memory**\n"
+            "- 中文与 English\n"
+            "> \"quoted\" `code` and a verbose notification body"
+        )
+        card = build_complete_card(
+            segments=[_seg("answer", "main body")],
+            all_tool_steps=[],
+            agent_status=payload,
+        )
+        elements = card["body"]["elements"]
+        body_index = next(i for i, element in enumerate(elements) if "main body" in str(element))
+        divider_index = next(
+            i
+            for i, element in enumerate(elements)
+            if element.get("element_id") == AGENT_STATUS_DIVIDER_ELEMENT_ID
+        )
+        status_index = next(
+            i
+            for i, element in enumerate(elements)
+            if element.get("element_id") == AGENT_STATUS_ELEMENT_ID
+        )
+        run_details_index = next(
+            i
+            for i, element in enumerate(elements)
+            if element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+        )
+
+        assert body_index < divider_index < status_index < run_details_index
+        assert elements[status_index]["content"] == payload
+        assert "Hermes Agent Status" not in str(elements)
+
     def test_empty_segments_and_skipped_reasoning(self) -> None:
         """空 segments 渲染 Done；空 reasoning 被跳过."""
         card = build_complete_card(segments=[], all_tool_steps=[])

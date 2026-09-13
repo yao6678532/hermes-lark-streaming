@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,6 +27,9 @@ STREAMING_ELEMENT_ID = "streaming_content"
 REASONING_ELEMENT_ID = "reasoning_content"
 REASONING_TEXT_ELEMENT_ID = "reasoning_text"
 TOOL_PANEL_ELEMENT_ID = "tool_panel"
+AGENT_STATUS_DIVIDER_ELEMENT_ID = "agent_status_divider"
+AGENT_STATUS_ELEMENT_ID = "agent_status_content"
+RUN_DETAILS_DIVIDER_ELEMENT_ID = "run_details_divider"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 _logger = logging.getLogger("hermes_lark_streaming.cardkit")
@@ -164,6 +168,51 @@ def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[
             else {}
         ),
     }
+
+
+def build_agent_status_elements(
+    text: str,
+    *,
+    text_size: str = "normal_v2",
+) -> list[dict[str, Any]]:
+    """Render Hermes' authoritative status verbatim, without adding a title."""
+    return [
+        {"tag": "hr", "element_id": AGENT_STATUS_DIVIDER_ELEMENT_ID},
+        {
+            "tag": "markdown",
+            "content": text,
+            "text_size": text_size,
+            "element_id": AGENT_STATUS_ELEMENT_ID,
+        },
+    ]
+
+
+def with_agent_status(
+    card: dict[str, Any],
+    text: str,
+    *,
+    text_size: str = "normal_v2",
+) -> dict[str, Any]:
+    """Return a full-card snapshot with exactly one latest status slot."""
+    updated = deepcopy(card)
+    body = updated.setdefault("body", {})
+    elements = body.setdefault("elements", [])
+    elements[:] = [
+        element
+        for element in elements
+        if element.get("element_id")
+        not in {AGENT_STATUS_DIVIDER_ELEMENT_ID, AGENT_STATUS_ELEMENT_ID}
+    ]
+    insertion = next(
+        (
+            index
+            for index, element in enumerate(elements)
+            if element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+        ),
+        len(elements),
+    )
+    elements[insertion:insertion] = build_agent_status_elements(text, text_size=text_size)
+    return updated
 
 
 def _build_tool_panel(
@@ -552,7 +601,7 @@ def _build_run_details_elements(
     )
     panel["margin"] = "-6px 0px 0px 0px"
     panel["padding"] = "6px 0px 0px 0px"
-    return [{"tag": "hr"}, panel]
+    return [{"tag": "hr", "element_id": RUN_DETAILS_DIVIDER_ELEMENT_ID}, panel]
 
 
 def _run_details_fields_are_default(fields: list[list[str]] | None) -> bool:
@@ -1158,7 +1207,7 @@ def _build_legacy_footer_elements(
         en_content = f"<font color='red'>{en_content}</font>"
         zh_content = f"<font color='red'>{zh_content}</font>"
     return [
-        {"tag": "hr"},
+        {"tag": "hr", "element_id": RUN_DETAILS_DIVIDER_ELEMENT_ID},
         {
             "tag": "markdown",
             "content": en_content,
@@ -1333,6 +1382,7 @@ def build_streaming_card_v2(
     text_size: str = "normal_v2",
     width_mode: str = "default",
     progress_snapshot: ProgressSnapshot | None = None,
+    agent_status: str | None = None,
 ) -> dict[str, Any]:
     """CardKit 2.0 流式占位卡片 — 内容后保留固定尾部 anchor."""
     elements: list[dict] = []
@@ -1357,6 +1407,8 @@ def build_streaming_card_v2(
 
     if show_streaming_element:
         elements.append(_streaming_element(text_size=text_size))
+    if agent_status:
+        elements.extend(build_agent_status_elements(agent_status, text_size=text_size))
     elements.append(_loading_element(progress_snapshot))
 
     card = {
@@ -1406,6 +1458,7 @@ def build_complete_card(
     width_mode: str = "default",
     merged_reasoning_text: str | None = None,
     merged_reasoning_elapsed_ms: float = 0,
+    agent_status: str | None = None,
 ) -> dict[str, Any]:
     """完成态流式卡片 — 按 segments 顺序渲染."""
     elements: list[dict] = []
@@ -1471,6 +1524,9 @@ def build_complete_card(
 
     if not has_answer and add_empty_answer_fallback:
         elements.append({"tag": "markdown", "content": _T["done"][0], "text_size": body_text_size})
+
+    if agent_status:
+        elements.extend(build_agent_status_elements(agent_status, text_size=body_text_size))
 
     if footer_enabled:
         elements.extend(
