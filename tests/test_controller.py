@@ -655,6 +655,26 @@ async def test_background_review_intentionally_targets_latest_card() -> None:
     assert latest.agent_status == "💾 review A finished"
 
 
+def test_delayed_card_creation_uses_session_time_and_cannot_reclaim_latest() -> None:
+    ctrl = _setup_ctrl()
+    loop = ctrl._loop
+    assert loop is not None
+    older = CardSession("older", "race-chat", loop)
+    newer = CardSession("newer", "race-chat", loop)
+    older.created_at = 10.0
+    newer.created_at = 20.0
+    newer.set_card(card_id="card-b", card_msg_id="message-b")
+    older.set_card(card_id="card-a", card_msg_id="message-a")
+
+    assert ctrl._register_latest_card(newer)
+    assert not ctrl._register_latest_card(older)
+
+    latest = ctrl._agent_status_manager.registry.get("feishu:race-chat")
+    assert latest is not None
+    assert latest.card_id == "card-b"
+    assert latest.active_session is newer
+
+
 @pytest.mark.asyncio
 async def test_background_review_replaces_latest_status_instead_of_appending() -> None:
     ctrl = _setup_ctrl()
@@ -684,6 +704,106 @@ async def test_background_review_replaces_latest_status_instead_of_appending() -
     assert str(ref.card_snapshot).count(AGENT_STATUS_ELEMENT_ID) == 1
     assert "first status" not in str(ref.card_snapshot)
     assert "second status" in str(ref.card_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_finalized_status_updates_continue_cardkit_sequence() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("sequence", "sequence-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="sequence-card", card_msg_id="sequence-message")
+    session.sequence = 7
+    session.segment_state.on_answer_delta("answer")
+
+    await ctrl._do_complete_card(session)
+    finalized = ctrl._agent_status_manager.registry.get("feishu:sequence-chat")
+    assert finalized is not None
+    assert finalized.sequence == 9
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("sequence-chat", "status one"),
+        chat_id="sequence-chat",
+    )
+    await ctrl._deliver_agent_status(
+        event=_status_event("sequence-chat", "status two"),
+        chat_id="sequence-chat",
+    )
+
+    sequences = [call.kwargs["sequence"] for call in ctrl._client.cardkit_batch_update.await_args_list]
+    assert sequences == [10, 11]
+    assert finalized.sequence == 11
+
+
+def test_late_status_delivery_survives_gateway_event_loop_replacement() -> None:
+    ctrl = _setup_ctrl()
+    loop_a = ctrl._loop
+    assert loop_a is not None
+    session = CardSession("loop", "loop-chat", loop_a)
+    _register_test_card(ctrl, session, card_id="loop-card", card_msg_id="loop-message")
+    session.state = SessionState.COMPLETED
+    ctrl._remember_finalized_card(
+        session,
+        build_complete_card(segments=[_answer_segment("answer")], all_tool_steps=[]),
+    )
+    loop_a.run_until_complete(
+        ctrl._deliver_agent_status(
+            event=_status_event("loop-chat", "status on loop A"),
+            chat_id="loop-chat",
+        )
+    )
+    loop_a.close()
+
+    loop_b = asyncio.new_event_loop()
+    try:
+        ctrl._loop = loop_b
+        loop_b.run_until_complete(
+            ctrl._deliver_agent_status(
+                event=_status_event("loop-chat", "status on loop B"),
+                chat_id="loop-chat",
+            )
+        )
+    finally:
+        loop_b.close()
+        asyncio.set_event_loop(None)
+
+    assert ctrl._client.cardkit_batch_update.await_count == 2
+    ctrl._client.send_text_to_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_split_moves_status_and_latest_registry_to_new_physical_card() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("split-status", "split-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="card-a1", card_msg_id="message-a1")
+    await ctrl._deliver_agent_status(
+        event=_status_event("split-chat", "status X"),
+        chat_id="split-chat",
+    )
+    ctrl._client.cardkit_create.return_value = "card-a2"
+    ctrl._client.reply_card_by_id.return_value = "message-a2"
+
+    assert await ctrl._do_split_card(session, 0, [], set(), {}, [])
+
+    created_card = ctrl._client.cardkit_create.await_args.args[0]
+    assert any(
+        element.get("element_id") == AGENT_STATUS_ELEMENT_ID
+        and element.get("content") == "status X"
+        for element in created_card["body"]["elements"]
+    )
+    latest = ctrl._agent_status_manager.registry.get("feishu:split-chat")
+    assert latest is not None
+    assert latest.card_id == "card-a2"
+    assert latest.active_session is session
+
+    old_card_updates = ctrl._client.cardkit_update.await_count
+    ctrl._client.cardkit_batch_update.reset_mock()
+    await ctrl._deliver_agent_status(
+        event=_status_event("split-chat", "status Y"),
+        chat_id="split-chat",
+    )
+
+    assert ctrl._client.cardkit_batch_update.await_args.args[0] == "card-a2"
+    assert ctrl._client.cardkit_update.await_count == old_card_updates
+    assert session.agent_status == "status Y"
 
 
 @pytest.mark.asyncio
@@ -3100,6 +3220,7 @@ class TestDoCompleteCard:
         session.interim_preview.replace("interim commentary")
         session.interim_preview.start_final()
         session.segment_state.on_answer_delta("true final answer")
+        session.agent_status = "💾 status included in the terminal element budget"
         session.footer = {"duration": 1.0}
         source_steps = session.tool_use.build_display_steps()
         ctrl._sessions[session.message_id] = session
@@ -3121,6 +3242,7 @@ class TestDoCompleteCard:
         assert f"{step_count} steps" in tool_panel["header"]["title"]["content"]
         assert estimate_cardkit_elements(card) <= ELEMENT_THRESHOLD
         assert "true final answer" in body_text
+        assert session.agent_status in body_text
         assert "interim commentary" not in body_text
         assert "Done" not in body_text
         assert _run_details_panel(card)

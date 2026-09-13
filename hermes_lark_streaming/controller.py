@@ -885,6 +885,7 @@ class StreamCardController(StreamingController):
                     session.element_count += 0 if previous_created else 2
                     ref.agent_status = event.text
                     ref.sequence = session.sequence
+                    self._agent_status_manager.registry.touch(ref)
                 else:
                     _logger.info(
                         "[AgentStatus] conversation=%s target=latest_finalized_card",
@@ -932,6 +933,7 @@ class StreamCardController(StreamingController):
                             text_size=self._cfg.body_text_size,
                         )
                     ref.agent_status = event.text
+                    self._agent_status_manager.registry.touch(ref)
                 _logger.info(
                     "[AgentStatus] conversation=%s source=%s delivery_result=card_update_succeeded",
                     event.conversation_key,
@@ -982,17 +984,26 @@ class StreamCardController(StreamingController):
     def _conversation_lock(self, session: CardSession) -> asyncio.Lock:
         return self._agent_status_manager.lock_for(conversation_key(session.chat_id))
 
-    def _register_latest_card(self, session: CardSession) -> None:
-        self._agent_status_manager.registry.set_active(
+    def _register_latest_card(self, session: CardSession) -> bool:
+        self._agent_status_manager.prune_stale()
+        accepted = self._agent_status_manager.registry.set_active(
             key=conversation_key(session.chat_id),
             chat_id=session.chat_id,
             message_id=session.card_msg_id,
             card_id=session.card_id,
-            created_at=time.time(),
+            created_at=session.created_at,
             active_session=session,
             sequence=session.sequence,
             agent_status=session.agent_status,
         )
+        if not accepted:
+            _logger.info(
+                "latest card registration rejected as stale: msg=%s chat=%s created_at=%.6f",
+                session.message_id[:12],
+                session.chat_id[:12],
+                session.created_at,
+            )
+        return accepted
 
     def _remember_finalized_card(self, session: CardSession, card: dict[str, Any]) -> None:
         self._agent_status_manager.registry.mark_finalized(
@@ -1007,6 +1018,11 @@ class StreamCardController(StreamingController):
         session = self._sessions.pop(message_id, None)
         if session is None:
             return
+        if isinstance(session, CardSession):
+            self._agent_status_manager.registry.detach_session(
+                key=conversation_key(session.chat_id),
+                active_session=session,
+            )
         anchor = getattr(session, "anchor_id", None)
         if anchor and self._sessions.get(anchor) is session:
             del self._sessions[anchor]
@@ -1024,6 +1040,10 @@ class StreamCardController(StreamingController):
             session.image_resolver.cancel_pending()
 
     def _cleanup_session(self, session: CardSession) -> None:
+        self._agent_status_manager.registry.detach_session(
+            key=conversation_key(session.chat_id),
+            active_session=session,
+        )
         if self._sessions.get(session.message_id) is session:
             self._sessions.pop(session.message_id, None)
         anchor = session.anchor_id
@@ -1191,6 +1211,7 @@ class StreamCardController(StreamingController):
         for mid in stale:
             _logger.warning("pruning stale session: msg=%s", mid[:12])
             self._cleanup(mid)
+        self._agent_status_manager.prune_stale()
 
     @staticmethod
     def _on_bg_task_done(fut: asyncio.Future[Any] | ConcurrentFuture) -> None:

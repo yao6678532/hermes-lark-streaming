@@ -730,6 +730,47 @@ def test_background_review_hook_captures_conversation_without_post_delivery_depe
     assert "_post_delivery_callbacks" not in generated
 
 
+@pytest.mark.parametrize("platform", ["feishu", "lark"])
+def test_background_review_hook_owns_only_feishu_runs(platform: str) -> None:
+    original_sender = MagicMock()
+    agent = SimpleNamespace(background_review_callback=original_sender)
+    ctx = SimpleNamespace(
+        source=SimpleNamespace(platform=SimpleNamespace(value=platform)),
+        _status_chat_id="chat-feishu",
+    )
+
+    with patch(
+        "hermes_lark_streaming.patch.on_background_review_message",
+        return_value=True,
+    ) as publish:
+        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx})
+        agent.background_review_callback("original payload")
+
+    publish.assert_called_once_with(
+        conversation_key="feishu:chat-feishu",
+        chat_id="chat-feishu",
+        text="original payload",
+    )
+    original_sender.assert_not_called()
+
+
+@pytest.mark.parametrize("platform", ["telegram", "discord", ""])
+def test_background_review_hook_preserves_non_feishu_sender_once(platform: str) -> None:
+    original_sender = MagicMock()
+    agent = SimpleNamespace(background_review_callback=original_sender)
+    ctx = SimpleNamespace(
+        source=SimpleNamespace(platform=SimpleNamespace(value=platform)),
+        _status_chat_id="foreign-chat",
+    )
+
+    with patch("hermes_lark_streaming.patch.on_background_review_message") as publish:
+        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx})
+        agent.background_review_callback("original payload")
+
+    publish.assert_not_called()
+    original_sender.assert_called_once_with("original payload")
+
+
 class TestGeneratedThinkingHook:
     def test_hook_forwards_classified_interim_commentary_metadata(self) -> None:
         callback = _build_thinking_hook_runner()

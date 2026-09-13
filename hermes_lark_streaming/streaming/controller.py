@@ -92,7 +92,7 @@ class StreamingController:
     _cleanup: Callable[[str], None]
     _cleanup_session: Callable[[CardSession], None]
     _conversation_lock: Callable[[CardSession], asyncio.Lock]
-    _register_latest_card: Callable[[CardSession], None]
+    _register_latest_card: Callable[[CardSession], bool]
     _remember_finalized_card: Callable[[CardSession, dict[str, Any]], None]
 
     def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
