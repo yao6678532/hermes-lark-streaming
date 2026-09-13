@@ -8,6 +8,7 @@ import threading
 import time
 from contextlib import nullcontext
 from contextvars import ContextVar
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -303,6 +304,66 @@ def test_enabled_uses_and_restores_profile_secret_scope(tmp_path, monkeypatch) -
     assert ctrl.enabled is True
     assert active_scope.get() is None
     assert scoped_homes == [profile_home]
+
+
+def _install_multiplex_secret_scope(
+    monkeypatch,
+    credentials_by_home: dict[Path, dict[str, str]],
+) -> tuple[ContextVar[dict[str, str] | None], list[Path]]:
+    secret_scope = ModuleType("agent.secret_scope")
+    active_scope: ContextVar[dict[str, str] | None] = ContextVar(
+        "profile_scoped_agent_status",
+        default=None,
+    )
+    scoped_homes: list[Path] = []
+    normalized = {home.resolve(): credentials for home, credentials in credentials_by_home.items()}
+
+    def build_profile_secret_scope(home) -> dict[str, str]:
+        resolved = Path(home).resolve()
+        scoped_homes.append(resolved)
+        return dict(normalized.get(resolved, {}))
+
+    def get_secret(name: str, default: str = "") -> str:
+        return (active_scope.get() or {}).get(name, default)
+
+    secret_scope.build_profile_secret_scope = build_profile_secret_scope
+    secret_scope.current_secret_scope = active_scope.get
+    secret_scope.get_secret = get_secret
+    secret_scope.is_multiplex_active = lambda: True
+    secret_scope.reset_secret_scope = active_scope.reset
+    secret_scope.set_secret_scope = active_scope.set
+    agent = ModuleType("agent")
+    agent.secret_scope = secret_scope
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.secret_scope", secret_scope)
+    return active_scope, scoped_homes
+
+
+def test_explicit_credential_scope_overrides_and_restores_inherited_profile(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    profile_a = tmp_path / "profile-a"
+    profile_b = tmp_path / "profile-b"
+    profile_a.mkdir()
+    profile_b.mkdir()
+    profile_a_scope = {"FEISHU_APP_ID": "profile-a-app"}
+    profile_b_scope = {"FEISHU_APP_ID": "profile-b-app"}
+    active_scope, scoped_homes = _install_multiplex_secret_scope(
+        monkeypatch,
+        {profile_a: profile_a_scope, profile_b: profile_b_scope},
+    )
+    ctrl = StreamCardController(tmp_path / "card-owner")
+    inherited_token = active_scope.set(profile_b_scope)
+    try:
+        with ctrl._credential_scope_for(profile_a):
+            assert active_scope.get() == profile_a_scope
+        assert active_scope.get() == profile_b_scope
+    finally:
+        active_scope.reset(inherited_token)
+
+    assert scoped_homes == [profile_a.resolve()]
+    assert active_scope.get() is None
 
 
 def _set_cached_loop(ctrl: StreamCardController) -> asyncio.AbstractEventLoop:
@@ -633,6 +694,214 @@ async def test_background_review_updates_finalized_card_after_session_cleanup() 
 
 
 @pytest.mark.asyncio
+async def test_late_background_review_restores_captured_profile_scope_and_original_registry(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    profile_home = tmp_path / "profile-a"
+    profile_home.mkdir()
+    active_scope, scoped_homes = _install_multiplex_secret_scope(
+        monkeypatch,
+        {
+            profile_home: {
+                "FEISHU_APP_ID": "profile-a-app",
+                "FEISHU_APP_SECRET": "profile-a-secret",
+            }
+        },
+    )
+    ctrl = StreamCardController(tmp_path / "card-owner")
+    ctrl._cfg._raw = {"streaming": {"enabled": True}}
+    ctrl._loop = asyncio.get_running_loop()
+    ctrl._initialized = True
+    ctrl._client = _mock_client()
+
+    main_scope = active_scope.set(
+        {
+            "FEISHU_APP_ID": "profile-a-app",
+            "FEISHU_APP_SECRET": "profile-a-secret",
+        }
+    )
+    try:
+        session = CardSession("late-profile", "chat-profile", asyncio.get_running_loop())
+        _register_test_card(ctrl, session, card_id="profile-card", card_msg_id="profile-message")
+        session.state = SessionState.COMPLETED
+        ctrl._remember_finalized_card(
+            session,
+            build_complete_card(segments=[_answer_segment("main response")], all_tool_steps=[]),
+        )
+        ctrl._cleanup_session(session)
+    finally:
+        active_scope.reset(main_scope)
+
+    assert active_scope.get() is None
+    payload = "💾 Self-improvement review: **记忆已更新**\nexact Hermes text"
+    original_sender = MagicMock()
+    delivered = asyncio.Event()
+    scoped_client = _mock_client()
+
+    async def update_with_profile_scope(*args, **kwargs) -> None:
+        del args, kwargs
+        assert active_scope.get() == {
+            "FEISHU_APP_ID": "profile-a-app",
+            "FEISHU_APP_SECRET": "profile-a-secret",
+        }
+        delivered.set()
+
+    scoped_client.cardkit_batch_update.side_effect = update_with_profile_scope
+    with (
+        patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+        patch("hermes_lark_streaming.controller.FeishuClient", return_value=scoped_client) as client_cls,
+    ):
+        owned = on_background_review_message(
+            conversation_key="feishu:chat-profile",
+            chat_id="chat-profile",
+            profile_home=profile_home,
+            text=payload,
+        )
+        if not owned:
+            original_sender(payload)
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+    assert owned
+    assert "late-profile" not in ctrl._sessions
+    original_sender.assert_not_called()
+    scoped_client.cardkit_batch_update.assert_awaited_once()
+    assert scoped_client.cardkit_batch_update.await_args.args[0] == "profile-card"
+    assert scoped_client.cardkit_batch_update.await_args.args[1][0]["params"]["elements"][1]["content"] == payload
+    scoped_client.send_text_to_chat.assert_not_awaited()
+    ctrl._client.cardkit_batch_update.assert_not_awaited()
+    assert client_cls.call_args.args[0].app_id == "profile-a-app"
+    assert client_cls.call_args.args[0].app_secret == "profile-a-secret"
+    assert scoped_homes == [profile_home.resolve(), profile_home.resolve()]
+    assert active_scope.get() is None
+
+
+@pytest.mark.asyncio
+async def test_late_background_review_card_failure_uses_profile_scoped_text_fallback_once(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    profile_home = tmp_path / "profile-a"
+    profile_home.mkdir()
+    active_scope, _scoped_homes = _install_multiplex_secret_scope(
+        monkeypatch,
+        {
+            profile_home: {
+                "FEISHU_APP_ID": "profile-a-app",
+                "FEISHU_APP_SECRET": "profile-a-secret",
+            }
+        },
+    )
+    ctrl = StreamCardController(tmp_path / "card-owner")
+    ctrl._cfg._raw = {"streaming": {"enabled": True}}
+    ctrl._loop = asyncio.get_running_loop()
+    session = CardSession("fallback-profile", "chat-fallback-profile", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="expired-card", card_msg_id="expired-message")
+    session.state = SessionState.COMPLETED
+    ctrl._remember_finalized_card(
+        session,
+        build_complete_card(segments=[_answer_segment("main response")], all_tool_steps=[]),
+    )
+    ctrl._cleanup_session(session)
+
+    payload = "💾 exact original fallback text"
+    original_sender = MagicMock()
+    fallback_delivered = asyncio.Event()
+    scoped_client = _mock_client()
+    scoped_client.cardkit_batch_update.side_effect = RuntimeError("card unavailable")
+
+    async def send_text_with_profile_scope(chat_id: str, text: str) -> str:
+        assert active_scope.get() == {
+            "FEISHU_APP_ID": "profile-a-app",
+            "FEISHU_APP_SECRET": "profile-a-secret",
+        }
+        assert (chat_id, text) == ("chat-fallback-profile", payload)
+        fallback_delivered.set()
+        return "fallback-message"
+
+    scoped_client.send_text_to_chat.side_effect = send_text_with_profile_scope
+    with (
+        patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+        patch("hermes_lark_streaming.controller.FeishuClient", return_value=scoped_client),
+    ):
+        owned = on_background_review_message(
+            conversation_key="feishu:chat-fallback-profile",
+            chat_id="chat-fallback-profile",
+            profile_home=profile_home,
+            text=payload,
+        )
+        if not owned:
+            original_sender(payload)
+        await asyncio.wait_for(fallback_delivered.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+    assert owned
+    original_sender.assert_not_called()
+    scoped_client.cardkit_batch_update.assert_awaited_once()
+    scoped_client.send_text_to_chat.assert_awaited_once_with("chat-fallback-profile", payload)
+    assert active_scope.get() is None
+
+
+@pytest.mark.asyncio
+async def test_late_background_review_keeps_card_owner_controller_instead_of_profile_controller(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    profile_home = tmp_path / "profile-a"
+    profile_home.mkdir()
+    _active_scope, _scoped_homes = _install_multiplex_secret_scope(
+        monkeypatch,
+        {
+            profile_home: {
+                "FEISHU_APP_ID": "profile-a-app",
+                "FEISHU_APP_SECRET": "profile-a-secret",
+            }
+        },
+    )
+    card_owner = StreamCardController(tmp_path / "card-owner")
+    card_owner._cfg._raw = {"streaming": {"enabled": True}}
+    card_owner._loop = asyncio.get_running_loop()
+    profile_controller = StreamCardController(profile_home)
+    assert profile_controller._agent_status_manager.registry.get("feishu:protected-chat") is None
+
+    session = CardSession("protected", "protected-chat", asyncio.get_running_loop())
+    _register_test_card(card_owner, session, card_id="owner-card", card_msg_id="owner-message")
+    session.state = SessionState.COMPLETED
+    card_owner._remember_finalized_card(
+        session,
+        build_complete_card(segments=[_answer_segment("owner response")], all_tool_steps=[]),
+    )
+    card_owner._cleanup_session(session)
+
+    delivered = asyncio.Event()
+    scoped_client = _mock_client()
+
+    async def mark_delivered(*args, **kwargs) -> None:
+        del args, kwargs
+        delivered.set()
+
+    scoped_client.cardkit_batch_update.side_effect = mark_delivered
+    with (
+        patch("hermes_lark_streaming.patch.get_controller", return_value=card_owner) as controller_getter,
+        patch("hermes_lark_streaming.controller.FeishuClient", return_value=scoped_client),
+    ):
+        assert on_background_review_message(
+            conversation_key="feishu:protected-chat",
+            chat_id="protected-chat",
+            profile_home=profile_home,
+            text="profile-scoped status",
+        )
+        await asyncio.wait_for(delivered.wait(), timeout=1)
+        await asyncio.sleep(0)
+
+    controller_getter.assert_called_once_with()
+    assert scoped_client.cardkit_batch_update.await_args.args[0] == "owner-card"
+    scoped_client.send_text_to_chat.assert_not_awaited()
+    assert profile_controller._agent_status_manager.registry.get("feishu:protected-chat") is None
+
+
+@pytest.mark.asyncio
 async def test_background_review_intentionally_targets_latest_card() -> None:
     ctrl = _setup_ctrl()
     old = CardSession("old", "same-chat", asyncio.get_running_loop())
@@ -898,6 +1167,7 @@ def test_background_review_compatibility_wrapper_no_longer_queues_sender() -> No
 def test_background_review_hook_needs_no_adapter_post_delivery_api() -> None:
     ctrl = _setup_ctrl()
     payload = "💾 unchanged"
+    profile_home = "/profiles/assistant"
 
     with (
         patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
@@ -906,6 +1176,7 @@ def test_background_review_hook_needs_no_adapter_post_delivery_api() -> None:
         assert on_background_review_message(
             conversation_key="feishu:chat",
             chat_id="chat",
+            profile_home=profile_home,
             text=payload,
         )
 
@@ -914,6 +1185,7 @@ def test_background_review_hook_needs_no_adapter_post_delivery_api() -> None:
         chat_id="chat",
         text=payload,
         source="background_review",
+        credential_profile_home=profile_home,
     )
 
 

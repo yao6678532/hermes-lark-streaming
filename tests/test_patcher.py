@@ -723,6 +723,8 @@ def test_background_review_hook_captures_conversation_without_post_delivery_depe
     generated = _background_review_hook("    ")
 
     assert "ctx._status_chat_id" in generated
+    assert "self._runner._resolve_profile_home_for_source(ctx.source)" in generated
+    assert "profile_home=_lark_bg_review_profile_home" in generated
     assert "conversation_key=_lark_bg_review_conversation_key" in generated
     assert "chat_id=_lark_bg_review_chat_id" in generated
     assert "message_id=" not in generated
@@ -734,6 +736,9 @@ def test_background_review_hook_captures_conversation_without_post_delivery_depe
 def test_background_review_hook_owns_only_feishu_runs(platform: str) -> None:
     original_sender = MagicMock()
     agent = SimpleNamespace(background_review_callback=original_sender)
+    profile_home = Path("/profiles/assistant")
+    runner = SimpleNamespace(_resolve_profile_home_for_source=MagicMock(return_value=profile_home))
+    turn_runner = SimpleNamespace(_runner=runner)
     ctx = SimpleNamespace(
         source=SimpleNamespace(platform=SimpleNamespace(value=platform)),
         _status_chat_id="chat-feishu",
@@ -743,12 +748,14 @@ def test_background_review_hook_owns_only_feishu_runs(platform: str) -> None:
         "hermes_lark_streaming.patch.on_background_review_message",
         return_value=True,
     ) as publish:
-        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx})
+        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx, "self": turn_runner})
         agent.background_review_callback("original payload")
 
+    runner._resolve_profile_home_for_source.assert_called_once_with(ctx.source)
     publish.assert_called_once_with(
         conversation_key="feishu:chat-feishu",
         chat_id="chat-feishu",
+        profile_home=profile_home,
         text="original payload",
     )
     original_sender.assert_not_called()
@@ -758,15 +765,18 @@ def test_background_review_hook_owns_only_feishu_runs(platform: str) -> None:
 def test_background_review_hook_preserves_non_feishu_sender_once(platform: str) -> None:
     original_sender = MagicMock()
     agent = SimpleNamespace(background_review_callback=original_sender)
+    runner = SimpleNamespace(_resolve_profile_home_for_source=MagicMock())
+    turn_runner = SimpleNamespace(_runner=runner)
     ctx = SimpleNamespace(
         source=SimpleNamespace(platform=SimpleNamespace(value=platform)),
         _status_chat_id="foreign-chat",
     )
 
     with patch("hermes_lark_streaming.patch.on_background_review_message") as publish:
-        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx})
+        exec(_background_review_hook(""), {"agent": agent, "ctx": ctx, "self": turn_runner})
         agent.background_review_callback("original payload")
 
+    runner._resolve_profile_home_for_source.assert_not_called()
     publish.assert_not_called()
     original_sender.assert_called_once_with("original payload")
 

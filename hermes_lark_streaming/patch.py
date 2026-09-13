@@ -13,6 +13,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from functools import wraps
 from inspect import iscoroutinefunction
+from pathlib import Path
 from typing import Any
 
 from .controller import get_controller
@@ -627,19 +628,19 @@ def on_background_review_message(
     *,
     conversation_key: str,
     chat_id: str,
+    profile_home: Path | str | None = None,
     text: str,
 ) -> bool:
-    """[注入点 7] publish an asynchronous background-review status."""
+    """[注入点 7] publish a late review using its captured profile scope."""
     try:
         ctrl = get_controller()
-        if not ctrl.enabled:
-            return False
         return bool(
             ctrl.publish_agent_status(
                 conversation_key=conversation_key,
                 chat_id=chat_id,
                 text=text,
                 source="background_review",
+                credential_profile_home=profile_home,
             )
         )
     except Exception as exc:

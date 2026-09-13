@@ -228,6 +228,18 @@ class StreamCardController(StreamingController):
 
     @contextmanager
     def _credential_scope(self) -> Iterator[None]:
+        with self._credential_scope_for(None):
+            yield
+
+    @contextmanager
+    def _credential_scope_for(self, profile_home: Path | str | None) -> Iterator[None]:
+        """Activate credentials for an explicitly captured assistant profile.
+
+        Normal streaming keeps the existing fallback behavior: it only installs
+        the controller profile when multiplexing is active and no scope already
+        exists.  A late background event carries an explicit profile identity,
+        which is authoritative even if its worker inherited another scope.
+        """
         try:
             from agent.secret_scope import (  # type: ignore[import-not-found]
                 build_profile_secret_scope,
@@ -239,14 +251,48 @@ class StreamCardController(StreamingController):
         except ImportError:
             yield
             return
-        if not is_multiplex_active() or current_secret_scope() is not None:
+        if not is_multiplex_active():
             yield
             return
-        token = set_secret_scope(build_profile_secret_scope(self._profile_home))
+        if profile_home is None and current_secret_scope() is not None:
+            yield
+            return
+        scope_home = Path(profile_home).resolve() if profile_home is not None else self._profile_home
+        token = set_secret_scope(build_profile_secret_scope(scope_home))
         try:
             yield
         finally:
             reset_secret_scope(token)
+
+    def agent_status_enabled_for(self, profile_home: Path | str | None) -> bool:
+        """Check late-status eligibility under its captured credential scope."""
+        with self._credential_scope_for(profile_home):
+            return self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+
+    async def _agent_status_client_for(self, profile_home: Path | str | None) -> FeishuClient:
+        """Return transport credentials without changing status-state ownership.
+
+        Explicit late deliveries use a short-lived client.  The card-owner
+        controller may already cache a client created under another effective
+        profile, so reusing it would risk pinning the wrong bot credentials.
+        The registry and sequence state remain on this controller.
+        """
+        if profile_home is None:
+            await self._ensure_init()
+            assert self._client is not None
+            return self._client
+
+        app_id = self._cfg.feishu_app_id or self._cfg.env_app_id
+        app_secret = self._cfg.feishu_app_secret or self._cfg.env_app_secret
+        if not app_id or not app_secret:
+            raise RuntimeError("feishu credentials not configured")
+        return FeishuClient(
+            FeishuClientConfig(
+                app_id=app_id,
+                app_secret=app_secret,
+                base_url=self._cfg.feishu_base_url,
+            )
+        )
 
     async def _ensure_init(self) -> None:
         if self._initialized:
@@ -794,9 +840,15 @@ class StreamCardController(StreamingController):
         chat_id: str,
         text: str,
         source: str = "background_review",
+        credential_profile_home: Path | str | None = None,
     ) -> bool:
         """Schedule a conversation-scoped status independently of a Hermes run."""
-        if not self.enabled or not conversation_key or not chat_id or not text:
+        if (
+            not conversation_key
+            or not chat_id
+            or not text
+            or not self.agent_status_enabled_for(credential_profile_home)
+        ):
             return False
         event = AgentStatusEvent(
             conversation_key=conversation_key,
@@ -805,12 +857,17 @@ class StreamCardController(StreamingController):
             source=source,
         )
         _logger.info(
-            "[AgentStatus] received conversation=%s source=%s payload_length=%d",
+            "[AgentStatus] received conversation=%s source=%s profile_scope=%s payload_length=%d",
             conversation_key,
             source,
+            "captured" if credential_profile_home is not None else "controller",
             len(text),
         )
-        coroutine = self._deliver_agent_status(event=event, chat_id=chat_id)
+        coroutine = self._deliver_agent_status(
+            event=event,
+            chat_id=chat_id,
+            credential_profile_home=credential_profile_home,
+        )
         loop = self._get_loop()
         if loop is None:
             try:
@@ -842,127 +899,128 @@ class StreamCardController(StreamingController):
         *,
         event: AgentStatusEvent,
         chat_id: str,
+        credential_profile_home: Path | str | None = None,
     ) -> None:
         """Update the latest card, falling back to a run-independent text send."""
-        await self._ensure_init()
-        assert self._client is not None
-        lock = self._agent_status_manager.lock_for(event.conversation_key)
-        async with lock:
-            ref = self._agent_status_manager.registry.get(event.conversation_key)
-            try:
-                if ref is None or not ref.card_id:
-                    raise LookupError("latest card unavailable")
+        with self._credential_scope_for(credential_profile_home):
+            client = await self._agent_status_client_for(credential_profile_home)
+            lock = self._agent_status_manager.lock_for(event.conversation_key)
+            async with lock:
+                ref = self._agent_status_manager.registry.get(event.conversation_key)
+                try:
+                    if ref is None or not ref.card_id:
+                        raise LookupError("latest card unavailable")
 
-                session = ref.active_session
-                if isinstance(session, CardSession) and not session.state.is_terminal:
-                    _logger.info(
-                        "[AgentStatus] conversation=%s target=active_card",
-                        event.conversation_key,
-                    )
-                    previous_text = session.agent_status
-                    previous_created = session.agent_status_created
-                    session.agent_status = event.text
-                    action = (
-                        build_agent_status_update_action(event.text)
-                        if previous_created
-                        else build_add_agent_status_action(
-                            event.text,
-                            text_size=self._cfg.body_text_size,
+                    session = ref.active_session
+                    if isinstance(session, CardSession) and not session.state.is_terminal:
+                        _logger.info(
+                            "[AgentStatus] conversation=%s target=active_card",
+                            event.conversation_key,
                         )
-                    )
-                    try:
-                        session.sequence += 1
-                        await self._client.cardkit_batch_update(
-                            ref.card_id,
-                            [action],
-                            sequence=session.sequence,
+                        previous_text = session.agent_status
+                        previous_created = session.agent_status_created
+                        session.agent_status = event.text
+                        action = (
+                            build_agent_status_update_action(event.text)
+                            if previous_created
+                            else build_add_agent_status_action(
+                                event.text,
+                                text_size=self._cfg.body_text_size,
+                            )
                         )
-                    except Exception:
-                        session.agent_status = previous_text
-                        session.agent_status_created = previous_created
-                        raise
-                    session.agent_status_created = True
-                    session.element_count += 0 if previous_created else 2
-                    ref.agent_status = event.text
-                    ref.sequence = session.sequence
-                    self._agent_status_manager.registry.touch(ref)
-                else:
-                    _logger.info(
-                        "[AgentStatus] conversation=%s target=latest_finalized_card",
-                        event.conversation_key,
-                    )
-                    ref.sequence += 1
-                    if ref.agent_status:
-                        await self._client.cardkit_batch_update(
-                            ref.card_id,
-                            [build_agent_status_update_action(event.text)],
-                            sequence=ref.sequence,
-                        )
-                    elif ref.card_snapshot and any(
-                        element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
-                        for element in ref.card_snapshot.get("body", {}).get("elements", [])
-                    ):
-                        await self._client.cardkit_batch_update(
-                            ref.card_id,
-                            [
-                                build_add_agent_status_action(
-                                    event.text,
-                                    text_size=self._cfg.body_text_size,
-                                    target_element_id=RUN_DETAILS_DIVIDER_ELEMENT_ID,
-                                )
-                            ],
-                            sequence=ref.sequence,
-                        )
-                    elif ref.card_snapshot:
-                        updated = with_agent_status(
-                            ref.card_snapshot,
-                            event.text,
-                            text_size=self._cfg.body_text_size,
-                        )
-                        await self._client.cardkit_update(
-                            ref.card_id,
-                            updated,
-                            sequence=ref.sequence,
-                        )
+                        try:
+                            session.sequence += 1
+                            await client.cardkit_batch_update(
+                                ref.card_id,
+                                [action],
+                                sequence=session.sequence,
+                            )
+                        except Exception:
+                            session.agent_status = previous_text
+                            session.agent_status_created = previous_created
+                            raise
+                        session.agent_status_created = True
+                        session.element_count += 0 if previous_created else 2
+                        ref.agent_status = event.text
+                        ref.sequence = session.sequence
+                        self._agent_status_manager.registry.touch(ref)
                     else:
-                        raise LookupError("final card snapshot unavailable")
-                    if ref.card_snapshot:
-                        ref.card_snapshot = with_agent_status(
-                            ref.card_snapshot,
-                            event.text,
-                            text_size=self._cfg.body_text_size,
+                        _logger.info(
+                            "[AgentStatus] conversation=%s target=latest_finalized_card",
+                            event.conversation_key,
                         )
-                    ref.agent_status = event.text
-                    self._agent_status_manager.registry.touch(ref)
-                _logger.info(
-                    "[AgentStatus] conversation=%s source=%s delivery_result=card_update_succeeded",
-                    event.conversation_key,
-                    event.source,
-                )
-                return
-            except Exception:
-                _logger.warning(
-                    "[AgentStatus] conversation=%s source=%s delivery_result=card_update_failed "
-                    "fallback=feishu_message",
-                    event.conversation_key,
-                    event.source,
-                    exc_info=True,
-                )
+                        ref.sequence += 1
+                        if ref.agent_status:
+                            await client.cardkit_batch_update(
+                                ref.card_id,
+                                [build_agent_status_update_action(event.text)],
+                                sequence=ref.sequence,
+                            )
+                        elif ref.card_snapshot and any(
+                            element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+                            for element in ref.card_snapshot.get("body", {}).get("elements", [])
+                        ):
+                            await client.cardkit_batch_update(
+                                ref.card_id,
+                                [
+                                    build_add_agent_status_action(
+                                        event.text,
+                                        text_size=self._cfg.body_text_size,
+                                        target_element_id=RUN_DETAILS_DIVIDER_ELEMENT_ID,
+                                    )
+                                ],
+                                sequence=ref.sequence,
+                            )
+                        elif ref.card_snapshot:
+                            updated = with_agent_status(
+                                ref.card_snapshot,
+                                event.text,
+                                text_size=self._cfg.body_text_size,
+                            )
+                            await client.cardkit_update(
+                                ref.card_id,
+                                updated,
+                                sequence=ref.sequence,
+                            )
+                        else:
+                            raise LookupError("final card snapshot unavailable")
+                        if ref.card_snapshot:
+                            ref.card_snapshot = with_agent_status(
+                                ref.card_snapshot,
+                                event.text,
+                                text_size=self._cfg.body_text_size,
+                            )
+                        ref.agent_status = event.text
+                        self._agent_status_manager.registry.touch(ref)
+                    _logger.info(
+                        "[AgentStatus] conversation=%s source=%s delivery_result=card_update_succeeded",
+                        event.conversation_key,
+                        event.source,
+                    )
+                    return
+                except Exception:
+                    _logger.warning(
+                        "[AgentStatus] conversation=%s source=%s delivery_result=card_update_failed "
+                        "fallback=feishu_message",
+                        event.conversation_key,
+                        event.source,
+                        exc_info=True,
+                    )
 
-            try:
-                await self._client.send_text_to_chat(chat_id, event.text)
-                _logger.info(
-                    "[AgentStatus] conversation=%s source=%s delivery_result=fallback_delivered",
-                    event.conversation_key,
-                    event.source,
-                )
-            except Exception:
-                _logger.warning(
-                    "[AgentStatus] conversation=%s source=%s delivery_result=fallback_failed",
-                    event.conversation_key,
-                    event.source,
-                    exc_info=True,
-                )
+                try:
+                    await client.send_text_to_chat(chat_id, event.text)
+                    _logger.info(
+                        "[AgentStatus] conversation=%s source=%s delivery_result=fallback_delivered",
+                        event.conversation_key,
+                        event.source,
+                    )
+                except Exception:
+                    _logger.warning(
+                        "[AgentStatus] conversation=%s source=%s delivery_result=fallback_failed",
+                        event.conversation_key,
+                        event.source,
+                        exc_info=True,
+                    )
 
     def defer_background_review(
         self,
