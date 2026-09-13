@@ -29,8 +29,10 @@ from hermes_lark_streaming.cardkit.builder import (
     _format_tool_elapsed,
     _longest_backtick_run,
     _run_details_metric_color,
+    build_agent_status_elements,
     build_complete_card,
     build_streaming_card_v2,
+    with_agent_status,
 )
 from hermes_lark_streaming.cardkit.interaction_builder import build_approval_card, build_clarify_card
 from hermes_lark_streaming.cardkit.markdown import (
@@ -1519,6 +1521,17 @@ class TestBuildStreamingCardV2:
         card = build_streaming_card_v2(width_mode="compact")
         assert card["config"]["width_mode"] == "compact"
 
+    def test_agent_status_uses_notation_independent_of_body_text_size(self) -> None:
+        card = build_streaming_card_v2(text_size="normal_v2", agent_status="💾 test")
+        elements = card["body"]["elements"]
+
+        body = next(element for element in elements if element.get("element_id") == "streaming_content")
+        status = next(element for element in elements if element.get("element_id") == AGENT_STATUS_ELEMENT_ID)
+
+        assert body["text_size"] == "normal_v2"
+        assert status["text_size"] == "notation"
+
+
 
 # --- 分段完成态卡片 ---
 
@@ -1581,7 +1594,38 @@ class TestBuildSegmentCompleteCard:
 
         assert body_index < divider_index < status_index < run_details_index
         assert elements[status_index]["content"] == payload
+        assert elements[status_index]["text_size"] == "notation"
+        body = elements[body_index]
+        assert body["text_size"] == "normal_v2"
         assert "Hermes Agent Status" not in str(elements)
+
+    def test_agent_status_helper_defaults_to_notation(self) -> None:
+        status = build_agent_status_elements("💾 test")[1]
+
+        assert status["text_size"] == "notation"
+
+    def test_with_agent_status_uses_notation_and_preserves_order(self) -> None:
+        card = {
+            "body": {
+                "elements": [
+                    {"tag": "markdown", "content": "body", "text_size": "normal_v2"},
+                    {"tag": "hr", "element_id": RUN_DETAILS_DIVIDER_ELEMENT_ID},
+                ]
+            }
+        }
+
+        updated = with_agent_status(card, "💾 test")
+        elements = updated["body"]["elements"]
+        status_index = next(
+            i for i, element in enumerate(elements) if element.get("element_id") == AGENT_STATUS_ELEMENT_ID
+        )
+        run_details_index = next(
+            i for i, element in enumerate(elements) if element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+        )
+
+        assert elements[0]["text_size"] == "normal_v2"
+        assert status_index < run_details_index
+        assert elements[status_index]["text_size"] == "notation"
 
     def test_empty_segments_and_skipped_reasoning(self) -> None:
         """空 segments 渲染 Done；空 reasoning 被跳过."""

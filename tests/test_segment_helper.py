@@ -6,6 +6,7 @@ from hermes_lark_streaming.cardkit.builder import _LOADING_ELEMENT_ID
 from hermes_lark_streaming.streaming.segment_helper import (
     ELEMENT_THRESHOLD,
     FOOTER_RESERVE,
+    build_add_agent_status_action,
     build_add_merged_reasoning_action,
     build_add_segment_action,
     estimate_segment_elements,
@@ -120,3 +121,10 @@ def test_merged_reasoning_always_inserts_before_loading_anchor() -> None:
     action = build_add_merged_reasoning_action()
 
     assert action["params"]["target_element_id"] == _LOADING_ELEMENT_ID
+
+
+def test_agent_status_add_action_defaults_to_notation() -> None:
+    action = build_add_agent_status_action("💾 test")
+    status = action["params"]["elements"][1]
+
+    assert status["text_size"] == "notation"

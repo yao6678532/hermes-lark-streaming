@@ -690,7 +690,24 @@ async def test_background_review_updates_finalized_card_after_session_cleanup() 
     card_id, actions = ctrl._client.cardkit_batch_update.await_args.args
     assert card_id == "card-late"
     assert actions[0]["params"]["elements"][1]["content"] == payload
+    assert actions[0]["params"]["elements"][1]["text_size"] == "notation"
     ctrl._client.send_text_to_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_background_review_adds_notation_status_to_active_card() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("active", "chat-active", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="active-card", card_msg_id="active-message")
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("chat-active", "💾 active status"),
+        chat_id="chat-active",
+    )
+
+    action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
+    status = action["params"]["elements"][1]
+    assert status["text_size"] == "notation"
 
 
 @pytest.mark.asyncio

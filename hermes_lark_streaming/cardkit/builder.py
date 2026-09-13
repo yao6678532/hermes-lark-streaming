@@ -30,6 +30,7 @@ TOOL_PANEL_ELEMENT_ID = "tool_panel"
 AGENT_STATUS_DIVIDER_ELEMENT_ID = "agent_status_divider"
 AGENT_STATUS_ELEMENT_ID = "agent_status_content"
 RUN_DETAILS_DIVIDER_ELEMENT_ID = "run_details_divider"
+AGENT_STATUS_TEXT_SIZE = "notation"
 _LOADING_ELEMENT_ID = "loading_icon"
 _LOADING_IMG_KEY = "img_v3_02vb_496bec09-4b43-4773-ad6b-0cdd103cd2bg"
 _logger = logging.getLogger("hermes_lark_streaming.cardkit")
@@ -173,7 +174,7 @@ def _loading_element(progress_snapshot: ProgressSnapshot | None = None) -> dict[
 def build_agent_status_elements(
     text: str,
     *,
-    text_size: str = "normal_v2",
+    text_size: str = AGENT_STATUS_TEXT_SIZE,
 ) -> list[dict[str, Any]]:
     """Render Hermes' authoritative status verbatim, without adding a title."""
     return [
@@ -191,7 +192,7 @@ def with_agent_status(
     card: dict[str, Any],
     text: str,
     *,
-    text_size: str = "normal_v2",
+    text_size: str = AGENT_STATUS_TEXT_SIZE,
 ) -> dict[str, Any]:
     """Return a full-card snapshot with exactly one latest status slot."""
     updated = deepcopy(card)
@@ -1408,7 +1409,7 @@ def build_streaming_card_v2(
     if show_streaming_element:
         elements.append(_streaming_element(text_size=text_size))
     if agent_status:
-        elements.extend(build_agent_status_elements(agent_status, text_size=text_size))
+        elements.extend(build_agent_status_elements(agent_status))
     elements.append(_loading_element(progress_snapshot))
 
     card = {
@@ -1526,7 +1527,7 @@ def build_complete_card(
         elements.append({"tag": "markdown", "content": _T["done"][0], "text_size": body_text_size})
 
     if agent_status:
-        elements.extend(build_agent_status_elements(agent_status, text_size=body_text_size))
+        elements.extend(build_agent_status_elements(agent_status))
 
     if footer_enabled:
         elements.extend(

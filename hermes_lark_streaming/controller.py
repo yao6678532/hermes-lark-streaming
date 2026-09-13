@@ -925,7 +925,6 @@ class StreamCardController(StreamingController):
                             if previous_created
                             else build_add_agent_status_action(
                                 event.text,
-                                text_size=self._cfg.body_text_size,
                             )
                         )
                         try:
@@ -965,7 +964,6 @@ class StreamCardController(StreamingController):
                                 [
                                     build_add_agent_status_action(
                                         event.text,
-                                        text_size=self._cfg.body_text_size,
                                         target_element_id=RUN_DETAILS_DIVIDER_ELEMENT_ID,
                                     )
                                 ],
@@ -975,7 +973,6 @@ class StreamCardController(StreamingController):
                             updated = with_agent_status(
                                 ref.card_snapshot,
                                 event.text,
-                                text_size=self._cfg.body_text_size,
                             )
                             await client.cardkit_update(
                                 ref.card_id,
@@ -988,7 +985,6 @@ class StreamCardController(StreamingController):
                             ref.card_snapshot = with_agent_status(
                                 ref.card_snapshot,
                                 event.text,
-                                text_size=self._cfg.body_text_size,
                             )
                         ref.agent_status = event.text
                         self._agent_status_manager.registry.touch(ref)

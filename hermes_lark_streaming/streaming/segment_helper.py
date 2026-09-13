@@ -8,6 +8,7 @@ from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
     AGENT_STATUS_DIVIDER_ELEMENT_ID,
     AGENT_STATUS_ELEMENT_ID,
+    AGENT_STATUS_TEXT_SIZE,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
@@ -255,7 +256,7 @@ def build_add_interim_preview_action(
 def build_add_agent_status_action(
     text: str,
     *,
-    text_size: str = "normal_v2",
+    text_size: str = AGENT_STATUS_TEXT_SIZE,
     target_element_id: str = _LOADING_ELEMENT_ID,
 ) -> dict[str, Any]:
     """Insert the optional status slot immediately before the fixed tail."""
