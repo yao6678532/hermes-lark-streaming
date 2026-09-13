@@ -32,6 +32,7 @@ from hermes_lark_streaming.patcher import (
     PatcherError,
     _answer_hook,
     _approval_ui_hook,
+    _background_review_hook,
     _complete_hook,
     _cron_deliver_hook,
     _followup_complete_hook,
@@ -716,6 +717,17 @@ async def test_generated_progress_hook_suppresses_only_when_card_owns_heartbeat(
 
     with patch("hermes_lark_streaming.patch.on_long_running_progress", return_value=False):
         assert await notify("message", 3) == "hermes-text"
+
+
+def test_background_review_hook_captures_conversation_without_post_delivery_dependency() -> None:
+    generated = _background_review_hook("    ")
+
+    assert "ctx._status_chat_id" in generated
+    assert "conversation_key=_lark_bg_review_conversation_key" in generated
+    assert "chat_id=_lark_bg_review_chat_id" in generated
+    assert "message_id=" not in generated
+    assert "register_post_delivery_callback" not in generated
+    assert "_post_delivery_callbacks" not in generated
 
 
 class TestGeneratedThinkingHook:

@@ -14,20 +14,25 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import hermes_lark_streaming.controller as controller_module
+from hermes_lark_streaming.agent_status import AgentStatusEvent, conversation_key
 from hermes_lark_streaming.cardkit.builder import (
     _LOADING_ELEMENT_ID,
+    AGENT_STATUS_DIVIDER_ELEMENT_ID,
+    AGENT_STATUS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
+    RUN_DETAILS_DIVIDER_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
     TOOL_PANEL_ELEMENT_ID,
+    build_complete_card,
     estimate_cardkit_elements,
 )
 from hermes_lark_streaming.controller import StreamCardController, get_controller
 from hermes_lark_streaming.feishu import FeishuAPIError, FeishuClient
-from hermes_lark_streaming.patch import on_reasoning_delta
+from hermes_lark_streaming.patch import on_background_review_message, on_reasoning_delta
 from hermes_lark_streaming.streaming.presentation import project_tool_panel
 from hermes_lark_streaming.streaming.segment_helper import ELEMENT_THRESHOLD, FOOTER_RESERVE, estimate_segment_elements
-from hermes_lark_streaming.streaming.segments import Segment, SegmentState
+from hermes_lark_streaming.streaming.segments import Segment, SegmentState, SegmentType
 from hermes_lark_streaming.streaming.session import CardSession, SessionState
 
 _COMMENTARY_STAGE_1 = "第 1 阶段\uFF1A读取项目配置\uFF0C确认项目版本。"
@@ -574,86 +579,222 @@ def test_prune_stale_sessions_ignores_none_key_and_prunes_valid_key() -> None:
     assert valid_stale_session.flush.completed
 
 
-@pytest.mark.asyncio
-async def test_background_review_deferred_until_complete() -> None:
-    ctrl = _setup_ctrl()
-    session = _make_session("msg_bg")
+def _register_test_card(
+    ctrl: StreamCardController,
+    session: CardSession,
+    *,
+    card_id: str,
+    card_msg_id: str,
+) -> None:
+    session.card_id = card_id
+    session.card_msg_id = card_msg_id
     session.state = SessionState.STREAMING
-    session.card_msg_id = "card_msg"
-    ctrl._sessions["msg_bg"] = session
-    sent: list[str] = []
-
-    assert ctrl.defer_background_review(message_id="msg_bg", text="review", sender=sent.append)
-    assert sent == []
-
-    with patch.object(ctrl, "_do_complete_card_inner", new_callable=AsyncMock, return_value=True):
-        await ctrl._do_complete_card(session)
-
-    assert sent == ["review"]
-    assert "msg_bg" not in ctrl._sessions
+    ctrl._sessions[session.message_id] = session
+    ctrl._register_latest_card(session)
 
 
-@pytest.mark.asyncio
-async def test_background_review_does_not_interrupt_replacement_card() -> None:
-    ctrl = _setup_ctrl()
-    old_session = CardSession("old", "chat", asyncio.get_running_loop())
-    old_session.state = SessionState.STREAMING
-    old_session.card_id = "old-card"
-    old_session.card_msg_id = "old-card-message"
-    ctrl._sessions["old"] = old_session
-    events: list[str] = []
-    tasks: list[asyncio.Task[object]] = []
-
-    assert ctrl.defer_background_review(
-        message_id="old",
-        text="review",
-        sender=lambda _text: events.append("review_sent"),
+def _status_event(chat_id: str, text: str) -> AgentStatusEvent:
+    return AgentStatusEvent.background_review(
+        conversation_key=conversation_key(chat_id),
+        text=text,
     )
 
-    async def complete_card(_session: CardSession) -> bool:
-        events.append("old_card_completed")
-        return True
 
-    def schedule(coro: object, _loop: asyncio.AbstractEventLoop) -> asyncio.Task[object]:
-        task = asyncio.create_task(coro)  # type: ignore[arg-type]
-        tasks.append(task)
-        return task
+def _answer_segment(text: str) -> Segment:
+    segment = Segment(SegmentType.ANSWER, "answer_test")
+    segment.text = text
+    segment.created = True
+    segment.dirty = False
+    return segment
+
+
+@pytest.mark.asyncio
+async def test_background_review_updates_finalized_card_after_session_cleanup() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("origin", "chat-late", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="card-late", card_msg_id="message-late")
+    final_card = build_complete_card(
+        segments=[_answer_segment("main response")],
+        all_tool_steps=[],
+    )
+    session.state = SessionState.COMPLETED
+    ctrl._remember_finalized_card(session, final_card)
+    ctrl._cleanup_session(session)
+
+    payload = "💾 Self-improvement review: **记忆已更新**\n\"quoted\" and English"
+    await ctrl._deliver_agent_status(event=_status_event("chat-late", payload), chat_id="chat-late")
+
+    assert "origin" not in ctrl._sessions
+    ctrl._client.cardkit_batch_update.assert_awaited_once()
+    card_id, actions = ctrl._client.cardkit_batch_update.await_args.args
+    assert card_id == "card-late"
+    assert actions[0]["params"]["elements"][1]["content"] == payload
+    ctrl._client.send_text_to_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_background_review_intentionally_targets_latest_card() -> None:
+    ctrl = _setup_ctrl()
+    old = CardSession("old", "same-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, old, card_id="card-a", card_msg_id="message-a")
+    old.state = SessionState.COMPLETED
+    ctrl._remember_finalized_card(
+        old,
+        build_complete_card(segments=[_answer_segment("answer A")], all_tool_steps=[]),
+    )
+    ctrl._cleanup_session(old)
+
+    latest = CardSession("new", "same-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, latest, card_id="card-b", card_msg_id="message-b")
+    await ctrl._deliver_agent_status(
+        event=_status_event("same-chat", "💾 review A finished"),
+        chat_id="same-chat",
+    )
+
+    assert ctrl._client.cardkit_batch_update.await_args.args[0] == "card-b"
+    assert latest.agent_status == "💾 review A finished"
+
+
+@pytest.mark.asyncio
+async def test_background_review_replaces_latest_status_instead_of_appending() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("replace", "replace-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="replace-card", card_msg_id="replace-message")
+    session.state = SessionState.COMPLETED
+    ctrl._remember_finalized_card(
+        session,
+        build_complete_card(segments=[_answer_segment("answer")], all_tool_steps=[]),
+    )
+    ctrl._cleanup_session(session)
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("replace-chat", "first status"),
+        chat_id="replace-chat",
+    )
+    await ctrl._deliver_agent_status(
+        event=_status_event("replace-chat", "second status"),
+        chat_id="replace-chat",
+    )
+
+    second_action = ctrl._client.cardkit_batch_update.await_args.args[1][0]
+    assert second_action["action"] == "partial_update_element"
+    assert second_action["params"]["partial_element"]["content"] == "second status"
+    ref = ctrl._agent_status_manager.registry.get("feishu:replace-chat")
+    assert ref is not None
+    assert str(ref.card_snapshot).count(AGENT_STATUS_ELEMENT_ID) == 1
+    assert "first status" not in str(ref.card_snapshot)
+    assert "second status" in str(ref.card_snapshot)
+
+
+@pytest.mark.asyncio
+async def test_background_review_survives_streaming_and_finalization() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("streaming", "chat-stream", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="card-stream", card_msg_id="message-stream")
+
+    payload = "💾 latest status"
+    await ctrl._deliver_agent_status(event=_status_event("chat-stream", payload), chat_id="chat-stream")
+    session.segment_state.on_answer_delta("body after status")
+    await ctrl._do_flush(session)
+    await ctrl._do_complete_card(session)
+
+    stream_actions = ctrl._client.cardkit_batch_update.await_args_list[1].args[1]
+    assert stream_actions[0]["params"]["target_element_id"] == AGENT_STATUS_DIVIDER_ELEMENT_ID
+    final_card = ctrl._client.cardkit_update.await_args.args[1]
+    elements = final_card["body"]["elements"]
+    body_index = next(i for i, element in enumerate(elements) if "body after status" in str(element))
+    status_index = next(i for i, element in enumerate(elements) if element.get("element_id") == AGENT_STATUS_ELEMENT_ID)
+    run_details_index = next(
+        i
+        for i, element in enumerate(elements)
+        if element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+    )
+    assert body_index < status_index < run_details_index
+    assert elements[status_index]["content"] == payload
+
+
+@pytest.mark.asyncio
+async def test_background_review_isolated_by_conversation() -> None:
+    ctrl = _setup_ctrl()
+    chat_a = CardSession("a", "chat-a", asyncio.get_running_loop())
+    chat_b = CardSession("b", "chat-b", asyncio.get_running_loop())
+    _register_test_card(ctrl, chat_a, card_id="card-a", card_msg_id="message-a")
+    _register_test_card(ctrl, chat_b, card_id="card-b", card_msg_id="message-b")
+
+    await ctrl._deliver_agent_status(event=_status_event("chat-a", "status A"), chat_id="chat-a")
+
+    assert ctrl._client.cardkit_batch_update.await_args.args[0] == "card-a"
+    assert chat_a.agent_status == "status A"
+    assert chat_b.agent_status is None
+
+
+@pytest.mark.asyncio
+async def test_background_review_card_failure_sends_one_stateless_fallback() -> None:
+    ctrl = _setup_ctrl()
+    session = CardSession("failure", "chat-failure", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="bad-card", card_msg_id="bad-message")
+    ctrl._client.cardkit_batch_update.side_effect = RuntimeError("expired")
+    payload = "💾 exact fallback payload"
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("chat-failure", payload),
+        chat_id="chat-failure",
+    )
+
+    ctrl._client.send_text_to_chat.assert_awaited_once_with("chat-failure", payload)
+    assert session.agent_status is None
+
+
+@pytest.mark.asyncio
+async def test_background_review_without_card_or_active_run_uses_fallback() -> None:
+    ctrl = _setup_ctrl()
+    payload = "💾 run is no longer active"
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("inactive-chat", payload),
+        chat_id="inactive-chat",
+    )
+
+    ctrl._client.send_text_to_chat.assert_awaited_once_with("inactive-chat", payload)
+
+
+def test_background_review_compatibility_wrapper_no_longer_queues_sender() -> None:
+    ctrl = _setup_ctrl()
+    session = _make_session("compat")
+    ctrl._sessions["compat"] = session
+    sender = MagicMock()
+
+    with patch.object(ctrl, "publish_agent_status", return_value=True) as publish:
+        assert ctrl.defer_background_review(message_id="compat", text="review", sender=sender)
+
+    publish.assert_called_once_with(
+        conversation_key="feishu:chat_456",
+        chat_id="chat_456",
+        text="review",
+    )
+    sender.assert_not_called()
+
+
+def test_background_review_hook_needs_no_adapter_post_delivery_api() -> None:
+    ctrl = _setup_ctrl()
+    payload = "💾 unchanged"
 
     with (
-        patch.object(ctrl, "_do_complete_card_inner", side_effect=complete_card),
-        patch.object(ctrl, "_do_create_card", new_callable=AsyncMock),
-        patch.object(ctrl, "_fire_and_forget", side_effect=schedule),
+        patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl),
+        patch.object(ctrl, "publish_agent_status", return_value=True) as publish,
     ):
-        ctrl.on_interrupted(
-            old_message_id="old",
-            new_message_id="new",
+        assert on_background_review_message(
+            conversation_key="feishu:chat",
             chat_id="chat",
+            text=payload,
         )
-        await asyncio.gather(*tasks)
 
-    assert events == ["old_card_completed", "review_sent"]
-    assert "old" not in ctrl._sessions
-    assert ctrl._sessions["new"].deferred_background_reviews == []
-
-
-def test_background_review_without_active_session_not_deferred() -> None:
-    ctrl = _setup_ctrl()
-    sent: list[str] = []
-
-    assert not ctrl.defer_background_review(message_id="missing", text="review", sender=sent.append)
-    assert sent == []
-
-
-def test_background_review_after_flush_not_deferred() -> None:
-    ctrl = _setup_ctrl()
-    session = _make_session("msg_bg")
-    ctrl._sessions["msg_bg"] = session
-    sent: list[str] = []
-
-    ctrl._flush_deferred_background_reviews(session)
-
-    assert not ctrl.defer_background_review(message_id="msg_bg", text="review", sender=sent.append)
-    assert sent == []
+    publish.assert_called_once_with(
+        conversation_key="feishu:chat",
+        chat_id="chat",
+        text=payload,
+        source="background_review",
+    )
 
 
 # ── 辅助函数 ──
