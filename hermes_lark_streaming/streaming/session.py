@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
 from concurrent.futures import Future as ConcurrentFuture
 from enum import StrEnum
-from threading import Lock
 from typing import TYPE_CHECKING, Any
 
 from .flush import CARDKIT_MS, FlushController
@@ -45,15 +43,14 @@ class CardSession:
 
     __slots__ = (
         "_loop",
+        "agent_status",
+        "agent_status_created",
         "anchor_id",
         "card_id",
         "card_msg_id",
         "chat_id",
         "create_task",
         "created_at",
-        "deferred_background_review_closed",
-        "deferred_background_review_lock",
-        "deferred_background_reviews",
         "element_count",
         "flush",
         "footer",
@@ -94,9 +91,8 @@ class CardSession:
         self.sequence = 1
         self._loop = loop
         self.created_at = time.time()
-        self.deferred_background_review_closed = False
-        self.deferred_background_reviews: list[tuple[str, Callable[[str], Any]]] = []
-        self.deferred_background_review_lock = Lock()
+        self.agent_status: str | None = None
+        self.agent_status_created = False
 
         self.guard = UnavailableGuard(
             reply_to_message_id=message_id,

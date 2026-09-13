@@ -6,6 +6,8 @@ from typing import Any
 
 from ..cardkit.builder import (
     _LOADING_ELEMENT_ID,
+    AGENT_STATUS_DIVIDER_ELEMENT_ID,
+    AGENT_STATUS_ELEMENT_ID,
     REASONING_ELEMENT_ID,
     REASONING_TEXT_ELEMENT_ID,
     STREAMING_ELEMENT_ID,
@@ -14,6 +16,7 @@ from ..cardkit.builder import (
     _build_tool_panel,
     _format_elapsed,
     _streaming_element,
+    build_agent_status_elements,
 )
 from ..cardkit.i18n import _T, _i18n
 from .progress import ProgressSnapshot
@@ -141,6 +144,7 @@ def build_add_segment_action(
     text_size: str = "normal_v2",
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
+    target_element_id: str = _LOADING_ELEMENT_ID,
 ) -> dict[str, Any]:
     """构造新增 segment 元素的 batch action."""
     if seg.type == SegmentType.REASONING:
@@ -169,7 +173,7 @@ def build_add_segment_action(
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": target_element_id,
             "elements": [element],
         },
     }
@@ -183,13 +187,14 @@ def build_add_tool_panel_action(
     expanded: bool = True,
     show_tool_detail: bool = True,
     tool_detail_mode: str = "full",
+    target_element_id: str = _LOADING_ELEMENT_ID,
 ) -> dict[str, Any]:
     """Create the one fixed tool panel for the current physical card."""
     return {
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": target_element_id,
             "elements": [
                 _build_tool_panel(
                     steps,
@@ -205,13 +210,15 @@ def build_add_tool_panel_action(
     }
 
 
-def build_add_merged_reasoning_action() -> dict[str, Any]:
+def build_add_merged_reasoning_action(
+    *, target_element_id: str = _LOADING_ELEMENT_ID,
+) -> dict[str, Any]:
     """Create the one fixed reasoning panel used by merged presentation mode."""
     return {
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": target_element_id,
             "elements": [
                 _build_reasoning_panel(
                     " ",
@@ -224,13 +231,17 @@ def build_add_merged_reasoning_action() -> dict[str, Any]:
     }
 
 
-def build_add_interim_preview_action(*, text_size: str = "normal_v2") -> dict[str, Any]:
+def build_add_interim_preview_action(
+    *,
+    text_size: str = "normal_v2",
+    target_element_id: str = _LOADING_ELEMENT_ID,
+) -> dict[str, Any]:
     """Create the fixed, lazy commentary preview element before the loader."""
     return {
         "action": "add_elements",
         "params": {
             "type": "insert_before",
-            "target_element_id": _LOADING_ELEMENT_ID,
+            "target_element_id": target_element_id,
             "elements": [
                 _streaming_element(
                     element_id=STREAMING_ELEMENT_ID,
@@ -239,6 +250,39 @@ def build_add_interim_preview_action(*, text_size: str = "normal_v2") -> dict[st
             ],
         },
     }
+
+
+def build_add_agent_status_action(
+    text: str,
+    *,
+    text_size: str = "normal_v2",
+    target_element_id: str = _LOADING_ELEMENT_ID,
+) -> dict[str, Any]:
+    """Insert the optional status slot immediately before the fixed tail."""
+    return {
+        "action": "add_elements",
+        "params": {
+            "type": "insert_before",
+            "target_element_id": target_element_id,
+            "elements": build_agent_status_elements(text, text_size=text_size),
+        },
+    }
+
+
+def build_agent_status_update_action(text: str) -> dict[str, Any]:
+    """Replace only the status payload, preserving every other card element."""
+    return {
+        "action": "partial_update_element",
+        "params": {
+            "element_id": AGENT_STATUS_ELEMENT_ID,
+            "partial_element": {"content": text},
+        },
+    }
+
+
+def content_tail_element_id(*, agent_status_created: bool) -> str:
+    """Return the insertion anchor that keeps status after streamed content."""
+    return AGENT_STATUS_DIVIDER_ELEMENT_ID if agent_status_created else _LOADING_ELEMENT_ID
 
 
 def build_reasoning_finalized_action(seg: Segment) -> dict[str, Any]:

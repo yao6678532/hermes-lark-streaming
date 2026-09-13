@@ -623,17 +623,28 @@ def on_long_running_progress(
     )
 
 
-@_safe_hook(default_return=False, log_level="debug")
 def on_background_review_message(
     *,
-    ctrl: Any,
-    message_id: str,
+    conversation_key: str,
+    chat_id: str,
     text: str,
-    sender: Callable[[str], Any],
 ) -> bool:
-    """[注入点 7] background_review_callback — background.review."""
-    deferred: bool = ctrl.defer_background_review(message_id=message_id, text=text, sender=sender)
-    return deferred
+    """[注入点 7] publish an asynchronous background-review status."""
+    try:
+        ctrl = get_controller()
+        if not ctrl.enabled:
+            return False
+        return bool(
+            ctrl.publish_agent_status(
+                conversation_key=conversation_key,
+                chat_id=chat_id,
+                text=text,
+                source="background_review",
+            )
+        )
+    except Exception as exc:
+        _logger.debug("on_background_review_message error: %s", exc, exc_info=True)
+        return False
 
 
 @_safe_hook()

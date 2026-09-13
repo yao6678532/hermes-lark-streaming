@@ -46,6 +46,7 @@ from .segment_helper import (
     build_progress_update_action,
     build_reasoning_finalized_action,
     build_tool_update_action,
+    content_tail_element_id,
     estimate_segment_elements,
     estimate_tool_elements,
     find_tool_split_offset,
@@ -90,7 +91,9 @@ class StreamingController:
     _ensure_init: Callable[..., Coroutine[Any, Any, None]]
     _cleanup: Callable[[str], None]
     _cleanup_session: Callable[[CardSession], None]
-    _flush_deferred_background_reviews: Callable[[CardSession], None]
+    _conversation_lock: Callable[[CardSession], asyncio.Lock]
+    _register_latest_card: Callable[[CardSession], None]
+    _remember_finalized_card: Callable[[CardSession, dict[str, Any]], None]
 
     def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
@@ -251,7 +254,11 @@ class StreamingController:
                 await self._client.cardkit_batch_update(
                     session.card_id,
                     [
-                        build_add_merged_reasoning_action()
+                        build_add_merged_reasoning_action(
+                            target_element_id=content_tail_element_id(
+                                agent_status_created=session.agent_status_created
+                            )
+                        )
                     ],
                     sequence=session.sequence,
                 )
@@ -318,6 +325,9 @@ class StreamingController:
                     [
                         build_add_interim_preview_action(
                             text_size=self._cfg.body_text_size,
+                            target_element_id=content_tail_element_id(
+                                agent_status_created=session.agent_status_created
+                            ),
                         )
                     ],
                     sequence=session.sequence,
@@ -490,6 +500,8 @@ class StreamingController:
                         card={"type": "card", "data": {"card_id": card_id}},
                     )
             session.set_card(card_id=card_id, card_msg_id=card_msg_id)
+            async with self._conversation_lock(session):
+                self._register_latest_card(session)
             session.element_count = 1
             if progress_snapshot is not None and progress_snapshot.visible:
                 session.progress.mark_rendered(progress_snapshot.revision)
@@ -528,6 +540,10 @@ class StreamingController:
             session.mark_failed()
 
     async def _do_flush(self, session: CardSession) -> None:
+        async with self._conversation_lock(session):
+            await self._do_flush_inner(session)
+
+    async def _do_flush_inner(self, session: CardSession) -> None:
         """幂等 flush：按 segment 顺序处理结构性变更，超阈值时拆卡."""
         if session.state.is_terminal or not session.card_id:
             return
@@ -701,7 +717,7 @@ class StreamingController:
                             tool_panel_snapshot = None
                             new_el_total = 0
                             tool_panel_seen = False
-                            return await self._do_flush(session)
+                            return await self._do_flush_inner(session)
                         actions = []
                         new_el_ids = set()
                         new_el_estimates = {}
@@ -728,6 +744,9 @@ class StreamingController:
                                 expanded=self._tool_panel_expanded(session),
                                 show_tool_detail=presentation.show_tool_detail,
                                 tool_detail_mode=presentation.tool_detail_mode,
+                                target_element_id=content_tail_element_id(
+                                    agent_status_created=session.agent_status_created
+                                ),
                             )
                         )
                     tool_panel_segments = [
@@ -789,6 +808,9 @@ class StreamingController:
                         text_size=self._cfg.body_text_size,
                         show_tool_detail=show_tool_detail,
                         tool_detail_mode=tool_detail_mode,
+                        target_element_id=content_tail_element_id(
+                            agent_status_created=session.agent_status_created
+                        ),
                     )
                 )
             elif seg.type == SegmentType.REASONING and seg.elapsed_ms > 0 and not seg.reasoning_finalized:
@@ -1108,6 +1130,9 @@ class StreamingController:
                 expanded=self._tool_panel_expanded(session),
                 show_tool_detail=panel_presentation.show_tool_detail,
                 tool_detail_mode=panel_presentation.tool_detail_mode,
+                target_element_id=content_tail_element_id(
+                    agent_status_created=session.agent_status_created
+                ),
             )
         )
         actions.append(panel_action)
@@ -1247,6 +1272,7 @@ class StreamingController:
                 text_size=self._cfg.body_text_size,
                 width_mode=self._cfg.width_mode,
                 progress_snapshot=progress_snapshot,
+                agent_status=session.agent_status,
             )
             new_card_id = await self._client.cardkit_create(card)
             new_msg_id = await self._client.reply_card_by_id(session.anchor_id or session.message_id, new_card_id)
@@ -1272,10 +1298,12 @@ class StreamingController:
             )
 
         session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
-        session.element_count = 1
+        session.agent_status_created = bool(session.agent_status)
+        session.element_count = 1 + (2 if session.agent_status_created else 0)
+        session.sequence = 1
+        self._register_latest_card(session)
         if progress_snapshot is not None and progress_snapshot.visible:
             session.progress.mark_rendered(progress_snapshot.revision)
-        session.sequence = 1
         session.split_disabled = False
         session.split_index = split_idx
         for seg in segments[split_idx:]:
@@ -1305,6 +1333,9 @@ class StreamingController:
                     expanded=self._tool_panel_expanded(session),
                     show_tool_detail=next_presentation.show_tool_detail,
                     tool_detail_mode=next_presentation.tool_detail_mode,
+                    target_element_id=content_tail_element_id(
+                        agent_status_created=session.agent_status_created
+                    ),
                 )
             ]
             if not await self._do_batch_update(
@@ -1345,20 +1376,19 @@ class StreamingController:
 
     async def _do_complete_card(self, session: CardSession) -> bool:
         """完成流式卡片：close streaming + 全量重建卡片（保持 segments 顺序）."""
-        try:
-            return await self._do_complete_card_inner(session)
-        finally:
-            self._flush_deferred_background_reviews(session)
-            self._cleanup_session(session)
-
-    async def _do_complete_card_inner(self, session: CardSession) -> bool:
-        if session.guard.should_skip("_do_complete_card"):
-            return False
-
         session.progress.clear()
         self._start_final(session, source="terminal")
         await session.flush.wait_for_flush()
         session.flush.mark_completed()
+        async with self._conversation_lock(session):
+            try:
+                return await self._do_complete_card_inner(session)
+            finally:
+                self._cleanup_session(session)
+
+    async def _do_complete_card_inner(self, session: CardSession) -> bool:
+        if session.guard.should_skip("_do_complete_card"):
+            return False
 
         segment_state = session.segment_state
         is_error = session.state == SessionState.FAILED
@@ -1400,6 +1430,7 @@ class StreamingController:
                 final_view.reasoning_text if self._cfg.reasoning_mode == "merged" else None
             ),
             merged_reasoning_elapsed_ms=final_view.reasoning_elapsed_ms,
+            agent_status=session.agent_status,
         )
         terminal_non_tool_estimate = estimate_cardkit_elements(terminal_non_tool_card)
         final_tool_snapshot = project_tool_panel(
@@ -1443,6 +1474,7 @@ class StreamingController:
                 else None
             ),
             merged_reasoning_elapsed_ms=final_view.reasoning_elapsed_ms,
+            agent_status=session.agent_status,
         )
 
         streaming_closed = False
@@ -1464,6 +1496,7 @@ class StreamingController:
                         sequence=session.sequence,
                     )
                 session.state = SessionState.COMPLETED
+                self._remember_finalized_card(session, card)
                 return True
             except FeishuAPIError as e:
                 _logger.warning(

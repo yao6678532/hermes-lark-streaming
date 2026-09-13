@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .agent_status import AgentStatusEvent, AgentStatusManager, conversation_key
+from .cardkit.builder import RUN_DETAILS_DIVIDER_ELEMENT_ID, with_agent_status
 from .config import Config, hermes_home
 from .feishu import (
     FeishuClient,
@@ -25,6 +27,10 @@ from .interactions.clarify import (
 from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
 from .quota import _quota_color
 from .streaming.controller import StreamingController
+from .streaming.segment_helper import (
+    build_add_agent_status_action,
+    build_agent_status_update_action,
+)
 from .streaming.segments import SegmentType
 from .streaming.session import CardSession, SessionState
 from .streaming.text import strip_reasoning_tags
@@ -187,6 +193,7 @@ class StreamCardController(StreamingController):
         self._unscoped_enabled: bool | None = None
         self._clarify_registry = ClarifyCardRegistry()
         self._approval_registry = ApprovalCardRegistry()
+        self._agent_status_manager = AgentStatusManager()
 
     @property
     def enabled(self) -> bool:
@@ -780,39 +787,221 @@ class StreamCardController(StreamingController):
             _logger.warning("background card delivery failed", exc_info=True)
             return False
 
+    def publish_agent_status(
+        self,
+        *,
+        conversation_key: str,
+        chat_id: str,
+        text: str,
+        source: str = "background_review",
+    ) -> bool:
+        """Schedule a conversation-scoped status independently of a Hermes run."""
+        if not self.enabled or not conversation_key or not chat_id or not text:
+            return False
+        event = AgentStatusEvent(
+            conversation_key=conversation_key,
+            text=text,
+            created_at=time.time(),
+            source=source,
+        )
+        _logger.info(
+            "[AgentStatus] received conversation=%s source=%s payload_length=%d",
+            conversation_key,
+            source,
+            len(text),
+        )
+        coroutine = self._deliver_agent_status(event=event, chat_id=chat_id)
+        loop = self._get_loop()
+        if loop is None:
+            try:
+                asyncio.run(coroutine)
+                return True
+            except Exception:
+                coroutine.close()
+                _logger.warning("[AgentStatus] scheduling failed", exc_info=True)
+                return False
+        try:
+            try:
+                running_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                running_loop = None
+            if running_loop is loop:
+                task = loop.create_task(coroutine)
+                task.add_done_callback(self._on_bg_task_done)
+            else:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+                future.add_done_callback(self._on_bg_task_done)
+            return True
+        except Exception:
+            coroutine.close()
+            _logger.warning("[AgentStatus] scheduling failed", exc_info=True)
+            return False
+
+    async def _deliver_agent_status(
+        self,
+        *,
+        event: AgentStatusEvent,
+        chat_id: str,
+    ) -> None:
+        """Update the latest card, falling back to a run-independent text send."""
+        await self._ensure_init()
+        assert self._client is not None
+        lock = self._agent_status_manager.lock_for(event.conversation_key)
+        async with lock:
+            ref = self._agent_status_manager.registry.get(event.conversation_key)
+            try:
+                if ref is None or not ref.card_id:
+                    raise LookupError("latest card unavailable")
+
+                session = ref.active_session
+                if isinstance(session, CardSession) and not session.state.is_terminal:
+                    _logger.info(
+                        "[AgentStatus] conversation=%s target=active_card",
+                        event.conversation_key,
+                    )
+                    previous_text = session.agent_status
+                    previous_created = session.agent_status_created
+                    session.agent_status = event.text
+                    action = (
+                        build_agent_status_update_action(event.text)
+                        if previous_created
+                        else build_add_agent_status_action(
+                            event.text,
+                            text_size=self._cfg.body_text_size,
+                        )
+                    )
+                    try:
+                        session.sequence += 1
+                        await self._client.cardkit_batch_update(
+                            ref.card_id,
+                            [action],
+                            sequence=session.sequence,
+                        )
+                    except Exception:
+                        session.agent_status = previous_text
+                        session.agent_status_created = previous_created
+                        raise
+                    session.agent_status_created = True
+                    session.element_count += 0 if previous_created else 2
+                    ref.agent_status = event.text
+                    ref.sequence = session.sequence
+                else:
+                    _logger.info(
+                        "[AgentStatus] conversation=%s target=latest_finalized_card",
+                        event.conversation_key,
+                    )
+                    ref.sequence += 1
+                    if ref.agent_status:
+                        await self._client.cardkit_batch_update(
+                            ref.card_id,
+                            [build_agent_status_update_action(event.text)],
+                            sequence=ref.sequence,
+                        )
+                    elif ref.card_snapshot and any(
+                        element.get("element_id") == RUN_DETAILS_DIVIDER_ELEMENT_ID
+                        for element in ref.card_snapshot.get("body", {}).get("elements", [])
+                    ):
+                        await self._client.cardkit_batch_update(
+                            ref.card_id,
+                            [
+                                build_add_agent_status_action(
+                                    event.text,
+                                    text_size=self._cfg.body_text_size,
+                                    target_element_id=RUN_DETAILS_DIVIDER_ELEMENT_ID,
+                                )
+                            ],
+                            sequence=ref.sequence,
+                        )
+                    elif ref.card_snapshot:
+                        updated = with_agent_status(
+                            ref.card_snapshot,
+                            event.text,
+                            text_size=self._cfg.body_text_size,
+                        )
+                        await self._client.cardkit_update(
+                            ref.card_id,
+                            updated,
+                            sequence=ref.sequence,
+                        )
+                    else:
+                        raise LookupError("final card snapshot unavailable")
+                    if ref.card_snapshot:
+                        ref.card_snapshot = with_agent_status(
+                            ref.card_snapshot,
+                            event.text,
+                            text_size=self._cfg.body_text_size,
+                        )
+                    ref.agent_status = event.text
+                _logger.info(
+                    "[AgentStatus] conversation=%s source=%s delivery_result=card_update_succeeded",
+                    event.conversation_key,
+                    event.source,
+                )
+                return
+            except Exception:
+                _logger.warning(
+                    "[AgentStatus] conversation=%s source=%s delivery_result=card_update_failed "
+                    "fallback=feishu_message",
+                    event.conversation_key,
+                    event.source,
+                    exc_info=True,
+                )
+
+            try:
+                await self._client.send_text_to_chat(chat_id, event.text)
+                _logger.info(
+                    "[AgentStatus] conversation=%s source=%s delivery_result=fallback_delivered",
+                    event.conversation_key,
+                    event.source,
+                )
+            except Exception:
+                _logger.warning(
+                    "[AgentStatus] conversation=%s source=%s delivery_result=fallback_failed",
+                    event.conversation_key,
+                    event.source,
+                    exc_info=True,
+                )
+
     def defer_background_review(
         self,
         *,
         message_id: str,
         text: str,
-        sender: Callable[[str], Any],
+        sender: Callable[[str], Any] | None = None,
     ) -> bool:
-        """暂存 Hermes background review 通知，等卡片收尾后再发送."""
-        if not self.enabled or not text or not callable(sender):
-            return False
+        """Compatibility wrapper for the retired session-bound review queue."""
         session = self._get_active_session(message_id)
         if session is None:
             return False
-        with session.deferred_background_review_lock:
-            if session.deferred_background_review_closed:
-                return False
-            session.deferred_background_reviews.append((text, sender))
-        return True
+        return self.publish_agent_status(
+            conversation_key=conversation_key(session.chat_id),
+            chat_id=session.chat_id,
+            text=text,
+        )
 
-    def _flush_deferred_background_reviews(self, session: CardSession) -> None:
-        lock = getattr(session, "deferred_background_review_lock", None)
-        reviews = getattr(session, "deferred_background_reviews", None)
-        if lock is None or reviews is None:
-            return
-        with lock:
-            session.deferred_background_review_closed = True
-            pending = list(reviews)
-            reviews.clear()
-        for text, sender in pending:
-            try:
-                sender(text)
-            except Exception:
-                _logger.debug("background review sender failed", exc_info=True)
+    def _conversation_lock(self, session: CardSession) -> asyncio.Lock:
+        return self._agent_status_manager.lock_for(conversation_key(session.chat_id))
+
+    def _register_latest_card(self, session: CardSession) -> None:
+        self._agent_status_manager.registry.set_active(
+            key=conversation_key(session.chat_id),
+            chat_id=session.chat_id,
+            message_id=session.card_msg_id,
+            card_id=session.card_id,
+            created_at=time.time(),
+            active_session=session,
+            sequence=session.sequence,
+            agent_status=session.agent_status,
+        )
+
+    def _remember_finalized_card(self, session: CardSession, card: dict[str, Any]) -> None:
+        self._agent_status_manager.registry.mark_finalized(
+            key=conversation_key(session.chat_id),
+            active_session=session,
+            card_snapshot=card,
+            sequence=session.sequence,
+            agent_status=session.agent_status,
+        )
 
     def _cleanup(self, message_id: str) -> None:
         session = self._sessions.pop(message_id, None)
