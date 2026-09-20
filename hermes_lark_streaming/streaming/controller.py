@@ -1512,49 +1512,54 @@ class StreamingController:
             except Exception:
                 _logger.debug("clarify_split: final flush failed", exc_info=True)
 
-            # 先建新卡后封旧卡（与拆卡一致）：建卡失败时旧卡未 close，可降级继续流式。
-            new_card = await self._create_streaming_card(session)
-            if new_card is None:
-                _logger.warning(
-                    "clarify_split: create new card failed, continuing on current card, msg=%s",
-                    session.message_id[:12],
+            # final flush 自己会获取 conversation lock，所以必须在锁外完成。真正的物理卡
+            # ownership handoff（create → switch → registry → seal/reset）则和 Agent Status
+            # 共用同一把 conversation lock。这样新卡构建时读取到的 status snapshot 与
+            # handoff 时的 authoritative session.agent_status 必然一致。
+            async with self._conversation_lock(session):
+                # 先建新卡后封旧卡（与拆卡一致）：建卡失败时旧卡未 close，可降级继续流式。
+                new_card = await self._create_streaming_card(session)
+                if new_card is None:
+                    _logger.warning(
+                        "clarify_split: create new card failed, continuing on current card, msg=%s",
+                        session.message_id[:12],
+                    )
+                    return False
+
+                # 先切到新卡再封旧卡：任意时刻被取消（超时兜底）时，session 指向的都是
+                # 未 close 的卡，后续 flush 不会写到已关闭的旧卡。
+                # seal 必须显式传旧 card_id + 旧 sequence（session 已切新卡，
+                # 且 CardKit sequence 要求单调递增，不能用新卡的计数）。
+                old_card_id = session.card_id
+                old_seq = session.sequence
+                new_card_id, new_msg_id = new_card
+                session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
+                session.sequence = 1  # 新卡从 1 重新计数
+                session.agent_status_created = bool(session.agent_status)
+                progress_snapshot = (
+                    session.progress.snapshot()
+                    if self._cfg.progress_mode == "card"
+                    else None
                 )
-                return False
+                self._register_latest_card(session)
+                if progress_snapshot is not None and progress_snapshot.visible:
+                    session.progress.mark_rendered(progress_snapshot.revision)
 
-            # 先切到新卡再封旧卡：任意时刻被取消（超时兜底）时，session 指向的都是
-            # 未 close 的卡，后续 flush 不会写到已关闭的旧卡。
-            # seal 必须显式传旧 card_id + 旧 sequence（session 已切新卡，
-            # 且 CardKit sequence 要求单调递增，不能用新卡的计数）。
-            old_card_id = session.card_id
-            old_seq = session.sequence
-            new_card_id, new_msg_id = new_card
-            session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
-            session.sequence = 1  # 新卡从 1 重新计数
-            session.agent_status_created = bool(session.agent_status)
-            progress_snapshot = (
-                session.progress.snapshot()
-                if self._cfg.progress_mode == "card"
-                else None
-            )
-            self._register_latest_card(session)
-            if progress_snapshot is not None and progress_snapshot.visible:
-                session.progress.mark_rendered(progress_snapshot.revision)
+                await self._seal_current_card(
+                    session,
+                    session.active_segments(),
+                    card_id=old_card_id,
+                    sequence=old_seq,
+                )
 
-            await self._seal_current_card(
-                session,
-                session.active_segments(),
-                card_id=old_card_id,
-                sequence=old_seq,
-            )
-
-            # 重置内容，新卡承载 clarify 后的输出
-            session.segment_state = SegmentState()
-            session.split_index = 0
-            session.element_count = 1 + (2 if session.agent_status_created else 0)
-            session.tool_use = ToolUseTracker()
-            session.tool_panel.reset_render_state(dirty=False)
-            session.interim_preview.reset_render_state()
-            session.merged_reasoning.reset_render_state()
+                # 重置内容，新卡承载 clarify 后的输出
+                session.segment_state = SegmentState()
+                session.split_index = 0
+                session.element_count = 1 + (2 if session.agent_status_created else 0)
+                session.tool_use = ToolUseTracker()
+                session.tool_panel.reset_render_state(dirty=False)
+                session.interim_preview.reset_render_state()
+                session.merged_reasoning.reset_render_state()
 
             _logger.info(
                 "clarify_split: sealed old + new card msg=%s card=%s",

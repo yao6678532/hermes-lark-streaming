@@ -1260,6 +1260,125 @@ async def test_clarify_split_seals_old_and_creates_new() -> None:
 
 
 @pytest.mark.asyncio
+async def test_clarify_split_carries_existing_agent_status_to_new_card() -> None:
+    """Status 先完成时，clarify 新卡直接携带完全相同的 status slot。"""
+    ctrl = _setup_ctrl()
+    session = CardSession("clarify-status-first", "clarify-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="card-a", card_msg_id="message-a")
+    session.anchor_id = "anchor-message"
+    session.flush.set_card_message_ready(True)
+    payload = "💾 Self-improvement review:\n- updated **memory**"
+
+    await ctrl._deliver_agent_status(
+        event=_status_event("clarify-chat", payload),
+        chat_id="clarify-chat",
+    )
+    ctrl._client.cardkit_create.return_value = "card-b"
+    ctrl._client.reply_card_by_id.return_value = "message-b"
+
+    async def fake_flush(_session) -> None:
+        pass
+
+    with patch.object(ctrl, "_do_flush", side_effect=fake_flush):
+        assert await ctrl._do_clarify_split(session)
+
+    created_card = ctrl._client.cardkit_create.await_args.args[0]
+    status_elements = {
+        element.get("element_id"): element
+        for element in created_card["body"]["elements"]
+        if element.get("element_id")
+        in {AGENT_STATUS_DIVIDER_ELEMENT_ID, AGENT_STATUS_ELEMENT_ID}
+    }
+    assert set(status_elements) == {
+        AGENT_STATUS_DIVIDER_ELEMENT_ID,
+        AGENT_STATUS_ELEMENT_ID,
+    }
+    assert status_elements[AGENT_STATUS_ELEMENT_ID]["content"] == payload
+    assert status_elements[AGENT_STATUS_ELEMENT_ID]["text_size"] == "notation"
+    assert session.card_id == "card-b"
+    assert session.agent_status == payload
+    assert session.agent_status_created is True
+    latest = ctrl._agent_status_manager.registry.get("feishu:clarify-chat")
+    assert latest is not None
+    assert latest.card_id == "card-b"
+    assert latest.active_session is session
+    assert latest.agent_status == payload
+
+
+@pytest.mark.asyncio
+async def test_clarify_split_serializes_card_handoff_with_agent_status() -> None:
+    """Review 在 clarify create 临界窗口到达时，只能写入 handoff 后的新卡。"""
+    ctrl = _setup_ctrl()
+    session = CardSession("clarify-race", "clarify-race-chat", asyncio.get_running_loop())
+    _register_test_card(ctrl, session, card_id="card-a", card_msg_id="message-a")
+    session.anchor_id = "anchor-message"
+    session.flush.set_card_message_ready(True)
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    payload = "💾 Self-improvement review:\n- updated **memory**"
+
+    async def blocked_create(_card) -> str:
+        create_started.set()
+        await allow_create.wait()
+        return "card-b"
+
+    async def fake_flush(_session) -> None:
+        pass
+
+    ctrl._client.cardkit_create = AsyncMock(side_effect=blocked_create)
+    ctrl._client.reply_card_by_id.return_value = "message-b"
+    conversation_lock = ctrl._conversation_lock(session)
+
+    with patch.object(ctrl, "_do_flush", side_effect=fake_flush):
+        clarify_task = asyncio.create_task(ctrl._do_clarify_split(session))
+        await asyncio.wait_for(create_started.wait(), timeout=1)
+        assert conversation_lock.locked()
+        assert session.card_id == "card-a"
+
+        status_task = asyncio.create_task(
+            ctrl._deliver_agent_status(
+                event=_status_event("clarify-race-chat", payload),
+                chat_id="clarify-race-chat",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not status_task.done()
+        assert session.agent_status is None
+
+        allow_create.set()
+        assert await asyncio.wait_for(clarify_task, timeout=1)
+        await asyncio.wait_for(status_task, timeout=1)
+
+    initial_card = ctrl._client.cardkit_create.await_args.args[0]
+    assert all(
+        element.get("element_id")
+        not in {AGENT_STATUS_DIVIDER_ELEMENT_ID, AGENT_STATUS_ELEMENT_ID}
+        for element in initial_card["body"]["elements"]
+    )
+    card_id, actions = ctrl._client.cardkit_batch_update.await_args.args
+    assert card_id == "card-b"
+    assert actions[0]["action"] == "add_elements"
+    status_elements = {
+        element.get("element_id"): element
+        for element in actions[0]["params"]["elements"]
+    }
+    assert set(status_elements) == {
+        AGENT_STATUS_DIVIDER_ELEMENT_ID,
+        AGENT_STATUS_ELEMENT_ID,
+    }
+    assert status_elements[AGENT_STATUS_ELEMENT_ID]["content"] == payload
+    assert status_elements[AGENT_STATUS_ELEMENT_ID]["text_size"] == "notation"
+    assert session.card_id == "card-b"
+    assert session.agent_status == payload
+    assert session.agent_status_created is True
+    latest = ctrl._agent_status_manager.registry.get("feishu:clarify-race-chat")
+    assert latest is not None
+    assert latest.card_id == "card-b"
+    assert latest.active_session is session
+    assert latest.agent_status == payload
+
+
+@pytest.mark.asyncio
 async def test_clarify_split_no_card_skips_seal() -> None:
     """无活跃卡片时 _do_clarify_split 直接返回 False。"""
     ctrl = _setup_ctrl()

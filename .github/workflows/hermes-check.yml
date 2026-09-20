@@ -30,6 +30,7 @@ jobs:
           sparse-checkout: |
             gateway
             cron
+            plugins/platforms/feishu
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -46,12 +47,16 @@ jobs:
           set +e
           python -c "
           import pathlib
-          from hermes_lark_streaming.patcher import Patcher, CronPatcher
+          from hermes_lark_streaming.patcher import Patcher, CronPatcher, FeishuAdapterPatcher
           p = Patcher(pathlib.Path('hermes-source/gateway/run.py'))
           p.verify_target()
+          fp = FeishuAdapterPatcher(
+              pathlib.Path('hermes-source/plugins/platforms/feishu/adapter.py')
+          )
+          fp.verify_target()
           cp = CronPatcher(pathlib.Path('hermes-source/cron/scheduler.py'))
           cp.verify_target()
-          print('Both targets compatible.')
+          print('Gateway, Feishu adapter, and Cron targets compatible.')
           " > /tmp/verify.log 2>&1
           code=$?
           {
