@@ -12,10 +12,11 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      HERMES_HOME: ${{ runner.temp }}/hermes-test-sources
     steps:
       - uses: actions/checkout@v6
+
+      - name: Configure Hermes test home
+        run: echo "HERMES_HOME=$RUNNER_TEMP/hermes-test-sources" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v6
