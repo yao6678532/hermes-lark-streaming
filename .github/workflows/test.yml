@@ -35,8 +35,10 @@ jobs:
       - name: Fetch pinned Hermes test sources
         run: |
           revisions=$(PYTHONPATH=tests python -c 'from hermes_sources import LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION; print(LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION)')
+          target_revision=$(PYTHONPATH=tests python -c 'from hermes_sources import TARGET_REVISION; print(TARGET_REVISION)')
           git init "$HERMES_HOME/hermes-agent"
           git -C "$HERMES_HOME/hermes-agent" fetch --no-tags --depth=1 https://github.com/NousResearch/hermes-agent.git $revisions
+          git -C "$HERMES_HOME/hermes-agent" checkout --detach "$target_revision"
 
       - name: Run tests
-        run: python -m pytest tests/ -v
+        run: PYTHONPATH="$HERMES_HOME/hermes-agent${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ -v
