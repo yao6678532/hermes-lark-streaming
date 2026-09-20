@@ -54,6 +54,7 @@ from .segment_helper import (
 from .segments import Segment, SegmentState, SegmentType
 from .session import SessionState
 from .text import split_reasoning_text
+from .tooluse import ToolUseTracker
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -94,9 +95,12 @@ class StreamingController:
     _conversation_lock: Callable[[CardSession], asyncio.Lock]
     _register_latest_card: Callable[[CardSession], bool]
     _remember_finalized_card: Callable[[CardSession, dict[str, Any]], None]
+    _wait_for_card_creation: Callable[[CardSession], Coroutine[Any, Any, bool]]
 
     def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
+            return
+        if session.state == SessionState.CLARIFY_PAUSED:
             return
         if session.guard.should_skip("_schedule_flush"):
             return
@@ -1162,6 +1166,134 @@ class StreamingController:
         )
         return "split" if split_ok else "failed"
 
+    async def _seal_current_card(
+        self,
+        session: CardSession,
+        seal_segments: list[Segment],
+        *,
+        card_id: str | None = None,
+        sequence: int | None = None,
+    ) -> None:
+        """封印指定卡（默认 session.card_id）：close_streaming + 全量重建。失败仅记录日志。
+
+        card_id 用于 session 已切到新卡、仍需封印旧卡的场景（clarify 切卡）；
+        sequence 传入旧卡续用的递增序列（CardKit 要求单调递增，不能用新卡的计数）。
+        """
+        assert self._client is not None
+        old_card_id = card_id or session.card_id
+        if not old_card_id:
+            return
+        if session.image_resolver:
+            await _resolve_answer_images(
+                seal_segments,
+                session.image_resolver,
+                log_prefix="CardKit seal",
+            )
+        all_steps = session.tool_use.build_display_steps()
+        merged_mode = self._cfg.reasoning_mode == "merged"
+        merged_text = None
+        merged_elapsed_ms = 0.0
+        if merged_mode:
+            merged_text = "".join(
+                segment.text for segment in seal_segments if segment.type == SegmentType.REASONING
+            )
+            merged_elapsed_ms = sum(
+                segment.elapsed_ms
+                for segment in seal_segments
+                if segment.type == SegmentType.REASONING
+            )
+        non_tool_card = build_complete_card(
+            segments=seal_segments,
+            all_tool_steps=all_steps,
+            footer_fields=[],
+            footer_show_label=False,
+            footer_enabled=False,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=False,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=False,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=merged_text,
+            merged_reasoning_elapsed_ms=merged_elapsed_ms,
+        )
+        tool_snapshot = project_tool_panel(
+            all_steps,
+            show_tool_detail=self._cfg.show_tool_detail,
+            tool_detail_mode=self._cfg.tool_detail_mode,
+            element_budget=max(
+                0,
+                ELEMENT_THRESHOLD - estimate_cardkit_elements(non_tool_card),
+            ),
+        )
+        seal_card = build_complete_card(
+            segments=seal_segments,
+            all_tool_steps=all_steps,
+            footer_fields=[],
+            footer_show_label=False,
+            footer_enabled=False,
+            panel_expanded=self._cfg.panel_expanded,
+            header_enabled=False,
+            body_text_size=self._cfg.body_text_size,
+            add_empty_answer_fallback=False,
+            show_tool_use=self._cfg.show_tool_use,
+            show_tool_detail=tool_snapshot.show_tool_detail,
+            tool_detail_mode=tool_snapshot.tool_detail_mode,
+            tool_panel_steps=list(tool_snapshot.steps),
+            tool_total_steps=tool_snapshot.total_steps,
+            tool_total_failed_count=tool_snapshot.total_failed_count,
+            width_mode=self._cfg.width_mode,
+            merged_reasoning_text=merged_text,
+            merged_reasoning_elapsed_ms=merged_elapsed_ms,
+        )
+        try:
+            seq = session.sequence if sequence is None else sequence
+            seq += 1
+            await self._client.cardkit_close_streaming(old_card_id, sequence=seq)
+            seq += 1
+            await self._client.cardkit_update(old_card_id, seal_card, sequence=seq)
+        except Exception:
+            _logger.warning(
+                "CardKit seal failed for old card %s, continuing",
+                old_card_id[:12],
+                exc_info=True,
+            )
+
+    async def _create_streaming_card(self, session: CardSession) -> tuple[str, str] | None:
+        """创建空白流式卡并挂到 anchor，返回 (card_id, msg_id)。失败返回 None。
+
+        不修改 session.card_id —— 调用方负责 set_card。
+        """
+        assert self._client is not None
+        try:
+            progress_snapshot = (
+                session.progress.snapshot()
+                if self._cfg.progress_mode == "card"
+                else None
+            )
+            card = build_streaming_card_v2(
+                show_tool_use=False,
+                show_reasoning=False,
+                show_streaming_element=False,
+                header_enabled=self._cfg.header_enabled,
+                text_size=self._cfg.body_text_size,
+                width_mode=self._cfg.width_mode,
+                progress_snapshot=progress_snapshot,
+                agent_status=session.agent_status,
+            )
+            new_card_id = await self._client.cardkit_create(card)
+            new_msg_id = await self._client.reply_card_by_id(
+                session.anchor_id or session.message_id, new_card_id,
+            )
+        except Exception:
+            _logger.warning(
+                "CardKit create streaming card failed for msg=%s",
+                session.message_id[:12],
+                exc_info=True,
+            )
+            return None
+        return new_card_id, new_msg_id
+
     async def _do_split_card(
         self,
         session: CardSession,
@@ -1198,12 +1330,6 @@ class StreamingController:
             return False
 
         seal_segments = [s for s in segments[seal_start_idx:split_idx] if s.created]
-        if session.image_resolver:
-            await _resolve_answer_images(
-                seal_segments,
-                session.image_resolver,
-                log_prefix="CardKit seal",
-            )
 
         merged_mode = self._cfg.reasoning_mode == "merged"
         seal_merged_text = None
@@ -1364,6 +1490,80 @@ class StreamingController:
         )
         return True
 
+    async def _do_clarify_split(self, session: CardSession) -> bool:
+        """clarify 工具结束后切卡：建新卡 + 封旧卡。
+
+        返回 False 表示未切卡（无卡可封，或建卡失败降级继续写旧卡）。
+        """
+        await self._wait_for_card_creation(session)
+        if not session.has_card or session.state == SessionState.FAILED:
+            _logger.info(
+                "clarify_split: no card to seal, msg=%s state=%s",
+                session.message_id[:12], session.state,
+            )
+            return False
+
+        # 先禁拆卡再等 flush：否则进行中的 flush 可能先拆卡，随后被本流程封印成空白卡。
+        session.split_disabled = True
+        try:
+            await session.flush.wait_for_flush()
+            try:
+                await session.flush.flush_now(lambda: self._do_flush(session))
+            except Exception:
+                _logger.debug("clarify_split: final flush failed", exc_info=True)
+
+            # 先建新卡后封旧卡（与拆卡一致）：建卡失败时旧卡未 close，可降级继续流式。
+            new_card = await self._create_streaming_card(session)
+            if new_card is None:
+                _logger.warning(
+                    "clarify_split: create new card failed, continuing on current card, msg=%s",
+                    session.message_id[:12],
+                )
+                return False
+
+            # 先切到新卡再封旧卡：任意时刻被取消（超时兜底）时，session 指向的都是
+            # 未 close 的卡，后续 flush 不会写到已关闭的旧卡。
+            # seal 必须显式传旧 card_id + 旧 sequence（session 已切新卡，
+            # 且 CardKit sequence 要求单调递增，不能用新卡的计数）。
+            old_card_id = session.card_id
+            old_seq = session.sequence
+            new_card_id, new_msg_id = new_card
+            session.set_card(card_id=new_card_id, card_msg_id=new_msg_id)
+            session.sequence = 1  # 新卡从 1 重新计数
+            session.agent_status_created = bool(session.agent_status)
+            progress_snapshot = (
+                session.progress.snapshot()
+                if self._cfg.progress_mode == "card"
+                else None
+            )
+            self._register_latest_card(session)
+            if progress_snapshot is not None and progress_snapshot.visible:
+                session.progress.mark_rendered(progress_snapshot.revision)
+
+            await self._seal_current_card(
+                session,
+                session.active_segments(),
+                card_id=old_card_id,
+                sequence=old_seq,
+            )
+
+            # 重置内容，新卡承载 clarify 后的输出
+            session.segment_state = SegmentState()
+            session.split_index = 0
+            session.element_count = 1 + (2 if session.agent_status_created else 0)
+            session.tool_use = ToolUseTracker()
+            session.tool_panel.reset_render_state(dirty=False)
+            session.interim_preview.reset_render_state()
+            session.merged_reasoning.reset_render_state()
+
+            _logger.info(
+                "clarify_split: sealed old + new card msg=%s card=%s",
+                session.message_id[:12], new_card_id[:12],
+            )
+            return True
+        finally:
+            session.split_disabled = False  # 取消/异常/失败均恢复拆卡能力
+
     def _handle_flush_error(self, e: FeishuAPIError) -> None:
         if e.code == CARDKIT_RATE_LIMITED:
             return
@@ -1402,7 +1602,10 @@ class StreamingController:
         if self._cfg.reasoning_mode == "merged":
             session.merged_reasoning.finalize()
 
-        logical_segments = segment_state.segments if segment_state is not None else []
+        # Earlier rollover slices were already sealed into prior cards.  The
+        # terminal card must render only the active slice or it duplicates
+        # content from those cards.
+        logical_segments = session.active_segments() if segment_state is not None else []
         final_view: CardViewSnapshot = project_card_view(
             segments=logical_segments,
             all_tool_steps=all_tool_steps,

@@ -422,6 +422,7 @@ async def on_message_completed_wait(
     message_id: str,
     answer: str = "",
     is_error: bool = False,
+    reconcile_answer: bool = False,
     duration: float = 0.0,
     model: str = "",
     tokens: dict[str, Any] | None = None,
@@ -433,6 +434,7 @@ async def on_message_completed_wait(
             message_id=message_id,
             answer=answer,
             is_error=is_error,
+            reconcile_answer=reconcile_answer,
             duration=duration,
             model=model,
             tokens=tokens,
@@ -734,3 +736,27 @@ async def on_background_deliver(
     except Exception as exc:
         _logger.warning("on_background_deliver error: %s", exc, exc_info=True)
         return False
+
+
+@_safe_hook()
+def on_clarify_enter(
+    *,
+    ctrl: Any,
+    message_id: str,
+    chat_id: str | None = None,
+    session_key: str | None = None,
+) -> None:
+    """[注入点 12] clarify_callback 进入 — 暂停 flush 保留当前卡。"""
+    ctrl.on_clarify_enter(message_id=message_id, chat_id=chat_id, session_key=session_key)
+
+
+@_safe_hook()
+def on_clarify_exit(
+    *,
+    ctrl: Any,
+    message_id: str,
+    chat_id: str | None = None,
+    session_key: str | None = None,
+) -> None:
+    """[注入点 12] clarify_callback 退出 — 标记待封卡，等 tool.completed 触发切卡。"""
+    ctrl.on_clarify_exit(message_id=message_id, chat_id=chat_id, session_key=session_key)

@@ -42,7 +42,7 @@ def _print_usage() -> None:
     print("Usage: python -m hermes_lark_streaming <command>")
     print()
     print("Commands:")
-    print("  install    Apply AST patches to gateway, Feishu adapter, and cron")
+    print("  install    Apply AST hooks to Hermes gateway, Feishu adapter, and cron modules")
     print("  uninstall  Remove AST patch")
     print("  restore    Restore from backup")
     print("  status     Show current patch status")
@@ -84,36 +84,19 @@ def _cmd_install() -> int:
     if patcher is None or feishu_patcher is None:
         return 1
 
-    if patcher.is_fully_patched() and feishu_patcher.is_fully_patched():
-        print("Already patched.")
-    else:
-        print("Verifying target compatibility...")
-        try:
-            patcher.verify_target()
-            feishu_patcher.verify_target()
-        except Exception as e:
-            print(f"Verification failed: {e}")
-            return 1
-        print("Target compatible.")
+    from .patcher import install_patchers
 
-        print("Applying patch...")
-        try:
-            patcher.apply()
-            feishu_patcher.apply()
-        except Exception as e:
-            print(f"Patch failed: {e}")
-            return 1
-        print("Patch applied successfully.")
-
+    patchers: list[Patcher | CronPatcher | FeishuAdapterPatcher] = [patcher, feishu_patcher]
     cron_patcher = _get_cron_patcher()
-    if cron_patcher is not None and not cron_patcher.is_patched():
-        try:
-            cron_patcher.verify_target()
-            cron_patcher.apply()
-            print("Cron hook applied.")
-        except Exception as e:
-            print(f"Cron hook skipped: {e}")
-
+    if cron_patcher is not None:
+        patchers.append(cron_patcher)
+    print("Verifying and preparing all gateway/cron hooks before writing...")
+    try:
+        install_patchers(patchers)
+    except Exception as e:
+        print(f"Patch failed: {e}")
+        return 1
+    print("Hooks installed. Restart Hermes Gateway to load the changes.")
     return 0
 
 
@@ -122,29 +105,19 @@ def _cmd_uninstall() -> int:
     if patcher is None:
         return 1
 
-    cron_patcher = _get_cron_patcher()
-    if cron_patcher is not None and cron_patcher.is_patched():
-        try:
-            cron_patcher.remove()
-            print("Cron hook removed.")
-        except Exception as e:
-            print(f"Cron hook remove failed: {e}")
-
     feishu_patcher = _get_feishu_patcher()
-    if feishu_patcher is not None and feishu_patcher.is_patched():
-        try:
-            feishu_patcher.remove()
-            print("Feishu approval hooks removed.")
-        except Exception as e:
-            print(f"Feishu approval hook remove failed: {e}")
-
-    if not patcher.is_patched():
-        print("Not patched.")
-        return 0
+    if feishu_patcher is None:
+        return 1
+    from .patcher import _write_changes
 
     print("Removing patch...")
     try:
-        patcher.remove()
+        changes = patcher.prepare_remove()
+        changes.update(feishu_patcher.prepare_remove())
+        cron_patcher = _get_cron_patcher()
+        if cron_patcher is not None:
+            changes.update(cron_patcher.prepare_remove())
+        _write_changes(changes)
     except Exception as e:
         print(f"Remove failed: {e}")
         return 1
@@ -157,25 +130,24 @@ def _cmd_restore() -> int:
     if patcher is None:
         return 1
 
-    cron_patcher = _get_cron_patcher()
-    if cron_patcher is not None:
-        try:
-            cron_patcher.restore()
-            print("Cron hook restored.")
-        except Exception:
-            pass
-
-    feishu_patcher = _get_feishu_patcher()
-    if feishu_patcher is not None:
-        try:
-            feishu_patcher.restore()
-            print("Feishu adapter restored.")
-        except Exception:
-            pass
+    from .patcher import _BACKUP_SUFFIX, _write_changes
 
     print("Restoring from backup...")
     try:
-        patcher.restore()
+        changes = patcher.prepare_restore()
+        feishu_patcher = _get_feishu_patcher()
+        if feishu_patcher is not None:
+            adapter_backup = feishu_patcher.adapter_path.with_suffix(
+                feishu_patcher.adapter_path.suffix + _BACKUP_SUFFIX
+            )
+            if adapter_backup.exists() or feishu_patcher.is_patched():
+                changes.update(feishu_patcher.prepare_restore())
+        cron_patcher = _get_cron_patcher()
+        if cron_patcher is not None:
+            backup = cron_patcher.cron_path.with_suffix(cron_patcher.cron_path.suffix + _BACKUP_SUFFIX)
+            if backup.exists() or cron_patcher.is_patched():
+                changes.update(cron_patcher.prepare_restore())
+        _write_changes(changes)
     except Exception as e:
         print(f"Restore failed: {e}")
         return 1
@@ -191,19 +163,27 @@ def _cmd_status() -> int:
     patched = patcher.is_patched()
     print(f"Patched: {'yes' if patched else 'no'}")
     print(f"Target:  {patcher.run_path}")
+    print(f"Layout:  {'split gateway modules' if patcher.split else 'monolithic gateway'}")
 
     if patched:
-        from .patcher import Patcher as _PatcherCls
-
-        content = patcher.run_path.read_text(encoding="utf-8")
-        for begin, _end in _PatcherCls.MARKERS:
-            found = begin in content
-            label = begin.replace("# HERMES_LARK_", "").replace("_BEGIN", "").lower()
-            print(f"  {label}: {'installed' if found else 'missing'}")
+        print(f"Fully patched: {'yes' if patcher.is_fully_patched() else 'no'}")
+    for path in patcher.target_paths:
+        if not path.exists():
+            print(f"  {path.name}: MISSING FILE")
+            continue
+        content = path.read_text(encoding="utf-8")
+        labels = [
+            begin.replace("# HERMES_LARK_", "").replace("_BEGIN", "").lower()
+            for begin, _end in patcher.MARKERS if begin in content
+        ]
+        print(f"  {path.name}: {', '.join(labels) if labels else 'no hooks'}")
 
     cron_patcher = _get_cron_patcher()
     if cron_patcher is not None:
         print(f"Cron hook: {'installed' if cron_patcher.is_patched() else 'not installed'}")
+        print(f"Cron target: {cron_patcher.cron_path}")
+        if cron_patcher.is_patched():
+            print(f"Cron fully patched: {'yes' if cron_patcher.is_fully_patched() else 'no'}")
 
     feishu_patcher = _get_feishu_patcher()
     if feishu_patcher is not None:
@@ -242,6 +222,10 @@ def _cmd_verify() -> int:
         return 1
 
     print(f"Target: {patcher.run_path}")
+    if patcher.split:
+        print("Layout: split gateway modules")
+        for path in patcher.target_paths[1:]:
+            print(f"  {path}")
     print("Checking compatibility...")
     try:
         patcher.verify_target()

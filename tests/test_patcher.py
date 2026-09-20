@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from hermes_sources import LEGACY_REVISION, source_at
 
 from hermes_lark_streaming.controller import StreamCardController
 from hermes_lark_streaming.patcher import (
@@ -88,35 +89,17 @@ def _ensure_sample() -> Path:
         pytest.skip("run.py download returned empty file")
     return SAMPLE_RUN
 
-
 @pytest.fixture()
 def run_copy(tmp_path: Path) -> Path:
-    src = _ensure_sample()
     dst = tmp_path / "run.py"
-    shutil.copy2(src, dst)
+    dst.write_text(source_at("gateway/run.py", LEGACY_REVISION), encoding="utf-8")
     return dst
-
-
-def _ensure_cron_sample() -> Path:
-    src = CRON_BAK if CRON_BAK.exists() else CRON_SRC
-    SAMPLES_DIR.mkdir(parents=True, exist_ok=True)
-    if src.exists():
-        shutil.copy2(src, SAMPLE_CRON)
-        return SAMPLE_CRON
-    try:
-        urllib.request.urlretrieve(_CRON_URL, SAMPLE_CRON)
-    except Exception as exc:
-        pytest.skip(f"scheduler.py not found locally and download failed: {exc}")
-    if not SAMPLE_CRON.exists() or SAMPLE_CRON.stat().st_size == 0:
-        pytest.skip("scheduler.py download returned empty file")
-    return SAMPLE_CRON
 
 
 @pytest.fixture()
 def scheduler_copy(tmp_path: Path) -> Path:
-    src = _ensure_cron_sample()
     dst = tmp_path / "scheduler.py"
-    shutil.copy2(src, dst)
+    dst.write_text(source_at("cron/scheduler.py", LEGACY_REVISION), encoding="utf-8")
     return dst
 
 
@@ -1518,7 +1501,7 @@ class TestCronVerify:
 
     def test_verify_fails_missing_cleaned_content(self, tmp_path: Path) -> None:
         p = tmp_path / "scheduler.py"
-        p.write_text("    delivered = False\n")
+        p.write_text("delivered = False\n")
         with pytest.raises(PatcherError, match="cleaned_delivery_content"):
             _cron_patcher(p).verify_target()
 
