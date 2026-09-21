@@ -127,7 +127,7 @@ async def test_single_select_resolves_real_hermes_wait() -> None:
 
 @pytest.mark.asyncio
 async def test_single_select_index_maps_to_untruncated_canonical_choice() -> None:
-    canonical = "Use **safe** mode with `--dry-run` and " + "complete details " * 12
+    canonical = "A. Use **safe** mode with `--dry-run` and " + "complete details " * 12
     _register_official(choices=[canonical, "B"])
     registry = ClarifyCardRegistry()
     registry.register(_state(choices=(canonical, "B")))
@@ -143,7 +143,7 @@ async def test_single_select_index_maps_to_untruncated_canonical_choice() -> Non
 
     assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == canonical
     state = registry.get("clarify-1")
-    assert state is not None and state.answer == canonical
+    assert state is not None and state.choices[0] == canonical and state.answer == canonical
 
 
 @pytest.mark.asyncio

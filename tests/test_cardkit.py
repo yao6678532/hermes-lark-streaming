@@ -34,7 +34,11 @@ from hermes_lark_streaming.cardkit.builder import (
     build_streaming_card_v2,
     with_agent_status,
 )
-from hermes_lark_streaming.cardkit.interaction_builder import build_approval_card, build_clarify_card
+from hermes_lark_streaming.cardkit.interaction_builder import (
+    _clean_choice_display,
+    build_approval_card,
+    build_clarify_card,
+)
 from hermes_lark_streaming.cardkit.markdown import (
     _downgrade_tables,
     _find_tables_outside_code_blocks,
@@ -121,6 +125,8 @@ class TestBuildClarifyCard:
         }
         assert direct_input["tag"] == "input"
         assert direct_input["name"] == "clarify_direct_input"
+        assert direct_input["max_length"] == 500
+        assert "width" not in direct_input
         assert direct_input["behaviors"][0]["value"] == {
             "hermes_lark_action": "clarify_direct_input",
             "clarify_id": "clarify-1",
@@ -151,7 +157,63 @@ class TestBuildClarifyCard:
         }
         assert direct_input["tag"] == "input"
         assert direct_input["name"] == "clarify_direct_input"
+        assert direct_input["max_length"] == 500
+        assert "width" not in direct_input
         assert direct_input not in form["elements"]
+
+    def test_choice_display_removes_only_matching_existing_numbering(self) -> None:
+        first = "A. Topic-aware ConversationIdentity 与话题群隔离。"
+        second = "B. CardKit 原生交互。"
+        numeric = "1. First choice"
+        mismatched = "A. literal text remains part of the second choice"
+
+        assert _clean_choice_display(0, first) == "Topic-aware ConversationIdentity 与话题群隔离。"
+        assert _clean_choice_display(1, second) == "CardKit 原生交互。"
+        assert _clean_choice_display(0, numeric) == "First choice"
+        assert _clean_choice_display(1, mismatched) == mismatched
+        for prefixed, expected in (
+            ("A、Letter", "Letter"),
+            ("A)Letter", "Letter"),
+            ("A\uff1aLetter", "Letter"),
+            ("1、Number", "Number"),
+            ("1)Number", "Number"),
+        ):
+            assert _clean_choice_display(0, prefixed) == expected
+
+        card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=[first, second],
+        )
+        choices_md = card["body"]["elements"][1]["content"]
+        picker = card["body"]["elements"][2]
+        assert "**A.** Topic-aware ConversationIdentity" in choices_md
+        assert "**B.** CardKit 原生交互。" in choices_md
+        assert "A. A." not in choices_md and "B. B." not in choices_md
+        assert picker["options"][0]["value"] == "0"
+        assert picker["options"][0]["text"]["content"].startswith("A. Topic-aware")
+        assert "A. A." not in picker["options"][0]["text"]["content"]
+        assert picker["options"][1]["text"]["content"] == "B. CardKit 原生交互。"
+
+        numeric_card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=[numeric, mismatched],
+        )
+        numeric_md = numeric_card["body"]["elements"][1]["content"]
+        numeric_picker = numeric_card["body"]["elements"][2]
+        assert "**A.** First choice" in numeric_md
+        assert "**B.** A. literal text remains" in numeric_md
+        assert numeric_picker["options"][1]["text"]["content"].startswith("B. A. literal")
+
+        terminal = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=[first, second],
+            status="answered",
+            answer=first,
+        )
+        assert "A. A." not in str(terminal)
 
     def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
         card = build_clarify_card(

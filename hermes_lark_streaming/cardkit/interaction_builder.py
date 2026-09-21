@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from copy import deepcopy
 from typing import Any, Literal
 
@@ -81,17 +82,27 @@ def _choice_marker(index: int) -> str:
     return chr(ord("A") + index) if index < 26 else str(index + 1)
 
 
+def _clean_choice_display(index: int, choice: str) -> str:
+    """Remove only a position-matching choice prefix for presentation."""
+    marker = _choice_marker(index)
+    position = str(index + 1)
+    prefix = re.compile(
+        rf"^\s*(?:{re.escape(marker)}|{re.escape(position)})\s*[.\u3001)\uff09:\uff1a]\s*"
+    )
+    return prefix.sub("", str(choice), count=1)
+
+
 def _clarify_choice_markdown(choices: list[str]) -> str:
     """Render canonical choices in full; dropdown shortening never reaches this lane."""
     return "\n\n".join(
-        f"**{_choice_marker(index)}.** {optimize_markdown_style(str(choice))}"
+        f"**{_choice_marker(index)}.** {optimize_markdown_style(_clean_choice_display(index, choice))}"
         for index, choice in enumerate(choices)
     )
 
 
 def _short_choice_label(index: int, choice: str) -> str:
     """Build presentation-only plain text for the compact picker."""
-    compact = " ".join(str(choice).split())
+    compact = " ".join(_clean_choice_display(index, choice).split())
     if len(compact) > _CLARIFY_DROPDOWN_LABEL_LIMIT:
         compact = compact[: _CLARIFY_DROPDOWN_LABEL_LIMIT - 1].rstrip() + "…"
     return f"{_choice_marker(index)}. {compact}"
@@ -113,7 +124,7 @@ def _clarify_direct_input(clarify_id: str) -> dict[str, Any]:
         "tag": "input",
         "name": "clarify_direct_input",
         "element_id": "clarify_direct_input",
-        "width": "fill",
+        "max_length": 500,
         "placeholder": {
             "tag": "plain_text",
             "content": "Type another answer...",
