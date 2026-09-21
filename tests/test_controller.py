@@ -2006,10 +2006,11 @@ class TestFirstVisibleFlush:
             assert ctrl.on_answer(message_id=session.message_id, text="first") is True
         first_callback = schedule.call_args.args[0]
 
-        await first_callback()
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=AsyncMock()):
+            await first_callback()
 
         assert ctrl._client.cardkit_batch_update.await_count == 1
-        assert ctrl._client.cardkit_stream_element.await_count == 1
+        assert ctrl._client.cardkit_stream_element.await_count == 4
         assert session.first_visible_rendered_generation != session.card_generation
         assert session.first_visible_urgent_generation == -1
 
@@ -2033,10 +2034,11 @@ class TestFirstVisibleFlush:
             assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
         first_callback = schedule.call_args.args[0]
 
-        await first_callback()
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=AsyncMock()):
+            await first_callback()
 
         assert ctrl._client.cardkit_batch_update.await_count == 1
-        assert ctrl._client.cardkit_stream_element.await_count == 1
+        assert ctrl._client.cardkit_stream_element.await_count == 4
         assert session.first_visible_rendered_generation != session.card_generation
         assert session.first_visible_urgent_generation == -1
 
@@ -2203,6 +2205,375 @@ class TestFirstVisibleFlush:
 
         ctrl._client.cardkit_batch_update.assert_not_awaited()
         ctrl._client.cardkit_stream_element.assert_not_awaited()
+
+
+class TestCardKitStreamPropagationRetry:
+    @staticmethod
+    def _ready_session(
+        ctrl: StreamCardController,
+        message_id: str = "stream-retry",
+    ) -> CardSession:
+        session = CardSession(message_id, "chat", asyncio.get_event_loop())
+        session.set_card(card_id=f"card-{message_id}", card_msg_id=f"reply-{message_id}")
+        session.state = SessionState.STREAMING
+        session.element_count = 1
+        ctrl._sessions[message_id] = session
+        return session
+
+    @staticmethod
+    async def _call_helper(
+        ctrl: StreamCardController,
+        session: CardSession,
+    ) -> bool:
+        async with ctrl._conversation_lock(session):
+            return await ctrl._stream_element_with_propagation_retry(
+                session,
+                element_id="answer_0",
+                content="answer",
+                source="answer",
+                just_created=True,
+                owns_element=lambda: True,
+                ownership_element_ids={"answer_0"},
+            )
+
+    @pytest.mark.asyncio
+    async def test_initial_success_does_not_sleep_or_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "initial-success")
+        sleeper = AsyncMock()
+
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=sleeper):
+            assert await self._call_helper(ctrl, session) is True
+
+        sleeper.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_300313_retries_after_200ms_with_fresh_monotonic_sequence(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "retry-success")
+        ctrl._client.cardkit_stream_element.side_effect = [
+            FeishuAPIError("code=300313", 300313),
+            None,
+        ]
+        delays: list[float] = []
+
+        async def intervening_mutation(delay: float) -> None:
+            delays.append(delay)
+            lock = ctrl._conversation_lock(session)
+            assert lock.locked() is False
+            async with lock:
+                session.sequence += 1
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=intervening_mutation),
+        ):
+            assert await self._call_helper(ctrl, session) is True
+
+        assert delays == [0.2]
+        sequences = [
+            call.kwargs["sequence"]
+            for call in ctrl._client.cardkit_stream_element.await_args_list
+        ]
+        assert sequences == [2, 4]
+
+    @pytest.mark.asyncio
+    async def test_retry_exhaustion_uses_bounded_schedule_and_existing_recovery(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "retry-exhausted")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError(
+            "code=300313, msg=not find elementID : answer_0;",
+            300313,
+        )
+        sleeper = AsyncMock()
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="answer") is True
+        callback = schedule.call_args.args[0]
+        segment = session.segment_state.segments[0]
+
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=sleeper):
+            await callback()
+
+        assert [call.args[0] for call in sleeper.await_args_list] == [0.2, 0.4, 0.8]
+        assert ctrl._client.cardkit_stream_element.await_count == 4
+        assert segment.created is False
+        assert segment.dirty is True
+        assert session.element_count == 1
+        assert session.first_visible_rendered_generation != session.card_generation
+        assert session.first_visible_urgent_generation == -1
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text=" again") is True
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_300313_feishu_error_does_not_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "non-missing-error")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("rate limited", 230020)
+        sleeper = AsyncMock()
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=sleeper,
+        ), pytest.raises(FeishuAPIError, match="rate limited"):
+            await self._call_helper(ctrl, session)
+
+        sleeper.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_does_not_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "generic-error")
+        ctrl._client.cardkit_stream_element.side_effect = RuntimeError("network")
+        sleeper = AsyncMock()
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=sleeper,
+        ), pytest.raises(RuntimeError, match="network"):
+            await self._call_helper(ctrl, session)
+
+        sleeper.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mismatched_missing_element_id_does_not_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "wrong-element")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError(
+            "code=300313, msg=not find elementID : someone_else;",
+            300313,
+        )
+        sleeper = AsyncMock()
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=sleeper,
+        ), pytest.raises(FeishuAPIError):
+            await self._call_helper(ctrl, session)
+
+        sleeper.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_existing_element_does_not_use_propagation_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "existing-element")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+        sleeper = AsyncMock()
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=sleeper,
+        ), pytest.raises(FeishuAPIError):
+            async with ctrl._conversation_lock(session):
+                await ctrl._stream_element_with_propagation_retry(
+                    session,
+                    element_id="answer_0",
+                    content="answer",
+                    source="answer",
+                    just_created=False,
+                    owns_element=lambda: True,
+                    ownership_element_ids={"answer_0"},
+                )
+
+        sleeper.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_300313_subcode_is_retryable(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "missing-subcode")
+        ctrl._client.cardkit_stream_element.side_effect = [
+            FeishuAPIError("code=230099, ext=ErrCode: 300313;", 230099),
+            None,
+        ]
+        sleeper = AsyncMock()
+
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=sleeper):
+            assert await self._call_helper(ctrl, session) is True
+
+        sleeper.assert_awaited_once_with(0.2)
+        assert ctrl._client.cardkit_stream_element.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("change", ["generation", "card", "session"])
+    async def test_ownership_change_during_wait_cancels_retry(self, change: str) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, f"stale-{change}")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+
+        async def change_ownership(_delay: float) -> None:
+            if change == "generation":
+                session.set_card(card_id="split-card", card_msg_id="split-message")
+            elif change == "card":
+                session.card_id = "replacement-card"
+            else:
+                ctrl._sessions[session.message_id] = CardSession(
+                    session.message_id,
+                    session.chat_id,
+                    asyncio.get_running_loop(),
+                )
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=change_ownership),
+        ):
+            assert await self._call_helper(ctrl, session) is False
+
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "state",
+        [
+            SessionState.CLARIFY_PAUSED,
+            SessionState.COMPLETED,
+            SessionState.ABORTED,
+            SessionState.FAILED,
+        ],
+    )
+    async def test_state_change_during_wait_cancels_retry(
+        self,
+        state: SessionState,
+    ) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, f"stale-{state.value}")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+
+        async def change_state(_delay: float) -> None:
+            session.state = state
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=change_state),
+        ):
+            assert await self._call_helper(ctrl, session) is False
+
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_completion_boundary_during_wait_cancels_retry(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "stale-completion")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+
+        async def begin_completion(_delay: float) -> None:
+            session.flush.mark_completed()
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=begin_completion),
+        ):
+            assert await self._call_helper(ctrl, session) is False
+
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lane", ["reasoning", "merged_reasoning", "commentary"])
+    async def test_supported_non_answer_lanes_retry_then_render(self, lane: str) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, f"lane-{lane}")
+        ctrl._client.cardkit_stream_element.side_effect = [
+            FeishuAPIError("code=300313", 300313),
+            None,
+        ]
+        sleeper = AsyncMock()
+
+        with patch.object(session.flush, "schedule_update"):
+            if lane == "reasoning":
+                ctrl._cfg._reload = lambda: {
+                    "display": {"platforms": {"feishu": {"show_reasoning": True}}}
+                }
+                assert ctrl.on_reasoning(message_id=session.message_id, text="reasoning") is True
+            elif lane == "merged_reasoning":
+                _configure_merged(ctrl)
+                assert ctrl.on_reasoning(message_id=session.message_id, text="reasoning") is True
+            else:
+                assert ctrl.on_thinking(
+                    message_id=session.message_id,
+                    text="commentary",
+                    source="interim_commentary",
+                ) is True
+
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=sleeper):
+            await ctrl._do_flush(session)
+
+        assert [call.args[0] for call in sleeper.await_args_list] == [0.2]
+        assert ctrl._client.cardkit_stream_element.await_count == 2
+        assert session.first_visible_rendered_generation == session.card_generation
+        if lane == "reasoning":
+            assert session.segment_state.segments[0].dirty is False
+        elif lane == "merged_reasoning":
+            assert session.merged_reasoning.dirty is False
+        else:
+            assert session.interim_preview.dirty is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("lane", ["merged_reasoning", "commentary"])
+    async def test_fixed_lane_stale_retry_aborts_remaining_flush(self, lane: str) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, f"fixed-stale-{lane}")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+
+        with patch.object(session.flush, "schedule_update"):
+            if lane == "merged_reasoning":
+                _configure_merged(ctrl)
+                assert ctrl.on_reasoning(message_id=session.message_id, text="reasoning") is True
+            else:
+                assert ctrl.on_thinking(
+                    message_id=session.message_id,
+                    text="commentary",
+                    source="interim_commentary",
+                ) is True
+            assert ctrl.on_answer(message_id=session.message_id, text="must not stream") is True
+
+        async def split_card(_delay: float) -> None:
+            session.set_card(card_id="new-card", card_msg_id="new-message")
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=split_card),
+        ):
+            await ctrl._do_flush(session)
+
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
+        assert ctrl._client.cardkit_stream_element.await_args.args[1] != "answer_1"
+
+    @pytest.mark.asyncio
+    async def test_retry_wait_releases_lock_for_paused_heartbeat(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = self._ready_session(ctrl, "retry-heartbeat")
+        ctrl._client.cardkit_stream_element.side_effect = FeishuAPIError("code=300313", 300313)
+        heartbeat_rendered = asyncio.Event()
+
+        async def render_heartbeat(*_args: object, **_kwargs: object) -> None:
+            heartbeat_rendered.set()
+
+        ctrl._client.cardkit_batch_update.side_effect = render_heartbeat
+
+        async def pause_and_heartbeat(_delay: float) -> None:
+            assert ctrl._conversation_lock(session).locked() is False
+            session.state = SessionState.CLARIFY_PAUSED
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=180,
+                iteration=3,
+            ) is True
+            await asyncio.wait_for(heartbeat_rendered.wait(), timeout=0.1)
+
+        with patch(
+            "hermes_lark_streaming.streaming.controller.asyncio.sleep",
+            new=AsyncMock(side_effect=pause_and_heartbeat),
+        ):
+            assert await self._call_helper(ctrl, session) is False
+
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+        ctrl._client.cardkit_stream_element.assert_awaited_once()
 
 
 class TestDispatch:
@@ -4239,6 +4610,7 @@ class TestMergedReasoning:
         session.state = SessionState.STREAMING
         session.card_id = "card_merged_race"
         session.element_count = 1
+        ctrl._sessions[session.message_id] = session
         ctrl._append_reasoning(session, "A")
 
         streamed: list[str] = []
@@ -4274,6 +4646,7 @@ class TestMergedReasoning:
         session.state = SessionState.STREAMING
         session.card_id = "card_merged_missing"
         session.element_count = 5
+        ctrl._sessions[session.message_id] = session
         ctrl._append_reasoning(session, "reasoning")
         session.merged_reasoning.created = True
         ctrl._client.cardkit_stream_element = AsyncMock(
@@ -4309,6 +4682,7 @@ class TestMergedReasoning:
         session.card_id = "card_merged_old"
         session.card_msg_id = "card_msg_merged_old"
         session.element_count = 5
+        ctrl._sessions[session.message_id] = session
         ctrl._append_reasoning(session, "R1")
         ctrl._pause_merged_reasoning(session)
         session.segment_state.on_answer_delta("old answer")
@@ -5242,10 +5616,23 @@ class TestInterimPreview:
                     "code=300313, msg=not find elementID : streaming_content;",
                     300313,
                 ),
+                FeishuAPIError(
+                    "code=300313, msg=not find elementID : streaming_content;",
+                    300313,
+                ),
+                FeishuAPIError(
+                    "code=300313, msg=not find elementID : streaming_content;",
+                    300313,
+                ),
+                FeishuAPIError(
+                    "code=300313, msg=not find elementID : streaming_content;",
+                    300313,
+                ),
                 None,
             ]
         )
-        await ctrl._do_flush(session)
+        with patch("hermes_lark_streaming.streaming.controller.asyncio.sleep", new=AsyncMock()):
+            await ctrl._do_flush(session)
         assert session.interim_preview.created is False
         assert session.interim_preview.dirty is True
         assert session.element_count == 1
