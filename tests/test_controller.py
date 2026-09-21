@@ -3714,6 +3714,9 @@ class TestMergedReasoning:
     @pytest.mark.asyncio
     async def test_segmented_native_reasoning_stays_on_numbered_panels(self) -> None:
         ctrl = _setup_ctrl()
+        ctrl._cfg._reload = lambda: {  # type: ignore[assignment]
+            "display": {"platforms": {"feishu": {"show_reasoning": True}}}
+        }
         session = CardSession("msg_segmented_native", "chat", asyncio.get_running_loop())
         session.state = SessionState.STREAMING
         session.card_id = "card_segmented_native"

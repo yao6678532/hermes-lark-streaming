@@ -329,6 +329,7 @@ async def on_feishu_interaction_action(
     callback_action_name = str(_field(callback_action, "name", "") or "").strip()
     callback_action_tag = str(_field(callback_action, "tag", "") or "").strip()
     callback_form_value = _field(callback_action, "form_value")
+    callback_input_value = _field(callback_action, "input_value")
     action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
     native_multi_submit = (
         callback_action_tag == "button"
@@ -350,6 +351,35 @@ async def on_feishu_interaction_action(
         if clarify_id:
             decoded = {
                 "hermes_lark_action": "clarify_multi_submit",
+                "clarify_id": clarify_id,
+            }
+            action_value = decoded
+            raw_message = raw_message_with_action_value(raw_message, decoded)
+    native_direct_input = (
+        callback_action_tag == "input"
+        and (
+            callback_input_value is not None
+            or (
+                isinstance(callback_form_value, dict)
+                and "clarify_direct_input" in callback_form_value
+            )
+        )
+        and bool(callback_chat_id)
+        and bool(callback_message_id)
+    )
+    if action_value is None and native_direct_input:
+        try:
+            profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+            ctrl = get_controller(profile_home)
+            clarify_id = ctrl.clarify_id_for_card_message(
+                chat_id=callback_chat_id,
+                card_msg_id=callback_message_id,
+            )
+        except Exception:
+            clarify_id = ""
+        if clarify_id:
+            decoded = {
+                "hermes_lark_action": "clarify_direct_input",
                 "clarify_id": clarify_id,
             }
             action_value = decoded

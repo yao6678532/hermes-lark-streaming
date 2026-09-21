@@ -143,14 +143,22 @@ def parse_card_action(raw_message: Any) -> tuple[dict[str, Any] | None, str, fro
 def _form_text(
     form_value: dict[str, Any] | None,
     input_value: str | None,
+    *,
+    field_name: str = "clarify_other_input",
+    strip: bool = True,
 ) -> str | None:
     """Read the plugin input field from the SDK's form callback payload."""
     if form_value is None and input_value is None:
         return None
     if form_value is not None:
-        if "clarify_other_input" not in form_value:
+        if field_name in form_value:
+            raw = form_value[field_name]
+        elif field_name == "clarify_direct_input" and input_value is not None:
+            # A pending multi-select form can still be present on the card;
+            # direct input remains independent and uses the native input lane.
+            raw = input_value
+        else:
             return None
-        raw = form_value["clarify_other_input"]
     else:
         raw = input_value
     if isinstance(raw, dict):
@@ -159,7 +167,8 @@ def _form_text(
         return ""
     if not isinstance(raw, str):
         return None
-    return str(raw).strip()
+    text = str(raw)
+    return text.strip() if strip else text
 
 
 def _collect_option_values(raw: Any) -> list[str] | None:
@@ -413,6 +422,7 @@ async def handle_clarify_action(
         "clarify_other",
         "clarify_other_submit",
         "clarify_other_back",
+        "clarify_direct_input",
     } or not clarify_id:
         _logger.warning("ignoring malformed Feishu clarify action")
         return True
@@ -508,6 +518,29 @@ async def handle_clarify_action(
             if not custom_text:
                 return True
             claimed = registry.claim(clarify_id, expected_status="input")
+            if claimed is None:
+                return True
+            payload = json.dumps([custom_text], ensure_ascii=False) if state.multi_select else custom_text
+            if not clarify_gateway.resolve_gateway_clarify(clarify_id, payload):
+                if registry.finish(clarify_id, "expired"):
+                    await _update_card(client, state, "expired")
+                return True
+            if registry.finish(clarify_id, "answered", answer=custom_text):
+                await _update_card(client, state, "answered", answer=custom_text)
+            return True
+
+        if action == "clarify_direct_input":
+            if state.status != "pending":
+                return True
+            custom_text = _form_text(
+                form_value,
+                input_value,
+                field_name="clarify_direct_input",
+                strip=False,
+            )
+            if custom_text is None or not custom_text.strip():
+                return True
+            claimed = registry.claim(clarify_id)
             if claimed is None:
                 return True
             payload = json.dumps([custom_text], ensure_ascii=False) if state.multi_select else custom_text

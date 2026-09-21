@@ -303,6 +303,78 @@ async def test_other_submit_on_multi_select_returns_one_item_json_array() -> Non
 
 
 @pytest.mark.asyncio
+async def test_direct_input_resolves_single_select_from_native_input_value() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+
+    assert await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_direct_input", input_value="  the original custom text  "),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "  the original custom text  "
+    state = registry.get("clarify-1")
+    assert state is not None and state.status == "answered" and state.answer == "  the original custom text  "
+
+
+@pytest.mark.asyncio
+async def test_direct_input_resolves_multi_select_as_one_item_json_array() -> None:
+    _register_official(multi_select=True)
+    registry = ClarifyCardRegistry()
+    registry.register(_state(multi_select=True))
+    client = AsyncMock()
+
+    await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action(
+            "clarify_direct_input",
+            form_value={"clarify_multi_select": ["0"]},
+            input_value="custom multi answer",
+        ),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+
+    assert json.loads(clarify_gateway.wait_for_response("clarify-1", timeout=0) or "") == [
+        "custom multi answer"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_select_and_direct_input_race_share_one_atomic_claim() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+    common = {
+        "client": client,
+        "registry": registry,
+        "source_chat_id": "chat-1",
+        "session_key": "feishu:chat-1:owner",
+    }
+
+    results = await asyncio.gather(
+        handle_clarify_action(raw_message=_raw_action("clarify_select", option="0"), **common),
+        handle_clarify_action(
+            raw_message=_raw_action("clarify_direct_input", input_value="custom answer"),
+            **common,
+        ),
+    )
+
+    assert results == [True, True]
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "A"
+    state = registry.get("clarify-1")
+    assert state is not None and state.status == "answered" and state.answer == "A"
+    client.cardkit_update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_empty_form_submit_does_not_resolve() -> None:
     _register_official()
     registry = ClarifyCardRegistry()
@@ -607,6 +679,24 @@ async def test_expired_click_is_consumed_without_new_turn() -> None:
     )
     assert registry.get("clarify-1").status == "expired"  # type: ignore[union-attr]
     client.cardkit_update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_expired_direct_input_is_consumed_without_resolving() -> None:
+    _register_official()
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0.01) is None
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+    client = AsyncMock()
+
+    assert await handle_clarify_action(
+        client=client,
+        registry=registry,
+        raw_message=_raw_action("clarify_direct_input", input_value="too late"),
+        source_chat_id="chat-1",
+        session_key="feishu:chat-1:owner",
+    )
+    assert registry.get("clarify-1").status == "expired"  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio
@@ -919,6 +1009,47 @@ async def test_gateway_hook_recovers_native_multi_form_submit_without_value() ->
             ),
         )
     assert json.loads(clarify_gateway.wait_for_response("clarify-1", timeout=0) or "") == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_hook_recovers_native_direct_input_without_value() -> None:
+    _register_official()
+    registry = ClarifyCardRegistry()
+    registry.register(_state())
+
+    async def _handle(**kwargs: object) -> bool:
+        return await handle_clarify_action(client=AsyncMock(), registry=registry, **kwargs)
+
+    ctrl = object.__new__(StreamCardController)
+    ctrl._clarify_registry = registry
+    ctrl.on_clarify_action = AsyncMock(side_effect=_handle)
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat-1")
+    raw = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value=None,
+                name=None,
+                tag="input",
+                form_value=None,
+                input_value="direct native text",
+                option=None,
+            ),
+            context=SimpleNamespace(open_chat_id="chat-1", open_message_id="msg-1"),
+            operator=SimpleNamespace(open_id="owner-open", user_id="owner-user", union_id=""),
+        )
+    )
+    event = SimpleNamespace(raw_message=raw, text="/card input")
+    with patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl):
+        assert await on_feishu_interaction_action(
+            message_id="callback-token",
+            source=source,
+            event=event,
+            session_key="feishu:chat-1:owner",
+            gateway=SimpleNamespace(
+                _resolve_profile_home_for_source=lambda _source: "/profiles/owner",
+            ),
+        )
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == "direct native text"
 
 
 @pytest.mark.asyncio

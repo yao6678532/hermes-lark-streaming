@@ -107,6 +107,30 @@ def _clarify_options(choices: list[str]) -> list[dict[str, Any]]:
     ]
 
 
+def _clarify_direct_input(clarify_id: str) -> dict[str, Any]:
+    """Build the pending-card custom-answer input as an independent action."""
+    return {
+        "tag": "input",
+        "name": "clarify_direct_input",
+        "element_id": "clarify_direct_input",
+        "width": "fill",
+        "placeholder": {
+            "tag": "plain_text",
+            "content": "Type another answer...",
+            "i18n_content": _i18n("Type another answer...", "请输入其他回答…"),
+        },
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {
+                    "hermes_lark_action": "clarify_direct_input",
+                    "clarify_id": clarify_id,
+                },
+            }
+        ],
+    }
+
+
 def build_clarify_card(
     *,
     clarify_id: str,
@@ -189,16 +213,7 @@ def build_clarify_card(
                     ],
                 }
             )
-        elements.append(
-            _button(
-                "Other…",
-                {
-                    "hermes_lark_action": "clarify_other",
-                    "clarify_id": clarify_id,
-                },
-                zh_label="其他回答…",
-            )
-        )
+        elements.append(_clarify_direct_input(clarify_id))
     elif status == "input":
         submit = {
             "tag": "button",

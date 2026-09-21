@@ -105,7 +105,7 @@ class TestBuildClarifyCard:
 
         assert card["schema"] == "2.0"
         assert "header" not in card
-        question, choices_md, picker, other = card["body"]["elements"]
+        question, choices_md, picker, direct_input = card["body"]["elements"]
         assert question["tag"] == "div"
         assert question["icon"]["token"] == "info_outlined"
         assert long_choice in choices_md["content"]
@@ -119,11 +119,13 @@ class TestBuildClarifyCard:
             "hermes_lark_action": "clarify_select",
             "clarify_id": "clarify-1",
         }
-        assert other["tag"] == "button"
-        assert other["value"] == {
-            "hermes_lark_action": "clarify_other",
+        assert direct_input["tag"] == "input"
+        assert direct_input["name"] == "clarify_direct_input"
+        assert direct_input["behaviors"][0]["value"] == {
+            "hermes_lark_action": "clarify_direct_input",
             "clarify_id": "clarify-1",
         }
+        assert "clarify_other" not in str(card)
 
     def test_pending_multi_select_uses_native_form_and_submit(self) -> None:
         card = build_clarify_card(
@@ -133,7 +135,7 @@ class TestBuildClarifyCard:
             multi_select=True,
         )
 
-        form = card["body"]["elements"][2]
+        form, direct_input = card["body"]["elements"][2:]
         assert form["tag"] == "form"
         picker, submit = form["elements"]
         assert picker["tag"] == "multi_select_static"
@@ -147,6 +149,9 @@ class TestBuildClarifyCard:
             "hermes_lark_action": "clarify_multi_submit",
             "clarify_id": "clarify-1",
         }
+        assert direct_input["tag"] == "input"
+        assert direct_input["name"] == "clarify_direct_input"
+        assert direct_input not in form["elements"]
 
     def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
         card = build_clarify_card(
@@ -185,7 +190,14 @@ class TestBuildClarifyCard:
             answer="B" if status == "answered" else "",
         )
 
-        assert all(element["tag"] not in {"button", "column_set", "form"} for element in card["body"]["elements"])
+        assert all(
+            element["tag"] not in {"button", "column_set", "form", "input", "select_static"}
+            for element in card["body"]["elements"]
+        )
+        assert not any(
+            action in str(card)
+            for action in {"clarify_select", "clarify_multi_submit", "clarify_direct_input"}
+        )
 
     def test_resolved_and_expired_cards_are_quiet_and_inert(self) -> None:
         answered = build_clarify_card(
