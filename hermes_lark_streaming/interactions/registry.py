@@ -30,9 +30,12 @@ class ClarifyCardState:
     owner_user_ids: frozenset[str]
     question: str
     choices: tuple[str, ...]
+    multi_select: bool = False
     status: ClarifyStatus = "pending"
     answer: str = ""
     sequence: int = 0
+    generation: int = 0
+    delivered: bool = False
     created_at: float = 0.0
 
     def __post_init__(self) -> None:
@@ -45,20 +48,49 @@ class ClarifyCardRegistry:
 
     def __init__(self) -> None:
         self._states: dict[str, ClarifyCardState] = {}
+        self._session_generations: dict[str, int] = {}
+        self._latest_generations: dict[str, int] = {}
         self._lock = threading.RLock()
 
-    def register(self, state: ClarifyCardState) -> None:
+    def register(self, state: ClarifyCardState) -> tuple[ClarifyCardState, ...]:
+        """Reserve a monotonically newer session ownership epoch.
+
+        A newer Hermes clarify supersedes every older local presentation
+        state immediately, even while its CardKit delivery is still in
+        flight.  This prevents a failed newer delivery from reviving a card
+        whose official pending wait has already been replaced.
+        """
         with self._lock:
+            existing = self._states.get(state.clarify_id)
+            if existing is not None:
+                self._remove_locked(existing)
             if state.clarify_id not in self._states and len(self._states) >= _MAX_PRESENTATION_STATES:
                 terminal = [
                     item
                     for item in self._states.values()
-                    if item.status in {"answered", "awaiting_text", "expired"}
+                    if item.status in {"answered", "expired"}
                 ]
                 candidates = terminal or list(self._states.values())
                 oldest = min(candidates, key=lambda item: item.created_at)
-                self._states.pop(oldest.clarify_id, None)
+                self._remove_locked(oldest)
+            generation = self._session_generations.get(state.session_key, 0) + 1
+            self._session_generations[state.session_key] = generation
+            self._latest_generations[state.session_key] = generation
+            state.generation = generation
             self._states[state.clarify_id] = state
+            retired: list[ClarifyCardState] = []
+            for candidate in self._states.values():
+                if (
+                    candidate is state
+                    or candidate.session_key != state.session_key
+                    or candidate.status in {"answered", "expired"}
+                ):
+                    continue
+                candidate.status = "expired"
+                candidate.answer = ""
+                if candidate.delivered:
+                    retired.append(candidate)
+            return tuple(retired)
 
     def get(self, clarify_id: str) -> ClarifyCardState | None:
         with self._lock:
@@ -74,7 +106,55 @@ class ClarifyCardRegistry:
 
     def remove(self, clarify_id: str) -> None:
         with self._lock:
-            self._states.pop(clarify_id, None)
+            state = self._states.get(clarify_id)
+            if state is not None:
+                self._remove_locked(state)
+
+    def _remove_locked(self, state: ClarifyCardState) -> None:
+        if self._states.get(state.clarify_id) is not state:
+            return
+        self._states.pop(state.clarify_id, None)
+        if not any(item.session_key == state.session_key for item in self._states.values()):
+            self._latest_generations.pop(state.session_key, None)
+            self._session_generations.pop(state.session_key, None)
+
+    def complete_delivery(
+        self,
+        state: ClarifyCardState,
+    ) -> tuple[bool, tuple[ClarifyCardState, ...]]:
+        """Settle one network send against the latest per-session generation.
+
+        The network await happens outside this lock. Registration already
+        retires older ownership epochs; a late older delivery therefore
+        retires itself when it returns.
+        """
+        with self._lock:
+            state.delivered = True
+            current = self._states.get(state.clarify_id)
+            is_latest = (
+                current is state
+                and self._latest_generations.get(state.session_key) == state.generation
+                and state.status not in {"answered", "expired"}
+            )
+            if not is_latest:
+                if state.status != "answered":
+                    state.status = "expired"
+                    state.answer = ""
+                return False, (state,)
+
+            retired: list[ClarifyCardState] = []
+            for candidate in self._states.values():
+                if (
+                    candidate is state
+                    or candidate.session_key != state.session_key
+                    or candidate.status in {"answered", "expired"}
+                ):
+                    continue
+                candidate.status = "expired"
+                candidate.answer = ""
+                if candidate.delivered:
+                    retired.append(candidate)
+            return True, tuple(retired)
 
     def claim(
         self,
@@ -94,7 +174,7 @@ class ClarifyCardRegistry:
         """Update presentation state without changing Hermes' pending entry."""
         with self._lock:
             state = self._states.get(clarify_id)
-            if state is None:
+            if state is None or state.status in {"answered", "expired"}:
                 return False
             state.status = status
             state.answer = answer
@@ -107,14 +187,15 @@ class ClarifyCardRegistry:
             if state is not None and state.status == "resolving":
                 state.status = "pending"
 
-    def finish(self, clarify_id: str, status: ClarifyStatus, *, answer: str = "") -> None:
+    def finish(self, clarify_id: str, status: ClarifyStatus, *, answer: str = "") -> bool:
+        """Commit a terminal/display state once; answered and expired are immutable."""
         with self._lock:
             state = self._states.get(clarify_id)
-            if state is None:
-                return
+            if state is None or state.status in {"answered", "expired"}:
+                return False
             state.status = status
             state.answer = answer
-
+            return True
 
 @dataclass(slots=True)
 class ApprovalCardState:

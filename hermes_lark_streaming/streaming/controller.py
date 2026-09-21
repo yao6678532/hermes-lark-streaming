@@ -93,6 +93,7 @@ class StreamingController:
     _cleanup: Callable[[str], None]
     _cleanup_session: Callable[[CardSession], None]
     _conversation_lock: Callable[[CardSession], asyncio.Lock]
+    _get_active_session: Callable[[str], CardSession | None]
     _register_latest_card: Callable[[CardSession], bool]
     _remember_finalized_card: Callable[[CardSession, dict[str, Any]], None]
     _wait_for_card_creation: Callable[[CardSession], Coroutine[Any, Any, bool]]
@@ -105,6 +106,38 @@ class StreamingController:
         if session.guard.should_skip("_schedule_flush"):
             return
         session.flush.schedule_update(lambda: self._do_flush(session), urgent=urgent)
+
+    def _schedule_progress_only_flush(self, session: CardSession) -> None:
+        """Flush only a paused session's fixed progress element.
+
+        Clarify deliberately pauses the normal segment pipeline.  Heartbeats
+        still need a CardKit home, but must never resume answer/reasoning/tool
+        flushing or target a card after a clarify handoff.
+        """
+        expected_card_id = session.card_id
+        if not expected_card_id:
+            return
+
+        async def flush_progress_only() -> None:
+            try:
+                async with self._conversation_lock(session):
+                    if (
+                        self._get_active_session(session.message_id) is not session
+                        or session.state != SessionState.CLARIFY_PAUSED
+                        or session.card_id != expected_card_id
+                        or not session.progress.available
+                        or not session.progress.dirty
+                        or session.guard.should_skip("_schedule_progress_only_flush")
+                    ):
+                        return
+                    await self._flush_progress(session)
+            except Exception:
+                _logger.debug("paused CardKit progress flush failed", exc_info=True)
+
+        try:
+            asyncio.get_running_loop().create_task(flush_progress_only())
+        except RuntimeError:
+            _logger.debug("no running loop for paused CardKit progress flush")
 
     async def _flush_progress(self, session: CardSession) -> None:
         """Update the fixed status element while preserving concurrent events."""
@@ -549,7 +582,7 @@ class StreamingController:
 
     async def _do_flush_inner(self, session: CardSession) -> None:
         """幂等 flush：按 segment 顺序处理结构性变更，超阈值时拆卡."""
-        if session.state.is_terminal or not session.card_id:
+        if session.state.is_terminal or session.state == SessionState.CLARIFY_PAUSED or not session.card_id:
             return
         segment_state = session.segment_state
         if segment_state is None:
