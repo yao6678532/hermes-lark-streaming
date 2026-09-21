@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from gateway.platforms.base import BasePlatformAdapter
 from tools import clarify_gateway
 
+from hermes_lark_streaming.controller import StreamCardController
 from hermes_lark_streaming.interactions.clarify import (
     ClarifyAdapterProxy,
     ClarifySendResult,
@@ -72,6 +74,7 @@ def _state(
         question=question,
         choices=choices,
         multi_select=multi_select,
+        delivered=True,
     )
 
 
@@ -846,13 +849,9 @@ async def test_gateway_hook_recovers_form_action_name_when_feishu_omits_value() 
     async def _handle(**kwargs: object) -> bool:
         return await handle_clarify_action(client=AsyncMock(), registry=registry, **kwargs)
 
-    ctrl = SimpleNamespace(
-        enabled=True,
-        clarify_id_for_card_message=lambda *, chat_id, card_msg_id: (
-            state.clarify_id if (chat_id, card_msg_id) == ("chat-1", "msg-1") else ""
-        ),
-        on_clarify_action=AsyncMock(side_effect=_handle),
-    )
+    ctrl = object.__new__(StreamCardController)
+    ctrl._clarify_registry = registry
+    ctrl.on_clarify_action = AsyncMock(side_effect=_handle)
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat-1")
     raw = SimpleNamespace(
         event=SimpleNamespace(
@@ -890,19 +889,16 @@ async def test_gateway_hook_recovers_native_multi_form_submit_without_value() ->
     async def _handle(**kwargs: object) -> bool:
         return await handle_clarify_action(client=AsyncMock(), registry=registry, **kwargs)
 
-    ctrl = SimpleNamespace(
-        enabled=True,
-        clarify_id_for_card_message=lambda *, chat_id, card_msg_id: (
-            state.clarify_id if (chat_id, card_msg_id) == ("chat-1", "msg-1") else ""
-        ),
-        on_clarify_action=AsyncMock(side_effect=_handle),
-    )
+    ctrl = object.__new__(StreamCardController)
+    ctrl._clarify_registry = registry
+    ctrl.on_clarify_action = AsyncMock(side_effect=_handle)
     source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id="chat-1")
     raw = SimpleNamespace(
         event=SimpleNamespace(
             action=SimpleNamespace(
                 value=None,
-                name="clarify_multi_submit",
+                name=None,
+                tag="button",
                 form_value={"clarify_multi_select": ["0", "1"]},
                 input_value=None,
                 option=None,
@@ -923,6 +919,53 @@ async def test_gateway_hook_recovers_native_multi_form_submit_without_value() ->
             ),
         )
     assert json.loads(clarify_gateway.wait_for_response("clarify-1", timeout=0) or "") == ["A", "B"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("callback_chat_id", "card_message_id"),
+    [("chat-1", "unknown-msg"), ("wrong-chat", "msg-1")],
+    ids=["unknown-card-message", "wrong-chat"],
+)
+async def test_native_multi_form_shape_is_not_consumed_outside_registered_card_scope(
+    callback_chat_id: str,
+    card_message_id: str,
+) -> None:
+    registry = ClarifyCardRegistry()
+    registry.register(_state(multi_select=True))
+    ctrl = object.__new__(StreamCardController)
+    ctrl._clarify_registry = registry
+    ctrl.on_clarify_action = AsyncMock()
+    source = SimpleNamespace(platform=SimpleNamespace(value="feishu"), chat_id=callback_chat_id)
+    raw = SimpleNamespace(
+        event=SimpleNamespace(
+            action=SimpleNamespace(
+                value=None,
+                name=None,
+                tag="button",
+                form_value={"clarify_multi_select": ["0", "1"]},
+                input_value=None,
+                option=None,
+            ),
+            context=SimpleNamespace(
+                open_chat_id=callback_chat_id,
+                open_message_id=card_message_id,
+            ),
+            operator=SimpleNamespace(open_id="owner-open", user_id="owner-user", union_id=""),
+        )
+    )
+    event = SimpleNamespace(raw_message=raw, text="/card button")
+    with patch("hermes_lark_streaming.patch.get_controller", return_value=ctrl):
+        assert not await on_feishu_interaction_action(
+            message_id="callback-token",
+            source=source,
+            event=event,
+            session_key="feishu:chat-1:owner",
+            gateway=SimpleNamespace(
+                _resolve_profile_home_for_source=lambda _source: "/profiles/owner",
+            ),
+        )
+    ctrl.on_clarify_action.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1067,6 +1110,71 @@ async def test_new_clarify_atomically_retires_older_card_in_same_session() -> No
     assert registry.get("clarify-new").status == "pending"  # type: ignore[union-attr]
     retired = client.cardkit_update.await_args.args[1]
     assert "此问题已失效" in str(retired)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_clarify_delivery_keeps_only_latest_generation_pending() -> None:
+    registry = ClarifyCardRegistry()
+    a_send_started = asyncio.Event()
+    release_a_send = asyncio.Event()
+    client_a = AsyncMock()
+    client_a.cardkit_create.return_value = "card-a"
+
+    async def send_a(*_args: object, **_kwargs: object) -> str:
+        a_send_started.set()
+        await release_a_send.wait()
+        return "msg-a"
+
+    client_a.send_card_id_to_chat.side_effect = send_a
+    client_b = AsyncMock()
+    client_b.cardkit_create.return_value = "card-b"
+    client_b.send_card_id_to_chat.return_value = "msg-b"
+
+    task_a = asyncio.create_task(
+        send_clarify_card(
+            client=client_a,
+            registry=registry,
+            chat_id="chat-1",
+            question="Question A?",
+            choices=["A1", "A2"],
+            clarify_id="clarify-a",
+            session_key="feishu:chat-1:owner",
+            owner_user_ids=frozenset({"owner"}),
+            metadata=None,
+        )
+    )
+    await asyncio.wait_for(a_send_started.wait(), timeout=1)
+
+    result_b = await send_clarify_card(
+        client=client_b,
+        registry=registry,
+        chat_id="chat-1",
+        question="Question B?",
+        choices=["B1", "B2"],
+        clarify_id="clarify-b",
+        session_key="feishu:chat-1:owner",
+        owner_user_ids=frozenset({"owner"}),
+        metadata=None,
+    )
+    state_a = registry.get("clarify-a")
+    state_b = registry.get("clarify-b")
+    assert result_b.success is True
+    assert state_a is not None and state_a.generation == 1 and state_a.status == "expired"
+    assert state_b is not None and state_b.generation == 2 and state_b.status == "pending"
+    client_b.cardkit_update.assert_not_awaited()
+
+    release_a_send.set()
+    result_a = await asyncio.wait_for(task_a, timeout=1)
+    assert result_a.success is True
+    assert state_a.status == "expired"
+    assert state_b.status == "pending"
+    retired_a = client_a.cardkit_update.await_args.args[1]
+    assert "此问题已失效" in str(retired_a)
+
+    assert registry.claim("clarify-a") is None
+    assert registry.claim("clarify-b") is state_b
+    registry.release("clarify-b")
+    assert state_b.status == "pending"
 
 
 @pytest.mark.asyncio

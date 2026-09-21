@@ -344,7 +344,7 @@ async def send_clarify_card(
     metadata: dict[str, Any] | None,
     multi_select: bool = False,
 ) -> ClarifySendResult:
-    """Create and deliver a supported card, registering only after delivery."""
+    """Create and deliver a supported card with per-session ownership."""
     canonical_choices = [str(choice) for choice in choices if str(choice).strip()]
     if not canonical_choices:
         return ClarifySendResult(False, error="no choices")
@@ -382,9 +382,11 @@ async def send_clarify_card(
         registry.remove(clarify_id)
         raise
     state.card_msg_id = card_msg_id
-    for retired in registry.retire_session(session_key, except_clarify_id=clarify_id):
+    owns_latest, retired_states = registry.complete_delivery(state)
+    for retired in retired_states:
         await _update_card(client, retired, "expired")
-    _start_lifecycle_watch(client=client, registry=registry, state=state)
+    if owns_latest:
+        _start_lifecycle_watch(client=client, registry=registry, state=state)
     return ClarifySendResult(True, message_id=card_msg_id)
 
 

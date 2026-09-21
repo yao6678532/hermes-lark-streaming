@@ -366,6 +366,11 @@ class StreamCardController(StreamingController):
         state = self._clarify_registry.find_by_card_message(chat_id, card_msg_id)
         return state.clarify_id if state is not None else ""
 
+    def native_multi_clarify_id_for_card_message(self, *, chat_id: str, card_msg_id: str) -> str:
+        """Resolve only a registered native multi-select form callback."""
+        state = self._clarify_registry.find_by_card_message(chat_id, card_msg_id)
+        return state.clarify_id if state is not None and state.multi_select else ""
+
     def _get_loop(self) -> asyncio.AbstractEventLoop | None:
         """获取事件循环，缓存以便跨线程复用."""
         try:

@@ -34,6 +34,8 @@ class ClarifyCardState:
     status: ClarifyStatus = "pending"
     answer: str = ""
     sequence: int = 0
+    generation: int = 0
+    delivered: bool = False
     created_at: float = 0.0
 
     def __post_init__(self) -> None:
@@ -46,10 +48,15 @@ class ClarifyCardRegistry:
 
     def __init__(self) -> None:
         self._states: dict[str, ClarifyCardState] = {}
+        self._session_generations: dict[str, int] = {}
+        self._latest_generations: dict[str, int] = {}
         self._lock = threading.RLock()
 
     def register(self, state: ClarifyCardState) -> None:
         with self._lock:
+            existing = self._states.get(state.clarify_id)
+            if existing is not None:
+                self._remove_locked(existing)
             if state.clarify_id not in self._states and len(self._states) >= _MAX_PRESENTATION_STATES:
                 terminal = [
                     item
@@ -58,7 +65,11 @@ class ClarifyCardRegistry:
                 ]
                 candidates = terminal or list(self._states.values())
                 oldest = min(candidates, key=lambda item: item.created_at)
-                self._states.pop(oldest.clarify_id, None)
+                self._remove_locked(oldest)
+            generation = self._session_generations.get(state.session_key, 0) + 1
+            self._session_generations[state.session_key] = generation
+            self._latest_generations[state.session_key] = generation
+            state.generation = generation
             self._states[state.clarify_id] = state
 
     def get(self, clarify_id: str) -> ClarifyCardState | None:
@@ -75,7 +86,64 @@ class ClarifyCardRegistry:
 
     def remove(self, clarify_id: str) -> None:
         with self._lock:
-            self._states.pop(clarify_id, None)
+            state = self._states.get(clarify_id)
+            if state is not None:
+                self._remove_locked(state)
+
+    def _remove_locked(self, state: ClarifyCardState) -> None:
+        if self._states.get(state.clarify_id) is not state:
+            return
+        self._states.pop(state.clarify_id, None)
+        if self._latest_generations.get(state.session_key) != state.generation:
+            return
+        remaining = [
+            item.generation
+            for item in self._states.values()
+            if item.session_key == state.session_key
+        ]
+        if remaining:
+            self._latest_generations[state.session_key] = max(remaining)
+        else:
+            self._latest_generations.pop(state.session_key, None)
+            self._session_generations.pop(state.session_key, None)
+
+    def complete_delivery(
+        self,
+        state: ClarifyCardState,
+    ) -> tuple[bool, tuple[ClarifyCardState, ...]]:
+        """Settle one network send against the latest per-session generation.
+
+        The network await happens outside this lock. A late older delivery
+        retires itself; a latest delivery retires only already-delivered older
+        cards, leaving in-flight cards to retire themselves when they return.
+        """
+        with self._lock:
+            state.delivered = True
+            current = self._states.get(state.clarify_id)
+            is_latest = (
+                current is state
+                and self._latest_generations.get(state.session_key) == state.generation
+                and state.status not in {"answered", "expired"}
+            )
+            if not is_latest:
+                if state.status != "answered":
+                    state.status = "expired"
+                    state.answer = ""
+                return False, (state,)
+
+            retired: list[ClarifyCardState] = []
+            for candidate in self._states.values():
+                if (
+                    candidate is state
+                    or candidate.session_key != state.session_key
+                    or candidate.status in {"answered", "expired"}
+                ):
+                    continue
+                candidate.status = "expired"
+                candidate.answer = ""
+                if candidate.delivered:
+                    retired.append(candidate)
+            return True, tuple(retired)
 
     def claim(
         self,
@@ -117,28 +185,6 @@ class ClarifyCardRegistry:
             state.status = status
             state.answer = answer
             return True
-
-    def retire_session(
-        self,
-        session_key: str,
-        *,
-        except_clarify_id: str = "",
-    ) -> tuple[ClarifyCardState, ...]:
-        """Atomically make every older live card in a Hermes session inert."""
-        retired: list[ClarifyCardState] = []
-        with self._lock:
-            for state in self._states.values():
-                if (
-                    state.session_key != session_key
-                    or state.clarify_id == except_clarify_id
-                    or state.status in {"answered", "expired"}
-                ):
-                    continue
-                state.status = "expired"
-                state.answer = ""
-                retired.append(state)
-        return tuple(retired)
-
 
 @dataclass(slots=True)
 class ApprovalCardState:

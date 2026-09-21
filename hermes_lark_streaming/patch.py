@@ -327,12 +327,39 @@ async def on_feishu_interaction_action(
     callback_chat_id = str(_field(callback_context, "open_chat_id", "") or "").strip()
     callback_message_id = str(_field(callback_context, "open_message_id", "") or "").strip()
     callback_action_name = str(_field(callback_action, "name", "") or "").strip()
+    callback_action_tag = str(_field(callback_action, "tag", "") or "").strip()
+    callback_form_value = _field(callback_action, "form_value")
     action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
-    if action_value is None and callback_action_name in {
-        "clarify_multi_submit",
-        "clarify_other_submit",
-        "clarify_other_back",
-    } and callback_chat_id and callback_message_id:
+    native_multi_submit = (
+        callback_action_tag == "button"
+        and isinstance(callback_form_value, dict)
+        and "clarify_multi_select" in callback_form_value
+        and bool(callback_chat_id)
+        and bool(callback_message_id)
+    )
+    if action_value is None and native_multi_submit:
+        try:
+            profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
+            ctrl = get_controller(profile_home)
+            clarify_id = ctrl.native_multi_clarify_id_for_card_message(
+                chat_id=callback_chat_id,
+                card_msg_id=callback_message_id,
+            )
+        except Exception:
+            clarify_id = ""
+        if clarify_id:
+            decoded = {
+                "hermes_lark_action": "clarify_multi_submit",
+                "clarify_id": clarify_id,
+            }
+            action_value = decoded
+            raw_message = raw_message_with_action_value(raw_message, decoded)
+    if (
+        action_value is None
+        and callback_action_name in {"clarify_other_submit", "clarify_other_back"}
+        and callback_chat_id
+        and callback_message_id
+    ):
         try:
             profile_home = gateway._resolve_profile_home_for_source(source) if gateway is not None else None
             ctrl = get_controller(profile_home)
