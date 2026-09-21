@@ -47,6 +47,7 @@ class CardSession:
         "agent_status",
         "agent_status_created",
         "anchor_id",
+        "card_generation",
         "card_id",
         "card_msg_id",
         "chat_id",
@@ -54,6 +55,9 @@ class CardSession:
         "create_task",
         "created_at",
         "element_count",
+        "first_visible_pending_source",
+        "first_visible_rendered_generation",
+        "first_visible_urgent_generation",
         "flush",
         "footer",
         "guard",
@@ -86,6 +90,10 @@ class CardSession:
         self.state = SessionState.IDLE
         self.card_msg_id: str | None = None
         self.card_id: str | None = None
+        self.card_generation = 0
+        self.first_visible_pending_source: str | None = None
+        self.first_visible_urgent_generation = -1
+        self.first_visible_rendered_generation = -1
         self.tool_use = ToolUseTracker()
         self.tool_panel = ToolPanelState()
         self.flush = FlushController(throttle_ms=CARDKIT_MS, loop=loop)
@@ -116,7 +124,18 @@ class CardSession:
     def has_card(self) -> bool:
         return bool(self.card_id or self.card_msg_id)
 
-    def set_card(self, *, card_id: str, card_msg_id: str) -> None:
+    def set_card(
+        self,
+        *,
+        card_id: str,
+        card_msg_id: str,
+        preserve_pending_visible: bool = False,
+    ) -> None:
+        """Assign a new physical card and advance its flush ownership token."""
+        if self.card_id != card_id:
+            self.card_generation += 1
+            if not preserve_pending_visible:
+                self.first_visible_pending_source = None
         self.card_id = card_id
         self.card_msg_id = card_msg_id
 

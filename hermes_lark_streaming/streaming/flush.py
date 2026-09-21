@@ -25,6 +25,7 @@ class FlushController:
         self._throttle_ms = throttle_ms
         self._flush_in_progress = False
         self._needs_reflush = False
+        self._reflush_callback: Callable[[], Awaitable[None]] | None = None
         self._pending_timer: asyncio.TimerHandle | None = None
         self._last_update_time = 0.0
         self._completed = False
@@ -74,6 +75,7 @@ class FlushController:
             self._cancel_timer()
             if self._flush_in_progress:
                 self._needs_reflush = True
+                self._reflush_callback = do_flush
             else:
                 self._do_flush_task(do_flush)
             return
@@ -115,6 +117,8 @@ class FlushController:
         """标记完成，不再接受新更新."""
         self._completed = True
         self._cancel_timer()
+        self._needs_reflush = False
+        self._reflush_callback = None
         for r in self._flush_resolvers:
             if not r.done():
                 r.set_result(None)
@@ -143,7 +147,9 @@ class FlushController:
 
     async def _do_flush(self, do_flush: Callable[[], Awaitable[None]]) -> None:
         if self._completed or self._flush_in_progress:
-            self._needs_reflush = True
+            if not self._completed:
+                self._needs_reflush = True
+                self._reflush_callback = do_flush
             return
 
         self._flush_in_progress = True
@@ -165,7 +171,9 @@ class FlushController:
         # 如果 flush 期间又有新数据 → 立即重刷
         if self._needs_reflush and not self._completed:
             self._needs_reflush = False
-            self._loop.call_soon(asyncio.create_task, self._do_flush(do_flush))
+            reflush_callback = self._reflush_callback or do_flush
+            self._reflush_callback = None
+            self._loop.call_soon(asyncio.create_task, self._do_flush(reflush_callback))
 
     def _cancel_timer(self) -> None:
         if self._pending_timer is not None:

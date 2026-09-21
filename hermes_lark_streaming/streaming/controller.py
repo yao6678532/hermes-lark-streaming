@@ -105,7 +105,116 @@ class StreamingController:
             return
         if session.guard.should_skip("_schedule_flush"):
             return
-        session.flush.schedule_update(lambda: self._do_flush(session), urgent=urgent)
+        expected_generation = session.card_generation
+        expected_card_id = session.card_id
+        first_visible_generation = expected_generation if urgent else None
+        session.flush.schedule_update(
+            lambda: self._do_flush(
+                session,
+                expected_generation=expected_generation,
+                expected_card_id=expected_card_id,
+                first_visible_generation=first_visible_generation,
+            ),
+            urgent=urgent,
+        )
+
+    def _schedule_visible_flush(self, session: CardSession, *, source: str) -> None:
+        """Use the one-shot urgent lane for a physical card's first visible mutation."""
+        if not session.first_visible_pending_source:
+            session.first_visible_pending_source = source
+
+        generation = session.card_generation
+        urgent = (
+            session.state == SessionState.STREAMING
+            and bool(session.card_id)
+            and session.first_visible_urgent_generation != generation
+            and session.first_visible_rendered_generation != generation
+        )
+        if urgent:
+            session.first_visible_urgent_generation = generation
+            _logger.debug(
+                "first_visible_flush msg=%s card=%s source=%s generation=%d mode=urgent",
+                session.message_id[:12],
+                (session.card_id or "")[:12],
+                session.first_visible_pending_source,
+                generation,
+            )
+        self._schedule_flush(session, urgent=urgent)
+
+    @staticmethod
+    def _mark_first_visible_rendered(session: CardSession, *, source: str) -> None:
+        """Record a successful user-visible mutation on the current physical card."""
+        if session.first_visible_rendered_generation == session.card_generation:
+            return
+        if session.first_visible_urgent_generation != session.card_generation:
+            _logger.debug(
+                "first_visible_flush msg=%s card=%s source=%s generation=%d mode=inflight",
+                session.message_id[:12],
+                (session.card_id or "")[:12],
+                source,
+                session.card_generation,
+            )
+        session.first_visible_rendered_generation = session.card_generation
+        session.first_visible_pending_source = None
+
+    def _pending_visible_source(self, session: CardSession) -> str | None:
+        """Derive a visible dirty lane for state accumulated before card readiness."""
+        pending_source = session.first_visible_pending_source
+        if pending_source and self._has_visible_dirty_source(session, pending_source):
+            return pending_source
+        session.first_visible_pending_source = None
+        if (
+            session.interim_preview.dirty
+            and not session.interim_preview.final_started
+            and session.interim_preview.text.strip()
+        ):
+            return "commentary"
+        segment_state = session.segment_state
+        if segment_state is None:
+            return None
+        for segment in segment_state.segments[session.split_index:]:
+            if not segment.dirty or not segment.text.strip():
+                continue
+            if segment.type == SegmentType.ANSWER:
+                return "answer"
+            if segment.type == SegmentType.REASONING and self._cfg.show_reasoning:
+                return "reasoning"
+        if (
+            self._cfg.show_tool_use
+            and session.tool_panel.dirty
+            and session.tool_use.build_display_steps()
+        ):
+            return "tool"
+        return None
+
+    def _has_visible_dirty_source(self, session: CardSession, source: str) -> bool:
+        """Check the current presentation state, not merely callback history."""
+        if source == "commentary":
+            return bool(
+                session.interim_preview.dirty
+                and not session.interim_preview.final_started
+                and session.interim_preview.text.strip()
+            )
+        if source == "tool":
+            return bool(
+                self._cfg.show_tool_use
+                and session.tool_panel.dirty
+                and session.tool_use.build_display_steps()
+            )
+        segment_state = session.segment_state
+        if segment_state is None:
+            return False
+        segment_type = (
+            SegmentType.ANSWER if source == "answer" else SegmentType.REASONING
+        )
+        if segment_type == SegmentType.REASONING and not self._cfg.show_reasoning:
+            return False
+        return any(
+            segment.type == segment_type
+            and segment.dirty
+            and bool(segment.text.strip())
+            for segment in segment_state.segments[session.split_index:]
+        )
 
     def _schedule_progress_only_flush(self, session: CardSession) -> None:
         """Flush only a paused session's fixed progress element.
@@ -334,6 +443,8 @@ class StreamingController:
             except Exception:
                 _logger.debug("CardKit merged reasoning stream failed", exc_info=True)
                 return
+            if rendered_text.strip():
+                self._mark_first_visible_rendered(session, source="reasoning")
             if state.text == rendered_text:
                 state.dirty = False
 
@@ -409,6 +520,8 @@ class StreamingController:
             _logger.debug("CardKit interim preview stream failed", exc_info=True)
             return
 
+        if rendered_text.strip():
+            self._mark_first_visible_rendered(session, source="commentary")
         state.mark_rendered(rendered_revision)
         _logger.debug(
             "commentary_rendered msg=%s revision=%d",
@@ -459,7 +572,10 @@ class StreamingController:
                 session.flush.flush_in_progress,
                 session.flush.has_pending_timer,
             )
-            self._schedule_flush(session, urgent=True)
+            if text.strip():
+                self._schedule_visible_flush(session, source="commentary")
+            else:
+                self._schedule_flush(session)
             return True
 
         activity = self._uses_activity_reasoning_presentation(
@@ -472,6 +588,8 @@ class StreamingController:
         reasoning = split.get("reasoning_text")
         answer = split.get("answer_text")
 
+        visible_reasoning = bool(reasoning and reasoning.strip() and self._cfg.show_reasoning)
+        visible_answer = bool(answer and answer.strip())
         if reasoning and self._cfg.show_reasoning:
             self._record_reasoning(session, reasoning, activity=activity)
         if answer:
@@ -486,7 +604,13 @@ class StreamingController:
             self._append_answer_segment(session, answer)
         if not (reasoning and self._cfg.show_reasoning) and not answer:
             return False
-        self._schedule_flush(session)
+        if visible_reasoning or visible_answer:
+            self._schedule_visible_flush(
+                session,
+                source="reasoning" if visible_reasoning else "answer",
+            )
+        else:
+            self._schedule_flush(session)
         return True
 
     async def _do_create_card(self, session: CardSession) -> None:
@@ -536,7 +660,11 @@ class StreamingController:
                         chat_id=session.chat_id,
                         card={"type": "card", "data": {"card_id": card_id}},
                     )
-            session.set_card(card_id=card_id, card_msg_id=card_msg_id)
+            session.set_card(
+                card_id=card_id,
+                card_msg_id=card_msg_id,
+                preserve_pending_visible=True,
+            )
             async with self._conversation_lock(session):
                 self._register_latest_card(session)
             session.element_count = 1
@@ -558,10 +686,11 @@ class StreamingController:
                 or session.progress.dirty
                 or session.interim_preview.dirty
             ):
-                self._schedule_flush(
-                    session,
-                    urgent=session.interim_preview.dirty,
-                )
+                visible_source = self._pending_visible_source(session)
+                if visible_source:
+                    self._schedule_visible_flush(session, source=visible_source)
+                else:
+                    self._schedule_flush(session)
             _logger.info(
                 "CardKit card created: msg=%s card_id=%s",
                 session.message_id[:12],
@@ -576,9 +705,40 @@ class StreamingController:
             _logger.exception("_do_create_card failed")
             session.mark_failed()
 
-    async def _do_flush(self, session: CardSession) -> None:
-        async with self._conversation_lock(session):
-            await self._do_flush_inner(session)
+    async def _do_flush(
+        self,
+        session: CardSession,
+        *,
+        expected_generation: int | None = None,
+        expected_card_id: str | None = None,
+        first_visible_generation: int | None = None,
+    ) -> None:
+        if (
+            expected_generation is not None
+            and (
+                session.card_generation != expected_generation
+                or session.card_id != expected_card_id
+            )
+        ):
+            return
+        try:
+            async with self._conversation_lock(session):
+                if (
+                    expected_generation is not None
+                    and (
+                        session.card_generation != expected_generation
+                        or session.card_id != expected_card_id
+                    )
+                ):
+                    return
+                await self._do_flush_inner(session)
+        finally:
+            if (
+                first_visible_generation is not None
+                and session.card_generation == first_visible_generation
+                and session.first_visible_rendered_generation != first_visible_generation
+            ):
+                session.first_visible_urgent_generation = -1
 
     async def _do_flush_inner(self, session: CardSession) -> None:
         """幂等 flush：按 segment 顺序处理结构性变更，超阈值时拆卡."""
@@ -894,6 +1054,8 @@ class StreamingController:
                         content,
                         sequence=session.sequence,
                     )
+                    if seg.text.strip():
+                        self._mark_first_visible_rendered(session, source="reasoning")
                     seg.dirty = False
                 elif seg.type == SegmentType.ANSWER:
                     content = seg.text
@@ -913,6 +1075,8 @@ class StreamingController:
                         content,
                         sequence=session.sequence,
                     )
+                    if seg.text.strip():
+                        self._mark_first_visible_rendered(session, source="answer")
                     seg.dirty = False
             except Exception as e:
                 _logger.debug("CardKit stream element failed: %s el=%s", e, seg.el_id, exc_info=True)
@@ -948,6 +1112,7 @@ class StreamingController:
         pre_flush_tool_offsets = {
             seg.el_id: seg.tool_end_offset for seg in updated_tool_segs
         }
+        visible_tool_panel = bool(tool_panel_snapshot and tool_panel_snapshot[3])
         try:
             await self._client.cardkit_batch_update(
                 session.card_id,
@@ -1001,6 +1166,8 @@ class StreamingController:
                 for panel_seg in panel_segments:
                     panel_seg.created = True
                     panel_seg.dirty = session.tool_panel.dirty or not current or offsets_changed
+            if visible_tool_panel:
+                self._mark_first_visible_rendered(session, source="tool")
         except FeishuAPIError as e:
             missing_el_id = extract_missing_element_id(e)
             action_summary = summarize_actions(actions)

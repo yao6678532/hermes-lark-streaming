@@ -563,7 +563,10 @@ class StreamCardController(StreamingController):
             return False
 
         self._record_native_reasoning(session, text, api_mode=api_mode)
-        self._schedule_flush(session)
+        if text.strip():
+            self._schedule_visible_flush(session, source="reasoning")
+        else:
+            self._schedule_flush(session)
         return True
 
     def on_tool_update(
@@ -609,7 +612,10 @@ class StreamCardController(StreamingController):
 
         session.segment_state.on_tool_event(len(session.tool_use.build_display_steps()))
         session.tool_panel.note_tool_event()
-        self._schedule_flush(session)
+        if self._cfg.show_tool_use and session.tool_use.build_display_steps():
+            self._schedule_visible_flush(session, source="tool")
+        else:
+            self._schedule_flush(session)
         return True
 
     def _schedule_clarify_split(self, session: CardSession) -> None:
@@ -657,7 +663,10 @@ class StreamCardController(StreamingController):
         if answer_text.strip():
             self._start_final(session, source="on_answer")
         self._append_answer_segment(session, answer_text)
-        self._schedule_flush(session)
+        if answer_text.strip():
+            self._schedule_visible_flush(session, source="answer")
+        else:
+            self._schedule_flush(session)
         return True
 
     def on_aborted(self, *, message_id: str) -> None:
