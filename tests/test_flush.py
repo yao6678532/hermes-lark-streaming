@@ -166,6 +166,34 @@ class TestScheduleUpdate:
         await asyncio.sleep(0)
         assert flush_count == 2
 
+    @pytest.mark.asyncio
+    async def test_urgent_reflush_uses_latest_callback(self) -> None:
+        ctrl = _make_async()
+        ctrl.set_card_message_ready(True)
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        latest_finished = asyncio.Event()
+        calls: list[str] = []
+
+        async def first_flush() -> None:
+            calls.append("first")
+            first_started.set()
+            await release_first.wait()
+
+        async def latest_flush() -> None:
+            calls.append("latest")
+            latest_finished.set()
+
+        first_task = asyncio.create_task(ctrl._do_flush(first_flush))
+        await asyncio.wait_for(first_started.wait(), timeout=0.1)
+
+        ctrl.schedule_update(latest_flush, urgent=True)
+        release_first.set()
+
+        await first_task
+        await asyncio.wait_for(latest_finished.wait(), timeout=0.1)
+        assert calls == ["first", "latest"]
+
 
 class TestFlushNow:
     @pytest.mark.asyncio

@@ -1995,6 +1995,113 @@ class TestFirstVisibleFlush:
         assert schedule.call_args.kwargs["urgent"] is True
 
     @pytest.mark.asyncio
+    async def test_blank_answer_add_then_stream_failure_rearms_first_visible(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "answer-stream-failure")
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=FeishuAPIError("missing answer", code=300313)
+        )
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="first") is True
+        first_callback = schedule.call_args.args[0]
+
+        await first_callback()
+
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+        assert ctrl._client.cardkit_stream_element.await_count == 1
+        assert session.first_visible_rendered_generation != session.card_generation
+        assert session.first_visible_urgent_generation == -1
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text=" second") is True
+
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    @pytest.mark.asyncio
+    async def test_blank_reasoning_add_then_stream_failure_does_not_render_visible_text(self) -> None:
+        ctrl = _setup_ctrl()
+        ctrl._cfg._reload = lambda: {
+            "display": {"platforms": {"feishu": {"show_reasoning": True}}}
+        }  # type: ignore[assignment]
+        session = self._ready_session(ctrl, "reasoning-stream-failure")
+        ctrl._client.cardkit_stream_element = AsyncMock(
+            side_effect=FeishuAPIError("missing reasoning", code=300313)
+        )
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+        first_callback = schedule.call_args.args[0]
+
+        await first_callback()
+
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+        assert ctrl._client.cardkit_stream_element.await_count == 1
+        assert session.first_visible_rendered_generation != session.card_generation
+        assert session.first_visible_urgent_generation == -1
+
+    @pytest.mark.asyncio
+    async def test_visible_tool_panel_batch_consumes_first_visible(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_tool_use=True)
+        session = self._ready_session(ctrl, "tool-panel-visible")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+        first_callback = schedule.call_args.args[0]
+
+        await first_callback()
+
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+        assert session.first_visible_rendered_generation == session.card_generation
+        assert session.first_visible_urgent_generation == session.card_generation
+
+    @pytest.mark.asyncio
+    async def test_split_generation_reflush_uses_new_callback(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "generation-reflush")
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        generation_two_flushed = asyncio.Event()
+        first_generation = session.card_generation
+        first_card_id = session.card_id
+        calls: list[tuple[int | None, str | None, int | None]] = []
+
+        async def controlled_flush(
+            _session: CardSession,
+            *,
+            expected_generation: int | None = None,
+            expected_card_id: str | None = None,
+            first_visible_generation: int | None = None,
+        ) -> None:
+            calls.append((expected_generation, expected_card_id, first_visible_generation))
+            if expected_generation == first_generation:
+                first_started.set()
+                await release_first.wait()
+            else:
+                generation_two_flushed.set()
+
+        with patch.object(ctrl, "_do_flush", side_effect=controlled_flush):
+            assert ctrl.on_answer(message_id=session.message_id, text="gen 1") is True
+            await asyncio.wait_for(first_started.wait(), timeout=0.1)
+
+            session.set_card(card_id="generation-two-card", card_msg_id="generation-two-message")
+            second_generation = session.card_generation
+            assert ctrl.on_answer(message_id=session.message_id, text=" gen 2") is True
+
+            release_first.set()
+            await asyncio.wait_for(generation_two_flushed.wait(), timeout=0.1)
+
+        assert calls == [
+            (first_generation, first_card_id, first_generation),
+            (second_generation, "generation-two-card", second_generation),
+        ]
+
+    @pytest.mark.asyncio
     async def test_visible_event_during_creation_becomes_urgent_when_ready(self) -> None:
         ctrl = _setup_ctrl()
         session = CardSession("creating-answer", "chat", asyncio.get_running_loop())
@@ -2077,8 +2184,22 @@ class TestFirstVisibleFlush:
             session.state = SessionState.ABORTED
         else:
             session.set_card(card_id="replacement-card", card_msg_id="replacement-message")
-
         await callback()
+
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_generation_callback_cannot_write_replacement_card(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "stale-replacement")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="queued") is True
+        old_callback = schedule.call_args.args[0]
+
+        session.set_card(card_id="replacement-card", card_msg_id="replacement-message")
+        await old_callback()
 
         ctrl._client.cardkit_batch_update.assert_not_awaited()
         ctrl._client.cardkit_stream_element.assert_not_awaited()

@@ -107,11 +107,13 @@ class StreamingController:
             return
         expected_generation = session.card_generation
         expected_card_id = session.card_id
+        first_visible_generation = expected_generation if urgent else None
         session.flush.schedule_update(
             lambda: self._do_flush(
                 session,
                 expected_generation=expected_generation,
                 expected_card_id=expected_card_id,
+                first_visible_generation=first_visible_generation,
             ),
             urgent=urgent,
         )
@@ -709,6 +711,7 @@ class StreamingController:
         *,
         expected_generation: int | None = None,
         expected_card_id: str | None = None,
+        first_visible_generation: int | None = None,
     ) -> None:
         if (
             expected_generation is not None
@@ -718,16 +721,24 @@ class StreamingController:
             )
         ):
             return
-        async with self._conversation_lock(session):
+        try:
+            async with self._conversation_lock(session):
+                if (
+                    expected_generation is not None
+                    and (
+                        session.card_generation != expected_generation
+                        or session.card_id != expected_card_id
+                    )
+                ):
+                    return
+                await self._do_flush_inner(session)
+        finally:
             if (
-                expected_generation is not None
-                and (
-                    session.card_generation != expected_generation
-                    or session.card_id != expected_card_id
-                )
+                first_visible_generation is not None
+                and session.card_generation == first_visible_generation
+                and session.first_visible_rendered_generation != first_visible_generation
             ):
-                return
-            await self._do_flush_inner(session)
+                session.first_visible_urgent_generation = -1
 
     async def _do_flush_inner(self, session: CardSession) -> None:
         """幂等 flush：按 segment 顺序处理结构性变更，超阈值时拆卡."""
@@ -1101,24 +1112,7 @@ class StreamingController:
         pre_flush_tool_offsets = {
             seg.el_id: seg.tool_end_offset for seg in updated_tool_segs
         }
-        visible_source: str | None = None
-        panel_segment_ids = {
-            panel_seg.el_id
-            for panel_seg in (
-                tool_panel_snapshot[2] if tool_panel_snapshot is not None else []
-            )
-        }
-        for segment in segments[session.split_index:]:
-            if segment.el_id in new_el_ids and segment.text.strip():
-                if segment.type == SegmentType.ANSWER:
-                    visible_source = "answer"
-                    break
-                if segment.type == SegmentType.REASONING and self._cfg.show_reasoning:
-                    visible_source = "reasoning"
-                    break
-            if segment.el_id in panel_segment_ids:
-                visible_source = "tool"
-                break
+        visible_tool_panel = bool(tool_panel_snapshot and tool_panel_snapshot[3])
         try:
             await self._client.cardkit_batch_update(
                 session.card_id,
@@ -1172,8 +1166,8 @@ class StreamingController:
                 for panel_seg in panel_segments:
                     panel_seg.created = True
                     panel_seg.dirty = session.tool_panel.dirty or not current or offsets_changed
-            if visible_source is not None:
-                self._mark_first_visible_rendered(session, source=visible_source)
+            if visible_tool_panel:
+                self._mark_first_visible_rendered(session, source="tool")
         except FeishuAPIError as e:
             missing_el_id = extract_missing_element_id(e)
             action_summary = summarize_actions(actions)
