@@ -13,6 +13,8 @@ from .registry import ClarifyCardRegistry, ClarifyCardState
 
 _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_SEND_TIMEOUT_SECONDS = 10.0
+_CLARIFY_LIFECYCLE_POLL_SECONDS = 1.0
+_LIFECYCLE_TASKS: set[asyncio.Task[None]] = set()
 
 
 @dataclass(slots=True)
@@ -82,6 +84,9 @@ def raw_message_with_action_value(raw_message: Any, value: dict[str, Any]) -> di
                 "value": value,
                 "form_value": _field(action, "form_value"),
                 "input_value": _field(action, "input_value"),
+                "option": _field(action, "option"),
+                "options": _field(action, "options"),
+                "option_array": _field(action, "option_array"),
             },
             "context": _field(event, "context"),
             "operator": _field(event, "operator"),
@@ -157,6 +162,94 @@ def _form_text(
     return str(raw).strip()
 
 
+def _collect_option_values(raw: Any) -> list[str] | None:
+    """Normalize one native picker payload without accepting arbitrary prose."""
+    values: list[str] = []
+
+    def collect(candidate: Any) -> bool:
+        if isinstance(candidate, str):
+            text = candidate.strip()
+            if not text:
+                return True
+            if text.startswith("["):
+                try:
+                    decoded = json.loads(text)
+                except (TypeError, ValueError):
+                    return False
+                return collect(decoded)
+            values.append(text)
+            return True
+        if isinstance(candidate, dict):
+            if "value" not in candidate:
+                return False
+            return collect(candidate["value"])
+        if isinstance(candidate, (list, tuple)):
+            return all(collect(item) for item in candidate)
+        return False
+
+    return values if collect(raw) else None
+
+
+def _single_option_value(action: Any, value: dict[str, Any]) -> list[str] | None:
+    for candidate in (
+        _field(action, "option"),
+        value.get("option"),
+        value.get("choice_index"),
+    ):
+        if candidate is not None:
+            return _collect_option_values(candidate)
+    return None
+
+
+def _multi_option_values(form_value: dict[str, Any] | None) -> list[str] | None:
+    if form_value is None or "clarify_multi_select" not in form_value:
+        return None
+    return _collect_option_values(form_value["clarify_multi_select"])
+
+
+def _canonical_choice_payload(
+    state: ClarifyCardState,
+    option_values: list[str] | None,
+) -> tuple[str, str] | None:
+    """Map picker-only indexes back to the exact Hermes choice strings."""
+    if not option_values:
+        return None
+    selected: list[str] = []
+    for option in option_values:
+        try:
+            index = int(option)
+        except (TypeError, ValueError):
+            if option not in state.choices:
+                return None
+            choice = option
+        else:
+            if index < 0 or index >= len(state.choices):
+                return None
+            choice = state.choices[index]
+        if choice not in selected:
+            selected.append(choice)
+    if not selected or (not state.multi_select and len(selected) != 1):
+        return None
+    display = "\n\n".join(selected)
+    if state.multi_select:
+        return json.dumps(selected, ensure_ascii=False), display
+    return selected[0], display
+
+
+def _display_answer(state: ClarifyCardState, response: Any) -> str:
+    text = str(response or "")
+    if not state.multi_select:
+        return text
+    try:
+        decoded = json.loads(text)
+    except (TypeError, ValueError):
+        return text
+    if not isinstance(decoded, list):
+        return text
+    selected = [str(item) for item in decoded if str(item)]
+    return "\n\n".join(selected) if selected else text
+
+
 class ClarifyAdapterProxy:
     """Overrides only send_clarify and transparently delegates everything else."""
 
@@ -206,11 +299,8 @@ class ClarifyAdapterProxy:
         except Exception:
             official_multi_select = False
 
-        if (
-            bool(getattr(self._controller, "clarify_card_enabled", True))
-            and choices
-            and not (multi_select or official_multi_select)
-        ):
+        native_multi_select = multi_select or official_multi_select
+        if bool(getattr(self._controller, "clarify_card_enabled", True)) and choices:
             try:
                 result = await asyncio.wait_for(
                     self._controller.send_clarify_card(
@@ -221,6 +311,7 @@ class ClarifyAdapterProxy:
                         session_key=session_key,
                         owner_user_ids=self._owner_user_ids,
                         metadata=metadata,
+                        multi_select=native_multi_select,
                     ),
                     timeout=_CARD_SEND_TIMEOUT_SECONDS,
                 )
@@ -251,9 +342,10 @@ async def send_clarify_card(
     session_key: str,
     owner_user_ids: frozenset[str],
     metadata: dict[str, Any] | None,
+    multi_select: bool = False,
 ) -> ClarifySendResult:
     """Create and deliver a supported card, registering only after delivery."""
-    canonical_choices = [str(choice).strip() for choice in choices if str(choice).strip()]
+    canonical_choices = [str(choice) for choice in choices if str(choice).strip()]
     if not canonical_choices:
         return ClarifySendResult(False, error="no choices")
 
@@ -261,6 +353,7 @@ async def send_clarify_card(
         clarify_id=clarify_id,
         question=question,
         choices=canonical_choices,
+        multi_select=multi_select,
     )
     card_id = await client.cardkit_create(card)
     state = ClarifyCardState(
@@ -272,6 +365,7 @@ async def send_clarify_card(
         owner_user_ids=owner_user_ids,
         question=question,
         choices=tuple(canonical_choices),
+        multi_select=multi_select,
     )
     registry.register(state)
     reply_to = str((metadata or {}).get("reply_to_message_id") or "").strip() or None
@@ -288,6 +382,9 @@ async def send_clarify_card(
         registry.remove(clarify_id)
         raise
     state.card_msg_id = card_msg_id
+    for retired in registry.retire_session(session_key, except_clarify_id=clarify_id):
+        await _update_card(client, retired, "expired")
+    _start_lifecycle_watch(client=client, registry=registry, state=state)
     return ClarifySendResult(True, message_id=card_msg_id)
 
 
@@ -308,6 +405,7 @@ async def handle_clarify_action(
     clarify_id = str(value.get("clarify_id") or "").strip()
     if action not in {
         "clarify_select",
+        "clarify_multi_submit",
         "clarify_other",
         "clarify_other_submit",
         "clarify_other_back",
@@ -343,11 +441,6 @@ async def handle_clarify_action(
             clarify_id,
         )
 
-    response = str(value.get("response") or "").strip()
-    if action == "clarify_select" and response not in state.choices:
-        _logger.warning("rejecting non-canonical Feishu clarify response id=%s", clarify_id)
-        return True
-
     try:
         from tools import clarify_gateway  # type: ignore[import-not-found]
 
@@ -356,16 +449,17 @@ async def handle_clarify_action(
             include_choice_prompts=True,
         )
         pending_event = getattr(pending, "event", None)
-        pending_choices = tuple(str(choice).strip() for choice in (getattr(pending, "choices", None) or []))
+        pending_choices = tuple(str(choice) for choice in (getattr(pending, "choices", None) or []))
         if (
             pending is None
             or str(getattr(pending, "clarify_id", "")) != clarify_id
             or str(getattr(pending, "question", "")).strip() != state.question.strip()
             or pending_choices != state.choices
+            or bool(getattr(pending, "multi_select", False)) != state.multi_select
             or bool(pending_event and pending_event.is_set())
         ):
-            registry.finish(clarify_id, "expired")
-            await _update_card(client, state, "expired")
+            if registry.finish(clarify_id, "expired"):
+                await _update_card(client, state, "expired")
             return True
 
         if action == "clarify_other_back":
@@ -384,8 +478,8 @@ async def handle_clarify_action(
             # CardKit form update failed: retain the official Hermes text
             # capture path so the wait remains answerable.
             if not clarify_gateway.mark_awaiting_text(clarify_id):
-                registry.finish(clarify_id, "expired")
-                await _update_card(client, state, "expired")
+                if registry.finish(clarify_id, "expired"):
+                    await _update_card(client, state, "expired")
                 return True
             registry.finish(clarify_id, "awaiting_text")
             if not await _update_card(client, state, "awaiting_text"):
@@ -404,21 +498,48 @@ async def handle_clarify_action(
                     if not await _update_card(client, state, "awaiting_text"):
                         await _send_text_fallback(client, state.chat_id)
                 else:
-                    registry.finish(clarify_id, "expired")
-                    await _update_card(client, state, "expired")
+                    if registry.finish(clarify_id, "expired"):
+                        await _update_card(client, state, "expired")
                 return True
             if not custom_text:
                 return True
             claimed = registry.claim(clarify_id, expected_status="input")
             if claimed is None:
                 return True
-            if not clarify_gateway.resolve_gateway_clarify(clarify_id, custom_text):
-                registry.finish(clarify_id, "expired")
-                await _update_card(client, state, "expired")
+            payload = json.dumps([custom_text], ensure_ascii=False) if state.multi_select else custom_text
+            if not clarify_gateway.resolve_gateway_clarify(clarify_id, payload):
+                if registry.finish(clarify_id, "expired"):
+                    await _update_card(client, state, "expired")
                 return True
-            registry.finish(clarify_id, "answered", answer=custom_text)
-            await _update_card(client, state, "answered", answer=custom_text)
+            if registry.finish(clarify_id, "answered", answer=custom_text):
+                await _update_card(client, state, "answered", answer=custom_text)
             return True
+
+        callback_action = _field(_callback_event(raw_message), "action")
+        selection: tuple[str, str] | None
+        if action == "clarify_select":
+            if state.multi_select:
+                _logger.warning("rejecting single-select callback for multi Clarify id=%s", clarify_id)
+                return True
+            option_values = _single_option_value(callback_action, value)
+            legacy_response = value.get("response")
+            if option_values is None and isinstance(legacy_response, str) and legacy_response in state.choices:
+                # Rolling upgrades can leave an old button card in flight. Its
+                # full response is accepted only by exact registry membership.
+                selection = (legacy_response, legacy_response)
+            else:
+                selection = _canonical_choice_payload(state, option_values)
+        elif action == "clarify_multi_submit":
+            if not state.multi_select:
+                _logger.warning("rejecting multi-select callback for single Clarify id=%s", clarify_id)
+                return True
+            selection = _canonical_choice_payload(state, _multi_option_values(form_value))
+        else:
+            return True
+        if selection is None:
+            _logger.warning("rejecting malformed or non-canonical Feishu clarify response id=%s", clarify_id)
+            return True
+        response, display_answer = selection
 
         claimed = registry.claim(clarify_id)
         if claimed is None:
@@ -426,16 +547,110 @@ async def handle_clarify_action(
             return True
 
         if not clarify_gateway.resolve_gateway_clarify(clarify_id, response):
-            registry.finish(clarify_id, "expired")
-            await _update_card(client, state, "expired")
+            if registry.finish(clarify_id, "expired"):
+                await _update_card(client, state, "expired")
             return True
-        registry.finish(clarify_id, "answered", answer=response)
-        await _update_card(client, state, "answered", answer=response)
+        if registry.finish(clarify_id, "answered", answer=display_answer):
+            await _update_card(client, state, "answered", answer=display_answer)
         return True
     except Exception:
         registry.release(clarify_id)
         _logger.exception("Feishu clarify callback bridge failed id=%s", clarify_id)
         return True
+
+
+def _official_pending(state: ClarifyCardState) -> Any:
+    try:
+        from tools import clarify_gateway  # type: ignore[import-not-found]
+
+        pending = clarify_gateway.get_pending_for_session(
+            state.session_key,
+            include_choice_prompts=True,
+        )
+    except Exception:
+        return None
+    if pending is None or str(getattr(pending, "clarify_id", "")) != state.clarify_id:
+        return None
+    return pending
+
+
+async def _reconcile_clarify_lifecycle(
+    *,
+    client: Any,
+    registry: ClarifyCardRegistry,
+    state: ClarifyCardState,
+    official_entry: Any = None,
+) -> bool:
+    """Mirror official timeout/reset/text-answer lifecycle into one immutable card."""
+    current = registry.get(state.clarify_id)
+    if current is not state or state.status in {"answered", "expired"}:
+        return True
+    pending = _official_pending(state)
+    tracked = official_entry or pending
+    if tracked is not None:
+        pending_event = getattr(tracked, "event", None)
+        if not bool(pending_event and pending_event.is_set()):
+            if pending is tracked:
+                return False
+        else:
+            if state.status == "resolving":
+                return False
+            response = getattr(tracked, "response", None)
+            if response:
+                answer = _display_answer(state, response)
+                if registry.finish(state.clarify_id, "answered", answer=answer):
+                    await _update_card(client, state, "answered", answer=answer)
+            elif registry.finish(state.clarify_id, "expired"):
+                await _update_card(client, state, "expired")
+            return True
+    if state.status == "resolving":
+        return False
+    if registry.finish(state.clarify_id, "expired"):
+        await _update_card(client, state, "expired")
+    return True
+
+
+async def _watch_clarify_lifecycle(
+    *,
+    client: Any,
+    registry: ClarifyCardRegistry,
+    state: ClarifyCardState,
+    official_entry: Any,
+) -> None:
+    while True:
+        await asyncio.sleep(_CLARIFY_LIFECYCLE_POLL_SECONDS)
+        if await _reconcile_clarify_lifecycle(
+            client=client,
+            registry=registry,
+            state=state,
+            official_entry=official_entry,
+        ):
+            return
+
+
+def _start_lifecycle_watch(
+    *,
+    client: Any,
+    registry: ClarifyCardRegistry,
+    state: ClarifyCardState,
+) -> None:
+    # If Hermes has already reset/replaced the pending entry, retire now. If
+    # there was never an official entry (unit tests or unsupported host), do
+    # not create an orphan background task.
+    pending = _official_pending(state)
+    if pending is None:
+        return
+    task = asyncio.create_task(
+        _watch_clarify_lifecycle(
+            client=client,
+            registry=registry,
+            state=state,
+            official_entry=pending,
+        ),
+        name=f"hermes-lark-clarify-{state.clarify_id}",
+    )
+    _LIFECYCLE_TASKS.add(task)
+    task.add_done_callback(_LIFECYCLE_TASKS.discard)
 
 
 async def _send_text_fallback(client: Any, chat_id: str) -> None:
@@ -457,17 +672,23 @@ async def _update_card(
     answer: str = "",
 ) -> bool:
     """Best-effort UI update; resolving the official wait takes precedence."""
-    try:
-        card = build_clarify_card(
-            clarify_id=state.clarify_id,
-            question=state.question,
-            choices=list(state.choices),
-            status=status,  # type: ignore[arg-type]
-            answer=answer,
-        )
-        state.sequence += 1
-        await client.cardkit_update(state.card_id, card, sequence=state.sequence)
-        return True
-    except Exception:
-        _logger.warning("failed to update Feishu clarify card id=%s", state.clarify_id, exc_info=True)
-        return False
+    attempts = 3 if status in {"answered", "expired"} else 1
+    for attempt in range(attempts):
+        try:
+            card = build_clarify_card(
+                clarify_id=state.clarify_id,
+                question=state.question,
+                choices=list(state.choices),
+                status=status,  # type: ignore[arg-type]
+                answer=answer,
+                multi_select=state.multi_select,
+            )
+            state.sequence += 1
+            await client.cardkit_update(state.card_id, card, sequence=state.sequence)
+            return True
+        except Exception:
+            if attempt + 1 < attempts:
+                await asyncio.sleep(0.05 * (attempt + 1))
+                continue
+            _logger.warning("failed to update Feishu clarify card id=%s", state.clarify_id, exc_info=True)
+    return False

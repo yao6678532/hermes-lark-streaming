@@ -95,48 +95,58 @@ class TestOptimizeMarkdownStyle:
 
 
 class TestBuildClarifyCard:
-    def test_pending_single_select_buttons_use_plugin_namespace(self) -> None:
+    def test_pending_single_select_shows_full_markdown_but_picker_uses_indexes(self) -> None:
+        long_choice = "Use **safe** mode with `--dry-run` and " + "details " * 15
         card = build_clarify_card(
             clarify_id="clarify-1",
             question="Which path?",
-            choices=["A", "B", "C"],
+            choices=[long_choice, "Second _option_", "Third [link](https://example.com)"],
         )
 
         assert card["schema"] == "2.0"
-        assert card["header"]["template"] == "blue"
-        assert card["header"]["text_tag_list"][0]["color"] == "blue"
-        groups = [item for item in card["body"]["elements"] if item["tag"] == "column_set"]
-        assert len(groups) == 1
-        group = groups[0]
-        assert group["flex_mode"] == "stretch"
-        assert len(group["columns"]) == 4
-        actions = [column["elements"][0] for column in group["columns"]]
-        assert all(action["tag"] == "button" and action["width"] == "fill" for action in actions)
-        assert actions[0]["value"] == {
+        assert "header" not in card
+        question, choices_md, picker, other = card["body"]["elements"]
+        assert question["tag"] == "div"
+        assert question["icon"]["token"] == "info_outlined"
+        assert long_choice in choices_md["content"]
+        assert "Second _option_" in choices_md["content"]
+        assert "Third [link](https://example.com)" in choices_md["content"]
+        assert picker["tag"] == "select_static"
+        assert [option["value"] for option in picker["options"]] == ["0", "1", "2"]
+        assert long_choice not in picker["options"][0]["text"]["content"]
+        assert picker["options"][0]["text"]["content"].endswith("…")
+        assert picker["behaviors"][0]["value"] == {
             "hermes_lark_action": "clarify_select",
             "clarify_id": "clarify-1",
-            "response": "A",
         }
-        assert "hermes_action" not in actions[0]["value"]
-        assert actions[-1]["value"] == {
+        assert other["tag"] == "button"
+        assert other["value"] == {
             "hermes_lark_action": "clarify_other",
             "clarify_id": "clarify-1",
         }
-        assert all(action.get("type") != "primary" for action in actions)
 
-    @pytest.mark.parametrize("choice_count", [1, 2, 3, 4])
-    def test_pending_dynamic_choice_count_keeps_other_last(self, choice_count: int) -> None:
-        choices = [f"choice-{index}" for index in range(choice_count)]
-        card = build_clarify_card(clarify_id="clarify-1", question="Which path?", choices=choices)
-        group = next(item for item in card["body"]["elements"] if item["tag"] == "column_set")
-        actions = [column["elements"][0] for column in group["columns"]]
-        assert len(actions) == choice_count + 1
-        assert [action["value"]["response"] for action in actions[:-1]] == choices
-        assert actions[-1]["value"] == {
-            "hermes_lark_action": "clarify_other",
+    def test_pending_multi_select_uses_native_form_and_submit(self) -> None:
+        card = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which environments?",
+            choices=["staging", "production"],
+            multi_select=True,
+        )
+
+        form = card["body"]["elements"][2]
+        assert form["tag"] == "form"
+        picker, submit = form["elements"]
+        assert picker["tag"] == "multi_select_static"
+        assert picker["name"] == "clarify_multi_select"
+        assert [option["value"] for option in picker["options"]] == ["0", "1"]
+        assert "multi_select" not in picker
+        assert submit["tag"] == "button"
+        assert submit["name"] == "clarify_multi_submit"
+        assert submit["form_action_type"] == "submit"
+        assert submit["value"] == {
+            "hermes_lark_action": "clarify_multi_submit",
             "clarify_id": "clarify-1",
         }
-        assert all(action["width"] == "fill" for action in actions)
 
     def test_other_input_card_uses_real_feishu_form_actions(self) -> None:
         card = build_clarify_card(
@@ -176,6 +186,36 @@ class TestBuildClarifyCard:
         )
 
         assert all(element["tag"] not in {"button", "column_set", "form"} for element in card["body"]["elements"])
+
+    def test_resolved_and_expired_cards_are_quiet_and_inert(self) -> None:
+        answered = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=["A", "B"],
+            status="answered",
+            answer="The **full** answer",
+        )
+        answer = answered["body"]["elements"][1]
+        assert answer["icon"] == {
+            "tag": "standard_icon",
+            "token": "resolve_filled",
+            "size": "18px 18px",
+            "color": "green",
+        }
+        assert "The **full** answer" in answer["text"]["content"]
+        assert "Answer:" not in str(answered) and "回答：" not in str(answered)  # noqa: RUF001
+        assert "Pending" not in str(answered)
+        assert "已确认" in str(answered)
+
+        expired = build_clarify_card(
+            clarify_id="clarify-1",
+            question="Which path?",
+            choices=["A", "B"],
+            status="expired",
+        )
+        notice = expired["body"]["elements"][1]
+        assert notice["icon"]["color"] == "grey"
+        assert "此问题已失效" in str(notice)
 
 
 class TestBuildApprovalCard:

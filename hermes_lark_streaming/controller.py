@@ -324,6 +324,7 @@ class StreamCardController(StreamingController):
         session_key: str,
         owner_user_ids: frozenset[str],
         metadata: dict[str, Any] | None = None,
+        multi_select: bool = False,
     ) -> ClarifySendResult:
         """Deliver a Feishu clarify card without replacing Hermes state."""
         if self._cfg.clarify_style != "card" or not choices:
@@ -341,6 +342,7 @@ class StreamCardController(StreamingController):
             session_key=session_key,
             owner_user_ids=owner_user_ids,
             metadata=metadata,
+            multi_select=multi_select,
         )
 
     async def on_clarify_action(

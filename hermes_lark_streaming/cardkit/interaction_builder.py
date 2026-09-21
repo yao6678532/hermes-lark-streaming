@@ -11,48 +11,7 @@ from .markdown import optimize_markdown_style
 ClarifyCardStatus = Literal["pending", "input", "answered", "awaiting_text", "expired"]
 ApprovalCardStatus = Literal["pending", "approved", "denied", "expired"]
 
-
-def _header(status: ClarifyCardStatus) -> dict[str, Any]:
-    title, zh_title, template, status_text, zh_status_text, color = {
-        "pending": ("❓ Your choice is needed", "❓ 需要你的选择", "blue", "Pending", "待回答", "blue"),
-        "input": (
-            "✏️ Enter another answer",
-            "✏️ 请输入其他回答",
-            "blue",
-            "Pending",
-            "待回答",
-            "blue",
-        ),
-        "answered": ("✅ Answer received", "✅ 已回答", "green", "Answered", "已回答", "green"),
-        "awaiting_text": (
-            "✏️ Waiting for your answer",
-            "✏️ 等待文字回答",
-            "blue",
-            "Awaiting text",
-            "等待文字",
-            "blue",
-        ),
-        "expired": ("⌛ Choice expired", "⌛ 选择已失效", "grey", "Expired", "已失效", "neutral"),
-    }[status]
-    return {
-        "title": {
-            "tag": "plain_text",
-            "content": title,
-            "i18n_content": _i18n(title, zh_title),
-        },
-        "text_tag_list": [
-            {
-                "tag": "text_tag",
-                "text": {
-                    "tag": "plain_text",
-                    "content": status_text,
-                    "i18n_content": _i18n(status_text, zh_status_text),
-                },
-                "color": color,
-            }
-        ],
-        "template": template,
-    }
+_CLARIFY_DROPDOWN_LABEL_LIMIT = 40
 
 
 def _button(
@@ -100,6 +59,54 @@ def _build_responsive_button_group(buttons: list[dict[str, Any]]) -> dict[str, A
     }
 
 
+def _clarify_question(question: str, *, pending: bool) -> dict[str, Any]:
+    element: dict[str, Any] = {
+        "tag": "div",
+        "text": {
+            "tag": "lark_md",
+            "content": optimize_markdown_style(str(question).strip()),
+        },
+    }
+    if pending:
+        element["icon"] = {
+            "tag": "standard_icon",
+            "token": "info_outlined",
+            "size": "20px 20px",
+            "color": "blue",
+        }
+    return element
+
+
+def _choice_marker(index: int) -> str:
+    return chr(ord("A") + index) if index < 26 else str(index + 1)
+
+
+def _clarify_choice_markdown(choices: list[str]) -> str:
+    """Render canonical choices in full; dropdown shortening never reaches this lane."""
+    return "\n\n".join(
+        f"**{_choice_marker(index)}.** {optimize_markdown_style(str(choice))}"
+        for index, choice in enumerate(choices)
+    )
+
+
+def _short_choice_label(index: int, choice: str) -> str:
+    """Build presentation-only plain text for the compact picker."""
+    compact = " ".join(str(choice).split())
+    if len(compact) > _CLARIFY_DROPDOWN_LABEL_LIMIT:
+        compact = compact[: _CLARIFY_DROPDOWN_LABEL_LIMIT - 1].rstrip() + "…"
+    return f"{_choice_marker(index)}. {compact}"
+
+
+def _clarify_options(choices: list[str]) -> list[dict[str, Any]]:
+    return [
+        {
+            "text": {"tag": "plain_text", "content": _short_choice_label(index, choice)},
+            "value": str(index),
+        }
+        for index, choice in enumerate(choices)
+    ]
+
+
 def build_clarify_card(
     *,
     clarify_id: str,
@@ -107,29 +114,82 @@ def build_clarify_card(
     choices: list[str],
     status: ClarifyCardStatus = "pending",
     answer: str = "",
+    multi_select: bool = False,
 ) -> dict[str, Any]:
-    """Build a pending or terminal single-select clarify card."""
+    """Build a Clarify card without putting canonical choices in controls."""
     elements: list[dict[str, Any]] = [
-        {
-            "tag": "markdown",
-            "content": optimize_markdown_style(str(question).strip()),
-            "text_size": "normal_v2",
-        },
+        _clarify_question(question, pending=status in {"pending", "input", "awaiting_text"})
     ]
 
     if status == "pending":
-        actions = [
-            _button(
-                choice,
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": _clarify_choice_markdown(choices),
+                "text_size": "normal_v2",
+            }
+        )
+        options = _clarify_options(choices)
+        placeholder = {
+            "tag": "plain_text",
+            "content": "Select one or more options" if multi_select else "Select an option",
+            "i18n_content": _i18n(
+                "Select one or more options" if multi_select else "Select an option",
+                "选择一个或多个选项" if multi_select else "选择一个选项",
+            ),
+        }
+        if multi_select:
+            elements.append(
                 {
-                    "hermes_lark_action": "clarify_select",
-                    "clarify_id": clarify_id,
-                    "response": choice,
-                },
+                    "tag": "form",
+                    "name": "clarify_multi_form",
+                    "element_id": "clarify_multi_form",
+                    "elements": [
+                        {
+                            "tag": "multi_select_static",
+                            "name": "clarify_multi_select",
+                            "element_id": "clarify_multi_select",
+                            "placeholder": placeholder,
+                            "options": options,
+                        },
+                        {
+                            "tag": "button",
+                            "name": "clarify_multi_submit",
+                            "element_id": "clarify_multi_submit",
+                            "value": {
+                                "hermes_lark_action": "clarify_multi_submit",
+                                "clarify_id": clarify_id,
+                            },
+                            "text": {
+                                "tag": "plain_text",
+                                "content": "Submit",
+                                "i18n_content": _i18n("Submit", "提交"),
+                            },
+                            "type": "primary",
+                            "form_action_type": "submit",
+                        },
+                    ],
+                }
             )
-            for choice in choices
-        ]
-        actions.append(
+        else:
+            elements.append(
+                {
+                    "tag": "select_static",
+                    "element_id": "clarify_select",
+                    "placeholder": placeholder,
+                    "options": options,
+                    "behaviors": [
+                        {
+                            "type": "callback",
+                            "value": {
+                                "hermes_lark_action": "clarify_select",
+                                "clarify_id": clarify_id,
+                            },
+                        }
+                    ],
+                }
+            )
+        elements.append(
             _button(
                 "Other…",
                 {
@@ -139,7 +199,6 @@ def build_clarify_card(
                 zh_label="其他回答…",
             )
         )
-        elements.append(_build_responsive_button_group(actions))
     elif status == "input":
         submit = {
             "tag": "button",
@@ -191,11 +250,26 @@ def build_clarify_card(
     elif status == "answered":
         elements.append(
             {
+                "tag": "div",
+                "icon": {
+                    "tag": "standard_icon",
+                    "token": "resolve_filled",
+                    "size": "18px 18px",
+                    "color": "green",
+                },
+                "text": {
+                    "tag": "lark_md",
+                    "content": optimize_markdown_style(str(answer).strip()),
+                },
+            }
+        )
+        elements.append(
+            {
                 "tag": "markdown",
-                "content": f"**Answer:**\n{optimize_markdown_style(str(answer).strip())}",
+                "content": "<font color='grey'>Confirmed</font>",
                 "i18n_content": _i18n(
-                    f"**Answer:**\n{optimize_markdown_style(str(answer).strip())}",
-                    f"**回答：**\n{optimize_markdown_style(str(answer).strip())}",  # noqa: RUF001
+                    "<font color='grey'>Confirmed</font>",
+                    "<font color='grey'>已确认</font>",
                 ),
             }
         )
@@ -213,19 +287,24 @@ def build_clarify_card(
     else:
         elements.append(
             {
-                "tag": "markdown",
-                "content": "This choice is no longer pending.",
-                "i18n_content": _i18n(
-                    "This choice is no longer pending.",
-                    "这个选择已不再等待回答。",
-                ),
+                "tag": "div",
+                "icon": {
+                    "tag": "standard_icon",
+                    "token": "info_outlined",
+                    "size": "16px 16px",
+                    "color": "grey",
+                },
+                "text": {
+                    "tag": "plain_text",
+                    "content": "This question has expired",
+                    "i18n_content": _i18n("This question has expired", "此问题已失效"),
+                },
             }
         )
 
     return {
         "schema": "2.0",
         "config": {"wide_screen_mode": True, "update_multi": True, "locales": _LOCALES},
-        "header": _header(status),
         "body": {"elements": elements},
     }
 

@@ -329,6 +329,7 @@ async def on_feishu_interaction_action(
     callback_action_name = str(_field(callback_action, "name", "") or "").strip()
     action_value, _chat_id, _operator_ids = parse_card_action(raw_message)
     if action_value is None and callback_action_name in {
+        "clarify_multi_submit",
         "clarify_other_submit",
         "clarify_other_back",
     } and callback_chat_id and callback_message_id:

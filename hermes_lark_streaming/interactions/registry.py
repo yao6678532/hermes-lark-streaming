@@ -30,6 +30,7 @@ class ClarifyCardState:
     owner_user_ids: frozenset[str]
     question: str
     choices: tuple[str, ...]
+    multi_select: bool = False
     status: ClarifyStatus = "pending"
     answer: str = ""
     sequence: int = 0
@@ -53,7 +54,7 @@ class ClarifyCardRegistry:
                 terminal = [
                     item
                     for item in self._states.values()
-                    if item.status in {"answered", "awaiting_text", "expired"}
+                    if item.status in {"answered", "expired"}
                 ]
                 candidates = terminal or list(self._states.values())
                 oldest = min(candidates, key=lambda item: item.created_at)
@@ -94,7 +95,7 @@ class ClarifyCardRegistry:
         """Update presentation state without changing Hermes' pending entry."""
         with self._lock:
             state = self._states.get(clarify_id)
-            if state is None:
+            if state is None or state.status in {"answered", "expired"}:
                 return False
             state.status = status
             state.answer = answer
@@ -107,13 +108,36 @@ class ClarifyCardRegistry:
             if state is not None and state.status == "resolving":
                 state.status = "pending"
 
-    def finish(self, clarify_id: str, status: ClarifyStatus, *, answer: str = "") -> None:
+    def finish(self, clarify_id: str, status: ClarifyStatus, *, answer: str = "") -> bool:
+        """Commit a terminal/display state once; answered and expired are immutable."""
         with self._lock:
             state = self._states.get(clarify_id)
-            if state is None:
-                return
+            if state is None or state.status in {"answered", "expired"}:
+                return False
             state.status = status
             state.answer = answer
+            return True
+
+    def retire_session(
+        self,
+        session_key: str,
+        *,
+        except_clarify_id: str = "",
+    ) -> tuple[ClarifyCardState, ...]:
+        """Atomically make every older live card in a Hermes session inert."""
+        retired: list[ClarifyCardState] = []
+        with self._lock:
+            for state in self._states.values():
+                if (
+                    state.session_key != session_key
+                    or state.clarify_id == except_clarify_id
+                    or state.status in {"answered", "expired"}
+                ):
+                    continue
+                state.status = "expired"
+                state.answer = ""
+                retired.append(state)
+        return tuple(retired)
 
 
 @dataclass(slots=True)
