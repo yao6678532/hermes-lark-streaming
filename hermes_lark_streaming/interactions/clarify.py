@@ -367,7 +367,9 @@ async def send_clarify_card(
         choices=tuple(canonical_choices),
         multi_select=multi_select,
     )
-    registry.register(state)
+    retired_states = registry.register(state)
+    for retired in retired_states:
+        await _update_card(client, retired, "expired")
     reply_to = str((metadata or {}).get("reply_to_message_id") or "").strip() or None
     try:
         card_msg_id = await client.send_card_id_to_chat(
@@ -382,8 +384,8 @@ async def send_clarify_card(
         registry.remove(clarify_id)
         raise
     state.card_msg_id = card_msg_id
-    owns_latest, retired_states = registry.complete_delivery(state)
-    for retired in retired_states:
+    owns_latest, late_retired_states = registry.complete_delivery(state)
+    for retired in late_retired_states:
         await _update_card(client, retired, "expired")
     if owns_latest:
         _start_lifecycle_watch(client=client, registry=registry, state=state)

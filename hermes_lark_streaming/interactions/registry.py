@@ -52,7 +52,14 @@ class ClarifyCardRegistry:
         self._latest_generations: dict[str, int] = {}
         self._lock = threading.RLock()
 
-    def register(self, state: ClarifyCardState) -> None:
+    def register(self, state: ClarifyCardState) -> tuple[ClarifyCardState, ...]:
+        """Reserve a monotonically newer session ownership epoch.
+
+        A newer Hermes clarify supersedes every older local presentation
+        state immediately, even while its CardKit delivery is still in
+        flight.  This prevents a failed newer delivery from reviving a card
+        whose official pending wait has already been replaced.
+        """
         with self._lock:
             existing = self._states.get(state.clarify_id)
             if existing is not None:
@@ -71,6 +78,19 @@ class ClarifyCardRegistry:
             self._latest_generations[state.session_key] = generation
             state.generation = generation
             self._states[state.clarify_id] = state
+            retired: list[ClarifyCardState] = []
+            for candidate in self._states.values():
+                if (
+                    candidate is state
+                    or candidate.session_key != state.session_key
+                    or candidate.status in {"answered", "expired"}
+                ):
+                    continue
+                candidate.status = "expired"
+                candidate.answer = ""
+                if candidate.delivered:
+                    retired.append(candidate)
+            return tuple(retired)
 
     def get(self, clarify_id: str) -> ClarifyCardState | None:
         with self._lock:
@@ -94,16 +114,7 @@ class ClarifyCardRegistry:
         if self._states.get(state.clarify_id) is not state:
             return
         self._states.pop(state.clarify_id, None)
-        if self._latest_generations.get(state.session_key) != state.generation:
-            return
-        remaining = [
-            item.generation
-            for item in self._states.values()
-            if item.session_key == state.session_key
-        ]
-        if remaining:
-            self._latest_generations[state.session_key] = max(remaining)
-        else:
+        if not any(item.session_key == state.session_key for item in self._states.values()):
             self._latest_generations.pop(state.session_key, None)
             self._session_generations.pop(state.session_key, None)
 
@@ -113,9 +124,9 @@ class ClarifyCardRegistry:
     ) -> tuple[bool, tuple[ClarifyCardState, ...]]:
         """Settle one network send against the latest per-session generation.
 
-        The network await happens outside this lock. A late older delivery
-        retires itself; a latest delivery retires only already-delivered older
-        cards, leaving in-flight cards to retire themselves when they return.
+        The network await happens outside this lock. Registration already
+        retires older ownership epochs; a late older delivery therefore
+        retires itself when it returns.
         """
         with self._lock:
             state.delivered = True

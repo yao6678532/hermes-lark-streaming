@@ -1178,6 +1178,129 @@ async def test_concurrent_clarify_delivery_keeps_only_latest_generation_pending(
 
 
 @pytest.mark.asyncio
+async def test_failed_latest_delivery_cannot_revive_blocked_older_generation() -> None:
+    registry = ClarifyCardRegistry()
+    a_send_started = asyncio.Event()
+    release_a_send = asyncio.Event()
+    client_a = AsyncMock()
+    client_a.cardkit_create.return_value = "card-a"
+
+    async def send_a(*_args: object, **_kwargs: object) -> str:
+        a_send_started.set()
+        await release_a_send.wait()
+        return "msg-a"
+
+    client_a.send_card_id_to_chat.side_effect = send_a
+    task_a = asyncio.create_task(
+        send_clarify_card(
+            client=client_a,
+            registry=registry,
+            chat_id="chat-1",
+            question="Question A?",
+            choices=["A1", "A2"],
+            clarify_id="clarify-a",
+            session_key="feishu:chat-1:owner",
+            owner_user_ids=frozenset({"owner"}),
+            metadata=None,
+        )
+    )
+    await asyncio.wait_for(a_send_started.wait(), timeout=1)
+
+    client_b = AsyncMock()
+    client_b.cardkit_create.return_value = "card-b"
+    client_b.send_card_id_to_chat.side_effect = RuntimeError("B send failed")
+    with pytest.raises(RuntimeError, match="B send failed"):
+        await send_clarify_card(
+            client=client_b,
+            registry=registry,
+            chat_id="chat-1",
+            question="Question B?",
+            choices=["B1", "B2"],
+            clarify_id="clarify-b",
+            session_key="feishu:chat-1:owner",
+            owner_user_ids=frozenset({"owner"}),
+            metadata=None,
+        )
+
+    state_a = registry.get("clarify-a")
+    assert state_a is not None and state_a.generation == 1 and state_a.status == "expired"
+    assert registry.get("clarify-b") is None
+
+    release_a_send.set()
+    await asyncio.wait_for(task_a, timeout=1)
+    assert state_a.status == "expired"
+    assert registry.claim("clarify-a") is None
+
+
+@pytest.mark.asyncio
+async def test_failed_newer_delivery_text_fallback_keeps_sent_card_retired() -> None:
+    _register_official("clarify-a", question="Question A?", choices=["A1", "A2"])
+    registry = ClarifyCardRegistry()
+    client_a = AsyncMock()
+    client_a.cardkit_create.return_value = "card-a"
+    client_a.send_card_id_to_chat.return_value = "msg-a"
+    await send_clarify_card(
+        client=client_a,
+        registry=registry,
+        chat_id="chat-1",
+        question="Question A?",
+        choices=["A1", "A2"],
+        clarify_id="clarify-a",
+        session_key="feishu:chat-1:owner",
+        owner_user_ids=frozenset({"owner"}),
+        metadata=None,
+    )
+    state_a = registry.get("clarify-a")
+    assert state_a is not None and state_a.status == "pending"
+    _register_official("clarify-b", question="Question B?", choices=["B1", "B2"])
+
+    client_b = AsyncMock()
+    client_b.cardkit_create.return_value = "card-b"
+    client_b.send_card_id_to_chat.side_effect = RuntimeError("B send failed")
+
+    class _OfficialTextFallback:
+        send_clarify = BasePlatformAdapter.send_clarify
+
+        def __init__(self) -> None:
+            self.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    async def send_b(**_kwargs: object) -> ClarifySendResult:
+        return await send_clarify_card(
+            client=client_b,
+            registry=registry,
+            chat_id="chat-1",
+            question="Question B?",
+            choices=["B1", "B2"],
+            clarify_id="clarify-b",
+            session_key="feishu:chat-1:owner",
+            owner_user_ids=frozenset({"owner"}),
+            metadata=None,
+        )
+
+    original = _OfficialTextFallback()
+    proxy = ClarifyAdapterProxy(
+        original,
+        SimpleNamespace(clarify_card_enabled=True, send_clarify_card=send_b),
+        frozenset({"owner"}),
+    )
+    result = await proxy.send_clarify(
+        chat_id="chat-1",
+        question="Question B?",
+        choices=["B1", "B2"],
+        clarify_id="clarify-b",
+        session_key="feishu:chat-1:owner",
+    )
+
+    assert result.success is True
+    original.send.assert_awaited_once()
+    assert registry.get("clarify-b") is None
+    assert state_a.status == "expired"
+    assert registry.claim("clarify-a") is None
+    retired_a = client_b.cardkit_update.await_args.args[1]
+    assert "此问题已失效" in str(retired_a)
+
+
+@pytest.mark.asyncio
 async def test_failed_card_delivery_leaves_no_presentation_state() -> None:
     registry = ClarifyCardRegistry()
     client = AsyncMock()
