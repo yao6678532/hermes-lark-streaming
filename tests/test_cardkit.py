@@ -38,6 +38,7 @@ from hermes_lark_streaming.cardkit.interaction_builder import (
     _clean_choice_display,
     build_approval_card,
     build_clarify_card,
+    build_open_clarify_card,
 )
 from hermes_lark_streaming.cardkit.markdown import (
     _downgrade_tables,
@@ -99,6 +100,21 @@ class TestOptimizeMarkdownStyle:
 
 
 class TestBuildClarifyCard:
+    def test_open_text_prompt_is_static_cardkit_without_controls(self) -> None:
+        question_text = "还有什么需要补充的测试要求\uFF1F"
+        card = build_open_clarify_card(question=question_text)
+
+        assert card["schema"] == "2.0"
+        question, hint = card["body"]["elements"]
+        assert question["tag"] == "div"
+        assert question["icon"]["token"] == "info_outlined"
+        assert question["text"]["content"] == question_text
+        assert hint["tag"] == "markdown"
+        assert hint["i18n_content"]["zh_cn"] == "请直接发送你的回答。"
+        assert "clarify_id" not in str(card)
+        assert all(element["tag"] not in {"button", "input", "select_static", "form"}
+                   for element in card["body"]["elements"])
+
     def test_pending_single_select_shows_full_markdown_but_picker_uses_indexes(self) -> None:
         long_choice = "Use **safe** mode with `--dry-run` and " + "details " * 15
         card = build_clarify_card(

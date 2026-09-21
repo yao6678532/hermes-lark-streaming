@@ -142,6 +142,31 @@ def _clarify_direct_input(clarify_id: str) -> dict[str, Any]:
     }
 
 
+def build_open_clarify_card(*, question: str) -> dict[str, Any]:
+    """Build a presentation-only prompt for Hermes' open-text clarify flow.
+
+    The official pending entry continues to own the next-message resolver.
+    This card intentionally has neither controls nor a registry identity.
+    """
+    return {
+        "schema": "2.0",
+        "config": {"wide_screen_mode": True, "update_multi": True, "locales": _LOCALES},
+        "body": {
+            "elements": [
+                _clarify_question(question, pending=True),
+                {
+                    "tag": "markdown",
+                    "content": "Please send your answer.",
+                    "i18n_content": _i18n(
+                        "Please send your answer.",
+                        "请直接发送你的回答。",
+                    ),
+                },
+            ]
+        },
+    }
+
+
 def build_clarify_card(
     *,
     clarify_id: str,

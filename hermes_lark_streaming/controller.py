@@ -23,6 +23,7 @@ from .interactions.clarify import (
     ClarifySendResult,
     handle_clarify_action,
     send_clarify_card,
+    send_open_clarify_card,
 )
 from .interactions.registry import ApprovalCardRegistry, ClarifyCardRegistry
 from .quota import _quota_color
@@ -343,6 +344,26 @@ class StreamCardController(StreamingController):
             owner_user_ids=owner_user_ids,
             metadata=metadata,
             multi_select=multi_select,
+        )
+
+    async def send_open_clarify_card(
+        self,
+        *,
+        chat_id: str,
+        question: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> ClarifySendResult:
+        """Deliver a static prompt while Hermes owns open-text resolution."""
+        if self._cfg.clarify_style != "card":
+            return ClarifySendResult(False, error="clarify card disabled or unsupported")
+        await self._ensure_init()
+        if self._client is None:
+            return ClarifySendResult(False, error="Feishu client unavailable")
+        return await send_open_clarify_card(
+            client=self._client,
+            chat_id=chat_id,
+            question=question,
+            metadata=metadata,
         )
 
     async def on_clarify_action(
@@ -838,19 +859,23 @@ class StreamCardController(StreamingController):
         session = self._get_active_session(message_id)
         if (
             session is None
-            or session.state != SessionState.STREAMING
+            or session.state not in {SessionState.STREAMING, SessionState.CLARIFY_PAUSED}
             or not session.card_id
             or session.guard.should_skip("on_long_running_progress")
         ):
             return False
         if not session.progress.available:
             return False
+        paused_for_clarify = session.state == SessionState.CLARIFY_PAUSED
         session.progress.note_heartbeat(
             elapsed_seconds,
             iteration=iteration,
             max_iterations=max_iterations,
         )
-        self._schedule_flush(session)
+        if paused_for_clarify:
+            self._schedule_progress_only_flush(session)
+        else:
+            self._schedule_flush(session)
         return True
 
     def on_cron_deliver(
@@ -1372,6 +1397,9 @@ class StreamCardController(StreamingController):
     async def _complete_session_wait(self, session: CardSession) -> bool:
         """完成当前流式卡片，并等待最终 API 结果."""
         session.progress.clear()
+        # A completion may overlap a final watchdog heartbeat before the
+        # session is detached. Never let that heartbeat re-dirty an old card.
+        session.progress.disable()
         session.flush.mark_completed()
         return await self._do_complete_card(session)
 

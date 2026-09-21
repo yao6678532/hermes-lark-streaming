@@ -2042,6 +2042,114 @@ class TestDoCreateCard:
         ) is False
 
     @pytest.mark.asyncio
+    async def test_paused_heartbeat_updates_only_answer_card_progress(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_paused_heartbeat", "chat", asyncio.get_running_loop())
+        session.state = SessionState.CLARIFY_PAUSED
+        session.card_id = "answer-card"
+        session.card_msg_id = "answer-message"
+        assert session.segment_state is not None
+        session.segment_state.on_answer_delta("Answer held while clarify is pending")
+        ctrl._sessions[session.message_id] = session
+
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+            iteration=3,
+            max_iterations=60,
+        ) is True
+        await asyncio.sleep(0.01)
+
+        assert ctrl._client.cardkit_batch_update.await_count == 1
+        call = ctrl._client.cardkit_batch_update.await_args
+        assert call.args[0] == "answer-card"
+        assert call.args[1] == [
+            {
+                "action": "partial_update_element",
+                "params": {
+                    "element_id": _LOADING_ELEMENT_ID,
+                    "partial_element": {
+                        "content": "Working · 3 min · Round 3",
+                        "i18n_content": {
+                            "en_us": "Working · 3 min · Round 3",
+                            "zh_cn": "运行中 · 3 分钟 · 第 3 轮",
+                        },
+                    },
+                },
+            }
+        ]
+        assert session.segment_state.segments[0].dirty is True
+        assert session.segment_state.segments[0].created is False
+
+    @pytest.mark.asyncio
+    async def test_paused_heartbeat_drops_after_clarify_resolve_before_lock(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_paused_race", "chat", asyncio.get_running_loop())
+        session.state = SessionState.CLARIFY_PAUSED
+        session.card_id = "answer-card"
+        ctrl._sessions[session.message_id] = session
+        lock = ctrl._conversation_lock(session)
+        await lock.acquire()
+        try:
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=180,
+            ) is True
+            ctrl.on_clarify_exit(message_id=session.message_id)
+        finally:
+            lock.release()
+        await asyncio.sleep(0.01)
+
+        assert session.state == SessionState.STREAMING
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_paused_heartbeat_drops_after_terminal_transition_before_lock(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_paused_terminal", "chat", asyncio.get_running_loop())
+        session.state = SessionState.CLARIFY_PAUSED
+        session.card_id = "answer-card"
+        ctrl._sessions[session.message_id] = session
+        lock = ctrl._conversation_lock(session)
+        await lock.acquire()
+        try:
+            assert ctrl.on_long_running_progress(
+                message_id=session.message_id,
+                elapsed_seconds=180,
+            ) is True
+            session.mark_failed()
+        finally:
+            lock.release()
+        await asyncio.sleep(0.01)
+
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_paused_progress_failure_restores_native_heartbeat_fallback(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_progress(ctrl)
+        session = CardSession("msg_paused_progress_failure", "chat", asyncio.get_running_loop())
+        session.state = SessionState.CLARIFY_PAUSED
+        session.card_id = "answer-card"
+        ctrl._sessions[session.message_id] = session
+        ctrl._client.cardkit_batch_update = AsyncMock(side_effect=RuntimeError("update failed"))
+
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+        ) is True
+        await asyncio.sleep(0.01)
+
+        assert session.progress.available is False
+        assert ctrl.on_long_running_progress(
+            message_id=session.message_id,
+            elapsed_seconds=180,
+        ) is False
+
+    @pytest.mark.asyncio
     async def test_heartbeat_updates_only_the_mapped_active_card(self) -> None:
         ctrl = _setup_ctrl()
         _configure_progress(ctrl)

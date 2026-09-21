@@ -20,6 +20,7 @@ from hermes_lark_streaming.interactions.clarify import (
     handle_clarify_action,
     parse_card_action,
     send_clarify_card,
+    send_open_clarify_card,
 )
 from hermes_lark_streaming.interactions.registry import (
     ClarifyCardRegistry,
@@ -1128,6 +1129,101 @@ async def test_card_send_failure_delegates_to_official_numbered_text_fallback() 
     assert "1. A" in sent_text and "2. B" in sent_text
     pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner")
     assert pending is not None and pending.awaiting_text is True
+
+
+@pytest.mark.asyncio
+async def test_open_clarify_card_suppresses_native_text_and_keeps_official_text_wait() -> None:
+    clarify_gateway.register(
+        clarify_id="clarify-open",
+        session_key="feishu:chat-1:owner",
+        question="What else should we test?",
+        choices=None,
+    )
+
+    class _OfficialTextFallback:
+        send_clarify = BasePlatformAdapter.send_clarify
+
+        def __init__(self) -> None:
+            self.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    original = _OfficialTextFallback()
+    controller = SimpleNamespace(
+        clarify_card_enabled=True,
+        send_open_clarify_card=AsyncMock(return_value=ClarifySendResult(True, message_id="msg-open")),
+    )
+    proxy = ClarifyAdapterProxy(original, controller, frozenset({"owner"}))
+
+    result = await proxy.send_clarify(
+        chat_id="chat-1",
+        question="What else should we test?",
+        choices=None,
+        clarify_id="clarify-open",
+        session_key="feishu:chat-1:owner",
+        metadata={"reply_to_message_id": "anchor-1"},
+    )
+
+    assert result.success is True
+    original.send.assert_not_awaited()
+    controller.send_open_clarify_card.assert_awaited_once_with(
+        chat_id="chat-1",
+        question="What else should we test?",
+        metadata={"reply_to_message_id": "anchor-1"},
+    )
+    pending = clarify_gateway.get_pending_for_session("feishu:chat-1:owner")
+    assert pending is not None and pending.awaiting_text is True
+    assert clarify_gateway.attempt_text_response_for_session(
+        "feishu:chat-1:owner", "Please cover timeout recovery."
+    ) == clarify_gateway.TEXT_RESOLVED
+    assert pending.response == "Please cover timeout recovery."
+
+
+@pytest.mark.asyncio
+async def test_open_clarify_card_failure_delegates_to_native_text_fallback() -> None:
+    class _OfficialTextFallback:
+        send_clarify = BasePlatformAdapter.send_clarify
+
+        def __init__(self) -> None:
+            self.send = AsyncMock(return_value=SimpleNamespace(success=True))
+
+    original = _OfficialTextFallback()
+    controller = SimpleNamespace(
+        clarify_card_enabled=True,
+        send_open_clarify_card=AsyncMock(return_value=ClarifySendResult(False, error="send failed")),
+    )
+    proxy = ClarifyAdapterProxy(original, controller, frozenset({"owner"}))
+
+    result = await proxy.send_clarify(
+        chat_id="chat-1",
+        question="What else should we test?",
+        choices=[],
+        clarify_id="clarify-open",
+        session_key="feishu:chat-1:owner",
+    )
+
+    assert result.success is True
+    original.send.assert_awaited_once()
+    assert original.send.await_args.kwargs["content"] == "❓ What else should we test?"
+
+
+@pytest.mark.asyncio
+async def test_open_clarify_card_preserves_reply_routing_without_registry_state() -> None:
+    client = AsyncMock()
+    client.cardkit_create.return_value = "card-open"
+    client.send_card_id_to_chat.return_value = "msg-open"
+
+    result = await send_open_clarify_card(
+        client=client,
+        chat_id="chat-1",
+        question="What else should we test?",
+        metadata={"reply_to_message_id": "anchor-1"},
+    )
+
+    assert result == ClarifySendResult(True, message_id="msg-open")
+    card = client.cardkit_create.await_args.args[0]
+    assert "clarify_id" not in str(card)
+    client.send_card_id_to_chat.assert_awaited_once_with(
+        "chat-1", "card-open", reply_to_message_id="anchor-1"
+    )
 
 
 @pytest.mark.asyncio

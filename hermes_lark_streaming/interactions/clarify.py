@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
-from ..cardkit.interaction_builder import build_clarify_card
+from ..cardkit.interaction_builder import build_clarify_card, build_open_clarify_card
 from .registry import ClarifyCardRegistry, ClarifyCardState
 
 _logger = logging.getLogger("hermes_lark_streaming")
@@ -329,6 +329,24 @@ class ClarifyAdapterProxy:
                 _logger.warning("clarify card delivery failed; using Hermes text fallback: %s", result.error)
             except Exception as exc:
                 _logger.warning("clarify card delivery failed; using Hermes text fallback: %s", exc)
+        elif bool(getattr(self._controller, "clarify_card_enabled", True)):
+            try:
+                result = await asyncio.wait_for(
+                    self._controller.send_open_clarify_card(
+                        chat_id=chat_id,
+                        question=question,
+                        metadata=metadata,
+                    ),
+                    timeout=_CARD_SEND_TIMEOUT_SECONDS,
+                )
+                if result.success:
+                    return result
+                _logger.warning(
+                    "open clarify card delivery failed; using Hermes text fallback: %s",
+                    result.error,
+                )
+            except Exception as exc:
+                _logger.warning("open clarify card delivery failed; using Hermes text fallback: %s", exc)
 
         return await self._adapter.send_clarify(
             chat_id=chat_id,
@@ -398,6 +416,25 @@ async def send_clarify_card(
         await _update_card(client, retired, "expired")
     if owns_latest:
         _start_lifecycle_watch(client=client, registry=registry, state=state)
+    return ClarifySendResult(True, message_id=card_msg_id)
+
+
+async def send_open_clarify_card(
+    *,
+    client: Any,
+    chat_id: str,
+    question: str,
+    metadata: dict[str, Any] | None,
+) -> ClarifySendResult:
+    """Deliver an open-text prompt without claiming Hermes' pending state."""
+    card = build_open_clarify_card(question=question)
+    card_id = await client.cardkit_create(card)
+    reply_to = str((metadata or {}).get("reply_to_message_id") or "").strip() or None
+    card_msg_id = await client.send_card_id_to_chat(
+        chat_id,
+        card_id,
+        reply_to_message_id=reply_to,
+    )
     return ClarifySendResult(True, message_id=card_msg_id)
 
 
