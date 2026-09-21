@@ -36,6 +36,7 @@ from hermes_lark_streaming.patch import (
     on_message_completed_wait,
     on_reasoning_delta,
 )
+from hermes_lark_streaming.streaming.flush import CARDKIT_MS
 from hermes_lark_streaming.streaming.presentation import project_tool_panel
 from hermes_lark_streaming.streaming.segment_helper import ELEMENT_THRESHOLD, FOOTER_RESERVE, estimate_segment_elements
 from hermes_lark_streaming.streaming.segments import Segment, SegmentState, SegmentType
@@ -1910,6 +1911,179 @@ def _capture_split_calls(
 # ── Dispatch 测试 — 流式卡片分流 ──
 
 
+class TestFirstVisibleFlush:
+    """The urgent path is owned once by each physical CardKit generation."""
+
+    @staticmethod
+    def _ready_session(
+        ctrl: StreamCardController,
+        message_id: str,
+    ) -> CardSession:
+        session = CardSession(message_id, "chat", asyncio.get_event_loop())
+        session.set_card(card_id=f"card-{message_id}", card_msg_id=f"reply-{message_id}")
+        session.state = SessionState.STREAMING
+        session.flush.set_card_message_ready(True)
+        ctrl._sessions[message_id] = session
+        return session
+
+    def test_first_answer_is_urgent_then_second_answer_is_normal(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "first-answer")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="first") is True
+            assert ctrl.on_answer(message_id=session.message_id, text=" second") is True
+
+        assert [call.kwargs["urgent"] for call in schedule.call_args_list] == [True, False]
+        assert session.flush.throttle_ms == CARDKIT_MS
+
+    def test_first_commentary_is_urgent(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "first-commentary")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="checking",
+                source="interim_commentary",
+            ) is True
+
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    def test_first_enabled_reasoning_is_urgent(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_reasoning=True)
+        session = self._ready_session(ctrl, "first-reasoning")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_reasoning(message_id=session.message_id, text="plan") is True
+
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    def test_hidden_reasoning_does_not_consume_first_visible(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_reasoning=False)
+        session = self._ready_session(ctrl, "hidden-reasoning")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="") is False
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="",
+                source="interim_commentary",
+            ) is False
+            assert ctrl.on_reasoning(message_id=session.message_id, text="secret") is False
+            schedule.assert_not_called()
+            assert ctrl.on_answer(message_id=session.message_id, text="visible") is True
+
+        schedule.assert_called_once()
+        assert schedule.call_args.kwargs["urgent"] is True
+        assert session.first_visible_pending_source == "answer"
+
+    def test_first_visible_tool_event_is_urgent(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_tool_use=True)
+        session = self._ready_session(ctrl, "first-tool")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_tool_update(
+                message_id=session.message_id,
+                tool_name="read",
+                status="started",
+            ) is True
+
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    @pytest.mark.asyncio
+    async def test_visible_event_during_creation_becomes_urgent_when_ready(self) -> None:
+        ctrl = _setup_ctrl()
+        session = CardSession("creating-answer", "chat", asyncio.get_running_loop())
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="queued") is True
+            schedule.assert_not_called()
+            await ctrl._do_create_card(session)
+
+        schedule.assert_called_once()
+        assert schedule.call_args.kwargs["urgent"] is True
+        assert session.card_generation == 1
+
+    @pytest.mark.asyncio
+    async def test_multiple_visible_events_during_creation_share_one_urgent_batch(self) -> None:
+        ctrl = _setup_ctrl()
+        _configure_merged(ctrl, show_reasoning=True)
+        session = CardSession("creating-batch", "chat", asyncio.get_running_loop())
+        ctrl._sessions[session.message_id] = session
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_thinking(
+                message_id=session.message_id,
+                text="commentary",
+                source="interim_commentary",
+            ) is True
+            assert ctrl.on_reasoning(message_id=session.message_id, text="reasoning") is True
+            schedule.assert_not_called()
+            await ctrl._do_create_card(session)
+
+        schedule.assert_called_once()
+        assert schedule.call_args.kwargs["urgent"] is True
+        assert session.first_visible_pending_source == "commentary"
+
+    @pytest.mark.asyncio
+    async def test_split_new_physical_card_regains_first_visible_eligibility(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "split-generation")
+        with patch.object(session.flush, "schedule_update"):
+            assert ctrl.on_answer(message_id=session.message_id, text="old card") is True
+        old_generation = session.card_generation
+
+        assert await ctrl._do_split_card(session, 0, [], set(), {}, []) is True
+        assert session.card_generation == old_generation + 1
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text=" new card") is True
+
+        assert schedule.call_args.kwargs["urgent"] is True
+
+    def test_clarify_paused_blocks_first_visible_flush(self) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, "clarify-paused")
+        session.state = SessionState.CLARIFY_PAUSED
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="held") is True
+
+        schedule.assert_not_called()
+        assert session.first_visible_urgent_generation == -1
+        assert session.first_visible_pending_source == "answer"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("transition", ["completed", "aborted", "replaced"])
+    async def test_queued_first_visible_callback_cannot_flush_stale_card(
+        self,
+        transition: str,
+    ) -> None:
+        ctrl = _setup_ctrl()
+        session = self._ready_session(ctrl, f"stale-{transition}")
+
+        with patch.object(session.flush, "schedule_update") as schedule:
+            assert ctrl.on_answer(message_id=session.message_id, text="queued") is True
+        callback = schedule.call_args.args[0]
+
+        if transition == "completed":
+            session.state = SessionState.COMPLETED
+        elif transition == "aborted":
+            session.state = SessionState.ABORTED
+        else:
+            session.set_card(card_id="replacement-card", card_msg_id="replacement-message")
+
+        await callback()
+
+        ctrl._client.cardkit_batch_update.assert_not_awaited()
+        ctrl._client.cardkit_stream_element.assert_not_awaited()
+
+
 class TestDispatch:
     """验证流式卡片 session 的入口会消费事件并更新 SegmentState."""
 
@@ -2081,6 +2255,8 @@ class TestDoCreateCard:
         ]
         assert session.segment_state.segments[0].dirty is True
         assert session.segment_state.segments[0].created is False
+        assert session.first_visible_urgent_generation == -1
+        assert session.first_visible_rendered_generation == -1
 
     @pytest.mark.asyncio
     async def test_paused_heartbeat_drops_after_clarify_resolve_before_lock(self) -> None:
@@ -4618,7 +4794,7 @@ class TestInterimPreview:
             text="checking implementation",
             source="interim_commentary",
         ) is True
-        await asyncio.sleep(0.02)
+        await ctrl._do_flush(session)
 
         assert ctrl.on_answer(message_id=session.message_id, text="final answer") is True
         await ctrl._do_flush(session)
