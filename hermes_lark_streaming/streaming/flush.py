@@ -55,6 +55,11 @@ class FlushController:
         """Whether a delayed flush timer is waiting to run."""
         return self._pending_timer is not None
 
+    @property
+    def completed(self) -> bool:
+        """Whether normal streaming mutations have been permanently closed."""
+        return self._completed
+
     def schedule_update(
         self,
         do_flush: Callable[[], Awaitable[None]],

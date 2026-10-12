@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Coroutine
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..cardkit.builder import (
@@ -25,6 +26,7 @@ from ..cardkit.markdown import (
 from ..feishu import (
     CARDKIT_CONTENT_FAILED,
     CARDKIT_ELEMENT_LIMIT,
+    CARDKIT_ELEMENT_NOT_FOUND,
     CARDKIT_RATE_LIMITED,
     CARDKIT_STREAMING_CLOSED,
     FeishuAPIError,
@@ -66,6 +68,7 @@ _logger = logging.getLogger("hermes_lark_streaming")
 _ACTIVITY_REASONING_API_MODES = frozenset({"codex_responses", "codex_app_server"})
 _NATIVE_REASONING_SOURCE = "native_reasoning"
 _INTERIM_COMMENTARY_SOURCE = "interim_commentary"
+_STREAM_ELEMENT_RETRY_DELAYS_SEC = (0.2, 0.4, 0.8)
 
 
 async def _resolve_answer_images(
@@ -97,6 +100,158 @@ class StreamingController:
     _register_latest_card: Callable[[CardSession], bool]
     _remember_finalized_card: Callable[[CardSession, dict[str, Any]], None]
     _wait_for_card_creation: Callable[[CardSession], Coroutine[Any, Any, bool]]
+
+    @staticmethod
+    def _is_missing_element_error(error: FeishuAPIError) -> bool:
+        return (
+            error.code == CARDKIT_ELEMENT_NOT_FOUND
+            or error.extract_sub_code() == CARDKIT_ELEMENT_NOT_FOUND
+        )
+
+    @staticmethod
+    def _segment_owns_stream(
+        session: CardSession,
+        segment_state: SegmentState,
+        segment: Segment,
+        segment_type: SegmentType,
+        rendered_text: str,
+    ) -> bool:
+        return (
+            session.segment_state is segment_state
+            and segment in segment_state.segments[session.split_index:]
+            and segment.type == segment_type
+            and segment.created
+            and segment.dirty
+            and segment.text == rendered_text
+        )
+
+    def _stream_retry_cancel_reason(
+        self,
+        session: CardSession,
+        *,
+        expected_card_id: str,
+        expected_generation: int,
+        owns_element: Callable[[], bool],
+    ) -> str | None:
+        if session.card_generation != expected_generation:
+            return "generation_changed"
+        if session.card_id != expected_card_id:
+            return "card_changed"
+        if (
+            session.state != SessionState.STREAMING
+            or session.clarify_pending_split
+            or session.flush.completed
+        ):
+            return "state_changed"
+        if session.guard.should_skip("cardkit_stream_retry"):
+            return "unavailable"
+        if self._get_active_session(session.message_id) is not session:
+            return "session_replaced"
+        if not owns_element():
+            return "ownership_changed"
+        return None
+
+    async def _stream_element_with_propagation_retry(
+        self,
+        session: CardSession,
+        *,
+        element_id: str,
+        content: str,
+        source: str,
+        just_created: bool,
+        owns_element: Callable[[], bool],
+        ownership_element_ids: set[str],
+    ) -> bool:
+        """Stream one newly-created element with a bounded 300313 propagation retry.
+
+        The caller holds the conversation lock.  Backoff deliberately releases it,
+        then reacquires and revalidates physical-card and presentation ownership.
+        ``False`` means ownership went stale; callers must not run recovery against
+        the replacement presentation.
+        """
+        assert self._client is not None
+        assert session.card_id is not None
+        expected_card_id = session.card_id
+        expected_generation = session.card_generation
+        conversation_lock = self._conversation_lock(session)
+
+        for attempt in range(len(_STREAM_ELEMENT_RETRY_DELAYS_SEC) + 1):
+            cancel_reason = self._stream_retry_cancel_reason(
+                session,
+                expected_card_id=expected_card_id,
+                expected_generation=expected_generation,
+                owns_element=owns_element,
+            )
+            if cancel_reason:
+                _logger.debug(
+                    "cardkit_stream_retry_cancelled msg=%s card=%s generation=%d "
+                    "element=%s source=%s reason=%s",
+                    session.message_id[:12],
+                    expected_card_id[:12],
+                    expected_generation,
+                    element_id,
+                    source,
+                    cancel_reason,
+                )
+                return False
+
+            session.sequence += 1
+            sequence = session.sequence
+            try:
+                await self._client.cardkit_stream_element(
+                    expected_card_id,
+                    element_id,
+                    content,
+                    sequence=sequence,
+                )
+                return True
+            except FeishuAPIError as error:
+                missing_element_id = extract_missing_element_id(error)
+                retryable = (
+                    just_created
+                    and self._is_missing_element_error(error)
+                    and (
+                        not missing_element_id
+                        or missing_element_id in ownership_element_ids
+                    )
+                )
+                if not retryable:
+                    raise
+                if attempt == len(_STREAM_ELEMENT_RETRY_DELAYS_SEC):
+                    _logger.debug(
+                        "cardkit_stream_retry_exhausted msg=%s card=%s generation=%d "
+                        "element=%s source=%s attempts=%d",
+                        session.message_id[:12],
+                        expected_card_id[:12],
+                        expected_generation,
+                        element_id,
+                        source,
+                        attempt,
+                    )
+                    raise
+
+                delay = _STREAM_ELEMENT_RETRY_DELAYS_SEC[attempt]
+                _logger.debug(
+                    "cardkit_stream_retry msg=%s card=%s generation=%d element=%s "
+                    "source=%s attempt=%d/%d delay_ms=%d",
+                    session.message_id[:12],
+                    expected_card_id[:12],
+                    expected_generation,
+                    element_id,
+                    source,
+                    attempt + 1,
+                    len(_STREAM_ELEMENT_RETRY_DELAYS_SEC),
+                    round(delay * 1000),
+                )
+                if not conversation_lock.locked():
+                    raise RuntimeError("CardKit stream retry requires conversation lock") from error
+                conversation_lock.release()
+                try:
+                    await asyncio.sleep(delay)
+                finally:
+                    await conversation_lock.acquire()
+
+        raise AssertionError("unreachable")
 
     def _schedule_flush(self, session: CardSession, *, urgent: bool = False) -> None:
         if session.state == SessionState.IDLE or session.state.is_terminal:
@@ -386,14 +541,15 @@ class StreamingController:
                 seg.created = True
                 seg.dirty = False
 
-    async def _flush_merged_reasoning(self, session: CardSession) -> None:
+    async def _flush_merged_reasoning(self, session: CardSession) -> bool:
         """Create/update the fixed reasoning lane without affecting other segments."""
         assert self._client is not None
         assert session.card_id is not None
         state = session.merged_reasoning
         if not state.text:
-            return
+            return True
 
+        just_created = False
         if not state.created:
             session.sequence += 1
             try:
@@ -411,27 +567,43 @@ class StreamingController:
             except FeishuAPIError as error:
                 _logger.debug("CardKit merged reasoning create failed: %s", error, exc_info=True)
                 self._handle_flush_error(error)
-                return
+                return True
             except Exception:
                 _logger.debug("CardKit merged reasoning create failed", exc_info=True)
-                return
+                return True
             state.created = True
+            just_created = True
             session.element_count += MERGED_REASONING_ELEMENT_ESTIMATE
 
         if state.dirty:
             rendered_text = state.text
             content = optimize_markdown_style(rendered_text) or " "
-            session.sequence += 1
             try:
-                await self._client.cardkit_stream_element(
-                    session.card_id,
-                    REASONING_TEXT_ELEMENT_ID,
-                    content,
-                    sequence=session.sequence,
+                streamed = await self._stream_element_with_propagation_retry(
+                    session,
+                    element_id=REASONING_TEXT_ELEMENT_ID,
+                    content=content,
+                    source="merged_reasoning",
+                    just_created=just_created,
+                    owns_element=lambda: (
+                        session.merged_reasoning is state
+                        and state.created
+                        and state.dirty
+                        and state.text == rendered_text
+                    ),
+                    ownership_element_ids={
+                        REASONING_ELEMENT_ID,
+                        REASONING_TEXT_ELEMENT_ID,
+                    },
                 )
+                if not streamed:
+                    return False
             except FeishuAPIError as error:
                 missing_el_id = extract_missing_element_id(error)
-                if missing_el_id in {REASONING_ELEMENT_ID, REASONING_TEXT_ELEMENT_ID}:
+                if self._is_missing_element_error(error) and (
+                    not missing_el_id
+                    or missing_el_id in {REASONING_ELEMENT_ID, REASONING_TEXT_ELEMENT_ID}
+                ):
                     state.created = False
                     session.element_count = max(
                         0,
@@ -439,18 +611,19 @@ class StreamingController:
                     )
                 _logger.debug("CardKit merged reasoning stream failed: %s", error, exc_info=True)
                 self._handle_flush_error(error)
-                return
+                return True
             except Exception:
                 _logger.debug("CardKit merged reasoning stream failed", exc_info=True)
-                return
+                return True
             if rendered_text.strip():
                 self._mark_first_visible_rendered(session, source="reasoning")
             if state.text == rendered_text:
                 state.dirty = False
 
         self._consume_merged_reasoning_segments(session)
+        return True
 
-    async def _flush_interim_preview(self, session: CardSession) -> None:
+    async def _flush_interim_preview(self, session: CardSession) -> bool:
         """Create/update the replace-only commentary preview lane fail-open."""
         assert self._client is not None
         assert session.card_id is not None
@@ -465,6 +638,7 @@ class StreamingController:
             state.final_started,
         )
 
+        just_created = False
         if not state.created and state.text and not state.final_started:
             session.sequence += 1
             try:
@@ -483,30 +657,43 @@ class StreamingController:
             except FeishuAPIError as error:
                 _logger.debug("CardKit interim preview create failed: %s", error, exc_info=True)
                 self._handle_flush_error(error)
-                return
+                return True
             except Exception:
                 _logger.debug("CardKit interim preview create failed", exc_info=True)
-                return
+                return True
             state.created = True
+            just_created = True
             session.element_count += INTERIM_PREVIEW_ELEMENT_ESTIMATE
 
         if not state.created or not state.dirty:
-            return
+            return True
 
         rendered_text = state.text
         rendered_revision = state.revision
         content = _downgrade_tables(optimize_markdown_style(rendered_text)) or " "
-        session.sequence += 1
         try:
-            await self._client.cardkit_stream_element(
-                session.card_id,
-                STREAMING_ELEMENT_ID,
-                content,
-                sequence=session.sequence,
+            streamed = await self._stream_element_with_propagation_retry(
+                session,
+                element_id=STREAMING_ELEMENT_ID,
+                content=content,
+                source="commentary",
+                just_created=just_created,
+                owns_element=lambda: (
+                    session.interim_preview is state
+                    and state.created
+                    and state.dirty
+                    and state.revision == rendered_revision
+                    and state.text == rendered_text
+                ),
+                ownership_element_ids={STREAMING_ELEMENT_ID},
             )
+            if not streamed:
+                return False
         except FeishuAPIError as error:
             missing_el_id = extract_missing_element_id(error)
-            if missing_el_id == STREAMING_ELEMENT_ID:
+            if self._is_missing_element_error(error) and (
+                not missing_el_id or missing_el_id == STREAMING_ELEMENT_ID
+            ):
                 state.created = False
                 state.dirty = bool(state.text) and not state.final_started
                 session.element_count = max(
@@ -515,10 +702,10 @@ class StreamingController:
                 )
             _logger.debug("CardKit interim preview stream failed: %s", error, exc_info=True)
             self._handle_flush_error(error)
-            return
+            return True
         except Exception:
             _logger.debug("CardKit interim preview stream failed", exc_info=True)
-            return
+            return True
 
         if rendered_text.strip():
             self._mark_first_visible_rendered(session, source="commentary")
@@ -528,6 +715,7 @@ class StreamingController:
             session.message_id[:12],
             rendered_revision,
         )
+        return True
 
     def _on_thinking_segment(
         self,
@@ -765,10 +953,10 @@ class StreamingController:
 
         await self._flush_progress(session)
 
-        if merged_mode:
-            # This lane is presentation state. Numbered reasoning segments remain
-            # intact for chronology, splitting, and diagnostics.
-            await self._flush_merged_reasoning(session)
+        # This lane is presentation state. Numbered reasoning segments remain
+        # intact for chronology, splitting, and diagnostics.
+        if merged_mode and not await self._flush_merged_reasoning(session):
+            return
 
         # ── 步骤 1: batch_update — chronology 保留，TOOL 由固定 presentation lane 消费 ──
         actions: list[dict[str, Any]] = []
@@ -1030,7 +1218,8 @@ class StreamingController:
 
         # Keep the transient commentary lane after structural reasoning/tool
         # elements and before normal answer/segment text streaming.
-        await self._flush_interim_preview(session)
+        if not await self._flush_interim_preview(session):
+            return
 
         # ── 步骤 2: stream_element 刷脏文本 ──
         for seg in segments[session.split_index:]:
@@ -1040,44 +1229,88 @@ class StreamingController:
                 if seg.type == SegmentType.REASONING:
                     if merged_mode:
                         continue
-                    content = optimize_markdown_style(seg.text) or " "
-                    session.sequence += 1
+                    rendered_text = seg.text
+                    content = optimize_markdown_style(rendered_text) or " "
                     _logger.info(
                         "CardKit stream element: msg=%s seq=%d type=reasoning len=%d",
                         session.message_id[:12],
-                        session.sequence,
+                        session.sequence + 1,
                         len(content),
                     )
-                    await self._client.cardkit_stream_element(
-                        session.card_id,
-                        seg.text_el_id,
-                        content,
-                        sequence=session.sequence,
+                    streamed = await self._stream_element_with_propagation_retry(
+                        session,
+                        element_id=seg.text_el_id,
+                        content=content,
+                        source="reasoning",
+                        just_created=seg.el_id in new_el_ids,
+                        owns_element=partial(
+                            self._segment_owns_stream,
+                            session,
+                            segment_state,
+                            seg,
+                            SegmentType.REASONING,
+                            rendered_text,
+                        ),
+                        ownership_element_ids={seg.el_id, seg.text_el_id},
                     )
-                    if seg.text.strip():
+                    if not streamed:
+                        return
+                    if rendered_text.strip():
                         self._mark_first_visible_rendered(session, source="reasoning")
-                    seg.dirty = False
+                    if seg.text == rendered_text:
+                        seg.dirty = False
                 elif seg.type == SegmentType.ANSWER:
-                    content = seg.text
+                    rendered_text = seg.text
+                    content = rendered_text
                     if session.image_resolver:
                         content = session.image_resolver.resolve_images(content)
                     content = _downgrade_tables(optimize_markdown_style(content)) or " "
-                    session.sequence += 1
                     _logger.info(
                         "CardKit stream element: msg=%s seq=%d type=answer len=%d",
                         session.message_id[:12],
-                        session.sequence,
+                        session.sequence + 1,
                         len(content),
                     )
-                    await self._client.cardkit_stream_element(
-                        session.card_id,
-                        seg.el_id,
-                        content,
-                        sequence=session.sequence,
+                    streamed = await self._stream_element_with_propagation_retry(
+                        session,
+                        element_id=seg.el_id,
+                        content=content,
+                        source="answer",
+                        just_created=seg.el_id in new_el_ids,
+                        owns_element=partial(
+                            self._segment_owns_stream,
+                            session,
+                            segment_state,
+                            seg,
+                            SegmentType.ANSWER,
+                            rendered_text,
+                        ),
+                        ownership_element_ids={seg.el_id},
                     )
-                    if seg.text.strip():
+                    if not streamed:
+                        return
+                    if rendered_text.strip():
                         self._mark_first_visible_rendered(session, source="answer")
-                    seg.dirty = False
+                    if seg.text == rendered_text:
+                        seg.dirty = False
+            except FeishuAPIError as e:
+                missing_element_id = extract_missing_element_id(e)
+                owned_ids = {seg.el_id, seg.text_el_id} - {""}
+                if self._is_missing_element_error(e) and (
+                    not missing_element_id or missing_element_id in owned_ids
+                ):
+                    seg.created = False
+                    seg.dirty = True
+                    session.element_count = max(
+                        0,
+                        session.element_count - seg.element_estimate,
+                    )
+                    _logger.info(
+                        "CardKit recovered stale segment %s -> will re-add on next flush",
+                        seg.el_id,
+                    )
+                _logger.debug("CardKit stream element failed: %s el=%s", e, seg.el_id, exc_info=True)
+                self._handle_flush_error(e)
             except Exception as e:
                 _logger.debug("CardKit stream element failed: %s el=%s", e, seg.el_id, exc_info=True)
 
@@ -1642,7 +1875,8 @@ class StreamingController:
             # The new card replays the accumulated lane. Older sealed cards keep
             # only the merged reasoning that belongs to their chronology slice.
             session.merged_reasoning.reset_render_state()
-            await self._flush_merged_reasoning(session)
+            if not await self._flush_merged_reasoning(session):
+                return False
         if next_tool_snapshot is not None:
             next_presentation, next_panel_segments = next_tool_snapshot
             if not next_presentation.steps:
