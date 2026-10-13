@@ -75,6 +75,8 @@ def context(platform="feishu", **overrides):
                 stream_consumer_holder=[None], user_config={}, resolve_display_setting=lambda *a: False,
                 interim_assistant_messages_enabled=False, _status_adapter=None, _status_thread_metadata={},
                 progress_queue=None, log_queue=None, _status_chat_id="chat", run_generation=1)
+    data.update(mute_notification_reply=False, scheduled_heartbeat=False,
+                persist_user_display_kind=None, reply_expected=True, voice_turn=False, channel_prompt=None)
     data.update(overrides)
     return NS(**data)
 

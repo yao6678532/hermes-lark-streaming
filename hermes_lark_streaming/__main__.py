@@ -64,7 +64,8 @@ def _get_cron_patcher() -> CronPatcher | None:
 
     try:
         return CronPatcher()
-    except PatcherError:
+    except PatcherError as e:
+        print(f"Error: {e}")
         return None
 
 
@@ -88,8 +89,9 @@ def _cmd_install() -> int:
 
     patchers: list[Patcher | CronPatcher | FeishuAdapterPatcher] = [patcher, feishu_patcher]
     cron_patcher = _get_cron_patcher()
-    if cron_patcher is not None:
-        patchers.append(cron_patcher)
+    if cron_patcher is None:
+        return 1
+    patchers.append(cron_patcher)
     print("Verifying and preparing all gateway/cron hooks before writing...")
     try:
         install_patchers(patchers)
@@ -246,6 +248,8 @@ def _cmd_verify() -> int:
     print("Feishu approval target compatible.")
 
     cron_patcher = _get_cron_patcher()
+    if cron_patcher is None:
+        return 1
     if cron_patcher is not None:
         print(f"Cron target: {cron_patcher.cron_path}")
         try:

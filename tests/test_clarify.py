@@ -578,6 +578,25 @@ async def test_text_fallback_answer_becomes_resolved_card_even_after_official_cl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["SKIPPED", "CANCELLED"])
+async def test_modular_wait_control_sentinels_retire_without_rendering_answer(monkeypatch, name) -> None:
+    sentinel = "\x00" + name.lower()
+    monkeypatch.setattr(clarify_gateway, name, sentinel, raising=False)
+    _register_official()
+    entry = clarify_gateway.get_pending_for_session("feishu:chat-1:owner", include_choice_prompts=True)
+    assert entry is not None
+    registry = ClarifyCardRegistry()
+    state = _state()
+    registry.register(state)
+    assert clarify_gateway.resolve_gateway_clarify("clarify-1", sentinel)
+    assert clarify_gateway.wait_for_response("clarify-1", timeout=0) == sentinel
+    client = AsyncMock()
+    assert await _reconcile_clarify_lifecycle(client=client, registry=registry, state=state, official_entry=entry)
+    assert state.status == "expired" and not state.answer
+    assert sentinel not in str(client.cardkit_update.await_args.args[1])
+
+
+@pytest.mark.asyncio
 async def test_input_card_update_failure_preserves_text_fallback() -> None:
     _register_official()
     registry = ClarifyCardRegistry()

@@ -87,7 +87,7 @@ def inject_cron(content: str) -> str:
             raise PatcherError(f"Split cron signature changed: {name}")
         return fn
 
-    def statement(fn: ast.FunctionDef, source: str) -> ast.stmt:
+    def statement(fn: ast.FunctionDef | ast.AsyncFunctionDef, source: str) -> ast.stmt:
         expected = ast.dump(ast.parse(source).body[0], include_attributes=False)
         matches = [n for n in _scoped_nodes(fn) if isinstance(n, ast.stmt)
                    and ast.dump(n, include_attributes=False) == expected]
@@ -120,12 +120,19 @@ def inject_cron(content: str) -> str:
     if live_anchor not in live.body or standalone_anchor not in standalone.body:
         raise PatcherError("Split cron text-send seams must be direct function statements")
     send_functions = [n for n in standalone.body
-                      if isinstance(n, ast.FunctionDef) and n.name == "_send"]
+                      if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "_send"]
     if len(send_functions) != 1:
         raise PatcherError("Split cron requires exactly one standalone _send closure")
-    statement(send_functions[0], "return _send_to_platform("
-              "t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id, "
-              "media_files=media_files)")
+    send = send_functions[0]
+    if isinstance(send, ast.AsyncFunctionDef):
+        statement(send, "return await asyncio.wait_for(_send_to_platform("
+                  "t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id, "
+                  "media_files=media_files), timeout=send_timeout)")
+        statement(standalone, "send_timeout = _get_standalone_send_timeout()")
+    else:
+        statement(send, "return _send_to_platform("
+                  "t.platform, t.pconfig, t.chat_id, content, thread_id=t.thread_id, "
+                  "media_files=media_files)")
 
     blocks = [
         (live_anchor, [

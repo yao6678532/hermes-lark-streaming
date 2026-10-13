@@ -10,7 +10,14 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from hermes_sources import SPLIT_LEDGER_REVISION, SPLIT_REVISION, TARGET_REVISION, source_at
+from hermes_sources import (
+    MODULAR_REVISION,
+    SPLIT_LEDGER_REVISION,
+    SPLIT_REVISION,
+    TARGET_REVISION,
+    TRANSITION_REVISION,
+    source_at,
+)
 from test_split_gateway import context, method, wire_owner
 
 import hermes_lark_streaming.patch as hooks
@@ -19,8 +26,9 @@ from hermes_lark_streaming.feishu import FeishuAPIError
 from hermes_lark_streaming.split_gateway import inject_gateway
 
 
-@pytest.fixture(scope="module", params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION],
-                ids=["split", "split-ledger", "target"])
+@pytest.fixture(scope="module", params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION,
+                                      TRANSITION_REVISION, MODULAR_REVISION],
+                ids=["split", "split-ledger", "0.21.3", "0.21.6", "0.21.7"])
 def upstream_sources(request):
     names = [
         "gateway/run_turn_runner.py", "gateway/run_turn.py", "gateway/run_notifications.py",
@@ -57,6 +65,9 @@ def upstream(upstream_sources, monkeypatch):
     module("agent.memory_manager", sanitize_context=plain_text)
     module("agent.message_content", flatten_message_text=plain_text)
     module("agent.redact", redact_sensitive_text=plain_text)
+    module("agent.history_commentary", visible_commentary=lambda text, strip_thinking=None:
+           (strip_thinking(text) if strip_thinking else plain_text(text)))
+    module("hermes_cli.observability.shared_metrics_gateway", stops_reply_clock=lambda function: function)
     for name in (
         "agent.think_scrubber", "agent.stream_delivery", "gateway.response_filters",
         "gateway.stream_consumer_fences", "gateway.stream_consumer_transport",
@@ -108,8 +119,9 @@ def setup(upstream, *, native=True, interim=True, tts=None, platform="feishu"):
         resolve_display_setting=lambda *a: native, interim_assistant_messages_enabled=interim,
     )
     owner = NS(_ctx=ctx, _runner=NS(
-        config=NS(streaming=NS(enabled=native, transport="auto")),
+        config=NS(streaming=NS(enabled=native, transport="auto", enabled_for=lambda flag: native)),
         _adapter_for_source=lambda _: adapter,
+        _delivery_adapter_for=lambda _: adapter,
         _build_stream_consumer_config=lambda *a, **k: (upstream.ConsumerConfig(), None),
     ))
     consumer, delta, interim_cb, want_interim = method(
@@ -141,18 +153,21 @@ async def finish_worker(upstream, turn, final, **flags):
 async def finish_gateway(upstream, turn, result, monkeypatch):
     monkeypatch.setitem(sys.modules, "gateway.run_heartbeat_acceptance",
                         NS(heartbeat_owner_is_current=lambda *a: True))
-    event = NS(message_id="inbound", text="question", channel_prompt=None, message_type="text")
+    event = NS(message_id="inbound", text="question", channel_prompt=None, message_type="text",
+               internal=False, reply_expected=True, metadata={})
     source = turn.ctx.source
     source.user_id, source.user_name, source.thread_id = "user", "user", None
     prepared = NS(
         history=[], message_text="question", context_prompt="", persist_user_message="question",
         persist_user_timestamp=None, persist_user_display_kind=None, persistence_owner="owner",
+        title_user_message=None,
     )
     owner = NS(
         _PreparedTurn=NS,
         _hmwa_resolve_session=AsyncMock(return_value=(source, NS(session_id="sid"), "session")),
         _hmwa_prepare_turn=AsyncMock(return_value=(prepared, [])), hooks=NS(emit=AsyncMock()),
         _reply_anchor_for_event=lambda _: "quoted-anchor", _run_agent=AsyncMock(return_value=result),
+        _pinned_channel_inputs=lambda *a, **k: (None, source), _persist_prompt_pins=AsyncMock(),
         _hmwa_stop_typing_for_turn=AsyncMock(), _is_session_run_current=lambda *a: True,
         _hmwa_shape_agent_response=AsyncMock(return_value=(result["final_response"], False, [])),
         _hmwa_prepend_reasoning=lambda r, text, *a: text, _hmwa_runtime_footer_line=lambda *a: "",
@@ -160,11 +175,15 @@ async def finish_gateway(upstream, turn, result, monkeypatch):
         _hmwa_compression_exhaustion_reset=AsyncMock(side_effect=lambda r, text, e, *a: (text, e)),
         _hmwa_persist_turn_transcript=AsyncMock(), _hmwa_agent_error_reply=AsyncMock(return_value="unexpected error"),
         _clear_session_env=Mock(), _adapter_for_source=lambda _: turn.adapter,
+        _delivery_adapter_for=lambda _: turn.adapter,
         _should_send_voice_reply=lambda *a, **k: False, _deliver_media_from_response=AsyncMock(),
     )
-    delivery = method(upstream.generated, "run_turn.py", "_hmwa_deliver_turn_response")
+    delivery = method(upstream.generated, "run_turn.py", "_hmwa_deliver_turn_response",
+                      diagnostic_wake_muted=lambda event: False)
     owner._hmwa_deliver_turn_response = lambda *a: delivery(owner, *a)
-    response = await method(upstream.generated, "run_turn.py", "_handle_message_with_agent")(
+    response = await method(upstream.generated, "run_turn.py", "_handle_message_with_agent",
+                            diagnostic_metadata=lambda event: {}, reply_expected_metadata=lambda flag: {},
+                            diagnostic_wake_muted=lambda event: False)(
         owner, event, source, "session", 1,
     )
     owner._hmwa_agent_error_reply.assert_not_called()

@@ -55,5 +55,5 @@ jobs:
           fp.verify_target()
           cp = CronPatcher(pathlib.Path('hermes-source/cron/scheduler.py'))
           cp.verify_target()
-          print('Gateway, Feishu adapter, and Cron targets compatible.')
+          print('Source/AST contracts passed for Gateway, Feishu adapter, and Cron; runtime imports were not tested.')
           "

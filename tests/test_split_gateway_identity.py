@@ -8,16 +8,31 @@ from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock, Mock
 
 import pytest
-from hermes_sources import SPLIT_LEDGER_REVISION, SPLIT_REVISION, source_at
+from hermes_sources import MODULAR_REVISION, SPLIT_LEDGER_REVISION, SPLIT_REVISION, TRANSITION_REVISION, source_at
 from test_split_gateway import context, method
 
 from hermes_lark_streaming.patcher import MARKERS, PatcherError, _clean_hooks
 from hermes_lark_streaming.split_gateway import inject_gateway
 
 
-@pytest.fixture(params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION], ids=["injected-id", "upstream-id"])
+@pytest.fixture(params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION, TRANSITION_REVISION, MODULAR_REVISION],
+                ids=["injected-id", "upstream-id", "0.21.6", "0.21.7"])
 def turn_source(request):
     return source_at("gateway/run_turn.py", request.param)
+
+
+def queued_method(source, monkeypatch):
+    monkeypatch.setitem(sys.modules, "gateway.run_inbound", NS(strip_discord_triggering_note=lambda e, text: text))
+    monkeypatch.setitem(sys.modules, "gateway.run_turn_followup_ack", NS(
+        _run_followup_processing_hook=AsyncMock(), _followup_cancel_outcome=lambda _: "cancelled"))
+    return method({"run_turn.py": inject_gateway("run_turn.py", source)},
+                  "run_turn.py", "_run_agent_queued_followup",
+                  display_kind_for_event=lambda e: None, reply_expected_metadata=lambda flag: {},
+                  diagnostic_metadata=lambda e: {}, ProcessingOutcome=NS(SUCCESS="success", FAILURE="failure"))
+
+
+def event(**fields):
+    return NS(internal=False, channel_prompt=None, metadata={}, reply_expected=True, **fields)
 
 
 def test_known_identity_layouts_round_trip_without_duplicate_keywords(turn_source):
@@ -45,13 +60,15 @@ async def test_nested_followups_keep_raw_identity_separate_from_reply_anchor(tur
     monkeypatch.setitem(sys.modules, "hermes_lark_streaming.patch", hooks)
     monkeypatch.setitem(sys.modules, "gateway.platforms.base", NS(merge_pending_message_event=Mock()))
     monkeypatch.setitem(sys.modules, "gateway.run", NS(_preserve_queued_followup_history_offset=lambda old, new: new))
-    fn = method({"run_turn.py": inject_gateway("run_turn.py", turn_source)},
-                "run_turn.py", "_run_agent_queued_followup")
+    fn = queued_method(turn_source, monkeypatch)
     calls = []
     owner = NS(_MAX_INTERRUPT_DEPTH=10, _is_goal_continuation_event=lambda _: False,
                _session_key_for_source=lambda _: "session", _reply_anchor_for_event=lambda event: event.anchor,
                _prepare_profile_scoped_inbound_message_text=AsyncMock(return_value="next"),
                _adapter_for_source=lambda _: None, _refresh_agent_cache_message_count=AsyncMock(),
+               _delivery_adapter_for=lambda _: None, _intake_adapter_for=lambda _: None,
+               _pinned_channel_inputs=lambda key, prompt, source, **k: (prompt, source),
+               _persist_prompt_pins=AsyncMock(),
                _run_agent_deliver_first_response=AsyncMock())
 
     async def run_agent(**kwargs):
@@ -59,14 +76,14 @@ async def test_nested_followups_keep_raw_identity_separate_from_reply_anchor(tur
         if kwargs["inbound_message_id"] == "B":
             ctx = context(inbound_message_id="B", event_message_id="quote-B", session_id="sid", history=[],
                           _interrupt_depth=1, context_prompt="prompt")
-            return await fn(owner, ctx, None, "C", NS(message_id="C", anchor="quote-C"), {},
+            return await fn(owner, ctx, None, "C", event(message_id="C", anchor="quote-C"), {},
                             {"messages": [], "interrupted": interrupted}, None)
         return {"final_response": "C answer"}
 
     owner._run_agent = run_agent
     ctx = context(inbound_message_id="A", event_message_id="quote-A", session_id="sid", history=[],
                   _interrupt_depth=0, context_prompt="prompt")
-    result = await fn(owner, ctx, None, "B", NS(message_id="B", anchor="quote-B"), {},
+    result = await fn(owner, ctx, None, "B", event(message_id="B", anchor="quote-B"), {},
                       {"messages": [], "interrupted": interrupted}, None)
     assert result["_hermes_lark_completion_id"] == "C"
     if "queued_terminal_inbound_id" in turn_source:
@@ -88,12 +105,16 @@ async def test_missing_inbound_identity_does_not_become_reply_anchor(turn_source
     ))
     monkeypatch.setitem(sys.modules, "gateway.platforms.base", NS(merge_pending_message_event=Mock()))
     monkeypatch.setitem(sys.modules, "gateway.run", NS(_preserve_queued_followup_history_offset=lambda old, new: new))
-    fn = method({"run_turn.py": inject_gateway("run_turn.py", turn_source)},
-                "run_turn.py", "_run_agent_queued_followup")
+    fn = queued_method(turn_source, monkeypatch)
+    if event is not None:
+        event.__dict__.update(internal=False, channel_prompt=None, metadata={}, reply_expected=True)
     owner = NS(_MAX_INTERRUPT_DEPTH=10, _is_goal_continuation_event=lambda _: False,
                _session_key_for_source=lambda _: "session", _reply_anchor_for_event=lambda item: item.anchor,
                _prepare_profile_scoped_inbound_message_text=AsyncMock(return_value="next"),
                _adapter_for_source=lambda _: None, _refresh_agent_cache_message_count=AsyncMock(),
+               _delivery_adapter_for=lambda _: None, _intake_adapter_for=lambda _: None,
+               _pinned_channel_inputs=lambda key, prompt, source, **k: (prompt, source),
+               _persist_prompt_pins=AsyncMock(),
                _run_agent_deliver_first_response=AsyncMock(),
                _run_agent=AsyncMock(return_value={"final_response": "done"}))
     ctx = context(session_id="sid", history=[], _interrupt_depth=0, context_prompt="prompt")

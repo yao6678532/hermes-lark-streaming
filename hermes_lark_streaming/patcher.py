@@ -754,8 +754,10 @@ def _clarify_hook(indent: str) -> str:
         [
             "try:",
             "    from hermes_lark_streaming.patch import on_clarify_enter, on_clarify_exit",
+            "    from functools import wraps as _lark_wraps",
             "    _lark_clarify_orig = agent.clarify_callback",
-            "    def _lark_clarify_wrapper(question, choices, multi_select=False):",
+            "    @_lark_wraps(_lark_clarify_orig)",
+            "    def _lark_clarify_wrapper(*args, **kwargs):",
             "        try:",
             "            _lark_clarify_msg_id = ctx.event_message_id",
             "            _lark_clarify_chat_id = ctx._status_chat_id",
@@ -770,7 +772,7 @@ def _clarify_hook(indent: str) -> str:
             "            session_key=_lark_clarify_sk,",
             "        )",
             "        try:",
-            "            return _lark_clarify_orig(question, choices, multi_select)",
+            "            return _lark_clarify_orig(*args, **kwargs)",
             "        finally:",
             "            on_clarify_exit(",
             "                message_id=_lark_clarify_msg_id,",
@@ -1018,20 +1020,15 @@ class Patcher:
                 f"Set HERMES_HOME to the dir containing hermes-agent/ and rerun."
             )
 
-        tree = ast.parse(_clean_hooks(_read_source(self.run_path), self.MARKERS))
-        monolithic = any(
-            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name == "_handle_message_with_agent"
-            for node in ast.walk(tree)
-        )
-        self.split = not monolithic and (self.run_path.parent / "run_turn.py").exists()
+        from .compatibility import gateway_layout
+
+        self.layout = gateway_layout(self.run_path, lambda path: _clean_hooks(_read_source(path), self.MARKERS))
+        self.split = self.layout.kind == "modular"
 
     @property
     def target_paths(self) -> list[Path]:
         if self.split:
-            from .split_gateway import GATEWAY_FILES
-
-            return [self.run_path, *(self.run_path.parent / name for name in GATEWAY_FILES)]
+            return [self.run_path, *(path for _role, path in self.layout.modules)]
         return [self.run_path]
 
     def is_patched(self) -> bool:
@@ -1054,7 +1051,13 @@ class Patcher:
         self.prepare_install()
 
     def prepare_install(self) -> dict[Path, str]:
+        from .compatibility import gateway_layout
+
+        current = gateway_layout(self.run_path, lambda path: _clean_hooks(_read_source(path), self.MARKERS))
+        if current != self.layout:
+            raise PatcherError("Gateway layout changed after detection; resolve a fresh patch plan")
         changes = {}
+        roles = {path: role for role, path in self.layout.modules}
         for path in self.target_paths:
             if not path.is_file():
                 raise PatcherError(f"Missing split gateway module: {path}")
@@ -1062,7 +1065,7 @@ class Patcher:
             if self.split:
                 from .split_gateway import inject_gateway
 
-                updated = content if path == self.run_path else inject_gateway(path.name, content)
+                updated = content if path == self.run_path else inject_gateway(roles[path], content)
             else:
                 self._verify_legacy(content)
                 updated = self._inject_all(content)
@@ -1710,6 +1713,7 @@ class CronPatcher:
 
     def __init__(self, cron_path: Path | None = None) -> None:
         self.cron_path = cron_path or _default_cron_path()
+        self.entry_path = self.cron_path
         if not self.cron_path.exists():
             tried = ", ".join(str(r) for r in _code_roots())
             raise PatcherError(
@@ -1717,16 +1721,11 @@ class CronPatcher:
                 f"(tried: {tried}). "
                 f"Set HERMES_HOME to the dir containing hermes-agent/ and rerun."
             )
-        delivery_path = self.cron_path.with_name("scheduler_delivery.py")
-        if delivery_path.exists() and delivery_path != self.cron_path:
-            tree = ast.parse(_clean_hooks(_read_source(self.cron_path), self.MARKERS))
-            has_deliver = any(
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_deliver_result"
-                for node in ast.walk(tree)
-            )
-            if not has_deliver:
-                self.cron_path = delivery_path
-        self.split = self.cron_path.name == "scheduler_delivery.py"
+        from .compatibility import cron_layout
+
+        self.cron_path, self.split = cron_layout(
+            self.cron_path, lambda path: _clean_hooks(_read_source(path), self.MARKERS),
+        )
 
     def is_patched(self) -> bool:
         content = _read_source(self.cron_path)
@@ -1746,11 +1745,33 @@ class CronPatcher:
             raise PatcherError("Cannot find 'delivered = False' anchor in scheduler.py")
         if "cleaned_delivery_content" not in content:
             raise PatcherError("Cannot find 'cleaned_delivery_content' in scheduler.py")
+        self._legacy_delivery_site(content)
+
+    @staticmethod
+    def _legacy_delivery_site(content: str) -> int:
+        from .split_cron import _scoped_nodes
+
+        tree = ast.parse(content)
+        functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_deliver_result"]
+        if len(functions) != 1:
+            raise PatcherError("Cannot find unique legacy _deliver_result contract")
+        nodes = list(_scoped_nodes(functions[0]))
+        sites = [n for n in nodes if isinstance(n, ast.Assign) and len(n.targets) == 1
+                 and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "delivered"
+                 and isinstance(n.value, ast.Constant) and n.value.value is False]
+        if len(sites) != 1 or not any(isinstance(n, ast.Name) and n.id == "cleaned_delivery_content" for n in nodes):
+            raise PatcherError("Missing or ambiguous legacy cron delivery contract")
+        return sites[0].lineno - 1
 
     def apply(self) -> None:
         install_patchers([self])
 
     def prepare_install(self) -> dict[Path, str]:
+        from .compatibility import cron_layout
+
+        current = cron_layout(self.entry_path, lambda path: _clean_hooks(_read_source(path), self.MARKERS))
+        if current != (self.cron_path, self.split):
+            raise PatcherError("Cron layout changed after detection; resolve a fresh patch plan")
         content = _clean_hooks(_read_source(self.cron_path), self.MARKERS)
         if self.split:
             from .split_cron import inject_cron
@@ -1765,13 +1786,7 @@ class CronPatcher:
     def _inject_legacy(self, content: str) -> str:
         lines = content.splitlines(keepends=True)
 
-        inject_idx = None
-        for i, line in enumerate(lines):
-            if line.strip() == "delivered = False":
-                inject_idx = i
-                break
-        if inject_idx is None:
-            raise PatcherError("Cannot find 'delivered = False' anchor")
+        inject_idx = self._legacy_delivery_site(content)
 
         indent = _safe_indent(lines, inject_idx)
         hook = _cron_deliver_hook(indent)

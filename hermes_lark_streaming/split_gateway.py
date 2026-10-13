@@ -211,7 +211,21 @@ def inject_gateway(filename: str, content: str) -> str:
     else:
         handler = "_handle_message_with_agent"
         node = statement(handler, "event._heartbeat_execution_started = True")[0]
-        insert(node, p._start_hook, after=True)
+        delivery = scope("_hmwa_deliver_turn_response")
+        assert isinstance(delivery, (ast.FunctionDef, ast.AsyncFunctionDef))
+        muted_delivery = any(isinstance(n, ast.Call) and ast.unparse(n.func) == "diagnostic_wake_muted"
+                             for n in _scoped_nodes(delivery))
+        if muted_delivery:
+            guard = statement("_hmwa_deliver_turn_response", "if diagnostic_wake_muted(event):\n    return None")[0]
+            if guard not in delivery.body:
+                raise p.PatcherError(f"{filename}: diagnostic mute must gate the entire delivery")
+        start = p._start_hook("")
+        if muted_delivery:
+            # Honor the upstream diagnostic-only turn admission policy before
+            # reserving a card. Human turns keep the existing START behavior.
+            start = start.replace("in ('feishu', 'lark'):",
+                                  "in ('feishu', 'lark') and not diagnostic_wake_muted(event):")
+        insert(node, start, after=True)
         node = statement(handler, "self._hmwa_discard_stale_result(source, _quick_key, run_generation)")[0]
         insert(node, p._abort_hook)
         node = assignment(handler, "_footer_line")
@@ -291,7 +305,14 @@ def inject_gateway(filename: str, content: str) -> str:
         """), after=True)
 
         first = "_run_agent_deliver_first_response"
-        node = assignment(first, "_already_streamed")
+        # The newer human-turn silence branch assigns _already_streamed again.
+        # Finalize after that normalization, before either native text/media lane.
+        media = [n for n in _scoped_nodes(scope(first)) if isinstance(n, ast.Assign)
+                 and any(ast.unparse(t) == "_deliver_media" for t in n.targets)]
+        if media:
+            node = statement(first, "_deliver_media = not _delivery_result.get('failed')")[0]
+        else:
+            node = assignment(first, "_already_streamed")
         # No use of on_queued_followup_boundary: it destroys attachment-bearing text.
         insert(node, guarded("FOLLOWUP_COMPLETE", f"""
             from hermes_lark_streaming.patch import (

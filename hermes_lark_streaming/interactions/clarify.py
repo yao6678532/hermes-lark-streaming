@@ -670,7 +670,14 @@ async def _reconcile_clarify_lifecycle(
             if state.status == "resolving":
                 return False
             response = getattr(tracked, "response", None)
-            if response:
+            # New Hermes waits use nonempty sentinels for skip/cancellation.
+            # They carry no user answer and must retire the card, not render
+            # the control bytes as a successful answer.
+            from tools import clarify_gateway  # type: ignore[import-not-found]
+
+            unanswered = tuple(value for name in ("SKIPPED", "CANCELLED")
+                               if isinstance(value := getattr(clarify_gateway, name, None), str))
+            if response and response not in unanswered:
                 answer = _display_answer(state, response)
                 if registry.finish(state.clarify_id, "answered", answer=answer):
                     await _update_card(client, state, "answered", answer=answer)

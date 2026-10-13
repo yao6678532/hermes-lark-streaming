@@ -2,7 +2,7 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [main, compat/hermes-v0.21.7]
   pull_request:
   workflow_dispatch:
 
@@ -34,11 +34,41 @@ jobs:
 
       - name: Fetch pinned Hermes test sources
         run: |
-          revisions=$(PYTHONPATH=tests python -c 'from hermes_sources import LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION; print(LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION)')
+          revisions=$(PYTHONPATH=tests python -c 'from hermes_sources import LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION, TRANSITION_REVISION, MODULAR_REVISION; print(LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION, TRANSITION_REVISION, MODULAR_REVISION)')
           target_revision=$(PYTHONPATH=tests python -c 'from hermes_sources import TARGET_REVISION; print(TARGET_REVISION)')
           git init "$HERMES_HOME/hermes-agent"
           git -C "$HERMES_HOME/hermes-agent" fetch --no-tags --depth=1 https://github.com/NousResearch/hermes-agent.git $revisions
           git -C "$HERMES_HOME/hermes-agent" checkout --detach "$target_revision"
 
       - name: Run tests
-        run: PYTHONPATH="$HERMES_HOME/hermes-agent${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ -v
+        run: TZ=UTC PYTHONPATH="$HERMES_HOME/hermes-agent${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ -v
+
+  runtime:
+    name: Hermes ${{ matrix.hermes }} runtime
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - hermes: '0.21.3'
+            revision: '345cd2b057a452236de401d3534b8502a7465e8d'
+            python: '3.11'
+          - hermes: '0.21.7'
+            revision: '71d34bad1045610252eda02ee79549436896e784'
+            python: '3.14'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Fetch pinned complete Hermes tree
+        env:
+          HERMES_REVISION: ${{ matrix.revision }}
+        run: |
+          git init "$RUNNER_TEMP/hermes-runtime"
+          git -C "$RUNNER_TEMP/hermes-runtime" fetch --depth=1 https://github.com/NousResearch/hermes-agent.git "$HERMES_REVISION"
+          git -C "$RUNNER_TEMP/hermes-runtime" checkout --detach "$HERMES_REVISION"
+      - name: Install declared runtime dependencies
+        run: python -m pip install -e "$RUNNER_TEMP/hermes-runtime[feishu]" -e ".[dev]"
+      - name: Verify source, staging lifecycle, imports and actual callback wiring
+        run: python scripts/verify_hermes_runtime.py --source "$RUNNER_TEMP/hermes-runtime"

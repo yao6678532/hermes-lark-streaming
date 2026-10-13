@@ -6,7 +6,14 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from hermes_sources import SPLIT_LEDGER_REVISION, SPLIT_REVISION, TARGET_REVISION, source_at
+from hermes_sources import (
+    MODULAR_REVISION,
+    SPLIT_LEDGER_REVISION,
+    SPLIT_REVISION,
+    TARGET_REVISION,
+    TRANSITION_REVISION,
+    source_at,
+)
 
 from hermes_lark_streaming import __main__ as cli
 from hermes_lark_streaming import patcher as patcher_module
@@ -22,8 +29,9 @@ from hermes_lark_streaming.patcher import (
 from hermes_lark_streaming.split_gateway import GATEWAY_FILES
 
 
-@pytest.fixture(params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION],
-                ids=["split", "split-ledger", "target"])
+@pytest.fixture(params=[SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION,
+                        TRANSITION_REVISION, MODULAR_REVISION],
+                ids=["split", "split-ledger", "0.21.3", "0.21.6", "0.21.7"])
 def installation(tmp_path: Path, request: pytest.FixtureRequest) -> tuple[Patcher, CronPatcher]:
     paths = ["gateway/run.py", *(f"gateway/{name}" for name in GATEWAY_FILES),
              "cron/scheduler.py", "cron/scheduler_delivery.py"]
@@ -121,7 +129,7 @@ def test_missing_module_fails_without_writes(installation, tmp_path):
     gateway, _cron = installation
     (gateway.run_path.parent / "run_busy.py").unlink()
     before = snapshot(tmp_path)
-    with pytest.raises(PatcherError, match="Missing split gateway module"):
+    with pytest.raises(PatcherError, match=r"Cannot find|cannot resolve|Missing split gateway module"):
         gateway.apply()
     assert snapshot(tmp_path) == before
 

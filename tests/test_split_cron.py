@@ -9,7 +9,7 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 
 import pytest
-from hermes_sources import TARGET_REVISION, source_at
+from hermes_sources import MODULAR_REVISION, TARGET_REVISION, TRANSITION_REVISION, source_at
 
 from hermes_lark_streaming import patch
 from hermes_lark_streaming.controller import StreamCardController
@@ -163,16 +163,18 @@ def runtime(monkeypatch, *, hook=True, patched=True, target_revision=False):
         _seed_live_delivery_sessions=lambda t, mid: events.append(
             ('seed', t.chat_id, t.mirror_text, mid)),
         _send_to_platform=standalone,
+        _get_standalone_send_timeout=lambda: 30,
     )
     exec(compile(inject_cron(SOURCE) if patched else SOURCE, '<cron-fixture>', 'exec'), namespace)
     if target_revision:
         # Execute the target's actual send lanes; isolate only imports and external I/O.
         monkeypatch.setitem(sys.modules, 'agent.async_utils', SimpleNamespace(safe_schedule_threadsafe=None))
         monkeypatch.setitem(sys.modules, 'gateway.delivery', SimpleNamespace(
-            DeliveryRouter=namespace['DeliveryRouter'], DeliveryTarget=None))
+            DeliveryRouter=namespace['DeliveryRouter'], DeliveryTarget=None, PartialDeliveryError=RuntimeError))
         monkeypatch.setitem(sys.modules, 'tools.send_message_tool', SimpleNamespace(_send_to_platform=standalone))
         namespace['_sched'] = SimpleNamespace(_interpreter_shutting_down=lambda: False)
-        source = inject_cron(source_at('cron/scheduler_delivery.py', TARGET_REVISION))
+        revision = TARGET_REVISION if target_revision is True else target_revision
+        source = inject_cron(source_at('cron/scheduler_delivery.py', revision))
         tree = ast.parse(source)
         functions = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in (
             '_live_send_text', '_deliver_via_live_adapter', '_standalone_send')]
@@ -390,3 +392,19 @@ def test_drift_and_nested_decoys_fail_closed(source):
 def test_existing_markers_require_parent_cleanup():
     with pytest.raises(PatcherError, match='markers'):
         inject_cron(inject_cron(SOURCE))
+
+
+@pytest.mark.parametrize('revision', [TARGET_REVISION, TRANSITION_REVISION, MODULAR_REVISION],
+                         ids=['0.21.3', '0.21.6', '0.21.7'])
+@pytest.mark.parametrize('claimed', [False, True])
+@pytest.mark.parametrize('media', [[], ['file']])
+def test_real_standalone_sender_preserves_async_fallback_and_media(monkeypatch, revision, claimed, media):
+    run, events = runtime(monkeypatch, target_revision=revision, hook=claimed)
+    errors, _ = run({'targets': [target(live_adapter_ready=False)], 'media': media}, 'brief')
+    assert errors == []
+    sends = [e for e in events if e[0] == 'standalone']
+    if claimed and not media:
+        assert sends == []
+    else:
+        assert sends == [('standalone', 'chat-1', '' if claimed else 'brief', media, None)]
+    assert events[-1] == ('mirror', 'chat-1', 'original unwrapped brief', None)
