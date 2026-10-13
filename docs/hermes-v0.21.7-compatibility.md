@@ -68,7 +68,8 @@ method ownership, then the actual TurnRunner import/construction in the context
 builder. Injector roles map to the resolved paths, so a module rename can be
 handled without replacing every filename anchor. Unrelated classes, ambiguous
 inheritance, unknown clarify signatures and consolidated role modules fail
-closed. Each injector continues to validate semantic AST seams and compile its
+closed, including a role moved into the entrypoint that would otherwise be
+skipped as an unpatched shim. Each injector continues to validate semantic AST seams and compile its
 generated source. No version threshold selects the implementation.
 
 Cron discovery follows the imported `_deliver_result` symbol, rather than
@@ -142,7 +143,9 @@ Installation failure fails the runtime job; it is never treated as AST success.
 Final lint/type/diff checks passed: `ruff check .`, `mypy hermes_lark_streaming/`
 (37 modules), and `git diff --check`. The supplemental compatibility integration
 suite passed 341 cases; the final legacy/layout suite passed 126 cases, including
-the tightened unknown-cron check. Both full suites ran with `TZ=UTC` and
+the tightened unknown-cron check. The final entrypoint-consolidation rejection
+check expands the layout suite to 37 passing cases (three additional pinned
+regressions after the full-suite run). Both full suites ran with `TZ=UTC` and
 `CI=true`, so unavailable required pinned sources could not become skipped tests.
 
 GitHub's new source/unit and two runtime jobs run on the compatibility branch;

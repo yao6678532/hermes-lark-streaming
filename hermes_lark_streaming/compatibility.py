@@ -143,8 +143,9 @@ def gateway_layout(run_path: Path, read: Callable[[Path], str]) -> Compatibility
         raise _error(f'unsupported clarify callback contract: {clarify.parameters}')
     paths['run_turn_runner.py'] = runner_path
     ordered = ('run_inbound.py', 'run_turn.py', 'run_turn_runner.py', 'run_busy.py')
-    if len(set(paths.values())) != len(paths):
-        raise _error('consolidated role modules require a new injector contract')
+    physical_modules = {path.resolve() for path in paths.values()}
+    if len(physical_modules) != len(paths) or run_path.resolve() in physical_modules:
+        raise _error('consolidated entrypoint/role modules require a new injector contract')
     return CompatibilityLayout('modular', tuple((role, paths[role]) for role in ordered))
 
 

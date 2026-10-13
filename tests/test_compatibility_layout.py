@@ -96,6 +96,21 @@ def test_discovery_follows_composed_imports_when_module_moves(tree):
     assert '# HERMES_LARK_' not in new.read_text()
 
 
+def test_role_moved_into_entrypoint_cannot_silently_omit_its_hooks(tree):
+    entry = tree / 'gateway/run.py'
+    inbound = tree / 'gateway/run_inbound.py'
+    entry_source = entry.read_text().replace('from __future__ import annotations\n', '')
+    entry_source = entry_source.replace('from gateway.run_inbound import GatewayInboundMixin',
+                                        '# GatewayInboundMixin is now defined in this module')
+    combined = inbound.read_text() + '\n' + entry_source
+    compile(combined, str(entry), 'exec')
+    entry.write_text(combined)
+    before = snapshot(tree)
+    with pytest.raises(PatcherError, match='consolidated entrypoint/role'):
+        Patcher(entry).apply()
+    assert snapshot(tree) == before
+
+
 def test_orphan_mixin_with_same_method_is_not_compatibility_evidence(tmp_path):
     (tmp_path / 'run.py').write_text('class Empty:\n    pass\nclass GatewayRunner(Empty):\n    pass\n')
     (tmp_path / 'run_turn.py').write_text('class Orphan:\n    def _handle_message_with_agent(self):\n        pass\n')
