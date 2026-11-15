@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from .agent_status import AgentStatusEvent, conversation_key
 from .native_context import native_home
+from .native_history import DeliveryHistory
 from .review_receipts import ReviewReceiptBatch, ReviewReceiptBuffer
 
 _buffers: dict[Path, ReviewReceiptBuffer] = {}
@@ -29,8 +32,13 @@ class NativeReviews:
         self.buffer = review_buffer(self.home)
         self.lock = asyncio.Lock()
         self._covered: dict[str, list[str]] = {}
+        self._coverage = DeliveryHistory()
 
     def covers(self, chat_id: str, text: str) -> bool:
+        self._coverage.prune()
+        for key in list(self._covered):
+            if key not in self._coverage.records:
+                self._covered.pop(key, None)
         return text in self._covered.get(chat_id, [])
 
     @native_home
@@ -53,10 +61,19 @@ class NativeReviews:
             event = AgentStatusEvent(
                 conversation_key=conversation_key(chat_id),
                 text=t("display.review.summary_callback", summary=" · ".join(lines)),
-                created_at=time.time(), source="background_review",
+                created_at=time.time(),
+                source="background_review",
+                delivery_uuid=uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    json.dumps(
+                        [receipt.identity for receipt in batch.receipts],
+                        ensure_ascii=False,
+                    ),
+                ).hex,
             )
             delivered = await self.controller._deliver_agent_status(
-                event=event, chat_id=chat_id,
+                event=event,
+                chat_id=chat_id,
             )
             if delivered:
                 self.buffer.acknowledge(batch)
@@ -73,4 +90,6 @@ class NativeReviews:
                     if actions:
                         covered.append(t("display.review.summary_callback", summary=" · ".join(actions)))
                 self._covered[chat_id] = list(dict.fromkeys(covered))[-64:]
+                self._coverage.add(chat_id, chat_id, "review")
+                self.covers(chat_id, "")
             return bool(delivered)

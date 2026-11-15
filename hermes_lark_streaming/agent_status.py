@@ -25,6 +25,7 @@ class AgentStatusEvent:
     text: str
     created_at: float
     source: str = "background_review"
+    delivery_uuid: str | None = None
 
     @classmethod
     def background_review(cls, *, conversation_key: str, text: str) -> AgentStatusEvent:
@@ -158,6 +159,15 @@ class LatestCardRegistry:
                 and ref.active_session is None
                 and now - ref.updated_at >= ttl_seconds
             }
+            eligible = sorted(
+                (
+                    ref
+                    for key, ref in self._cards.items()
+                    if key not in stale and key not in protected_keys and ref.finalized and ref.active_session is None
+                ),
+                key=lambda ref: ref.updated_at,
+            )
+            stale.update(ref.conversation_key for ref in eligible[: max(0, len(eligible) - 2048)])
             for key in stale:
                 del self._cards[key]
             return stale
@@ -184,7 +194,7 @@ class AgentStatusManager:
         with self._locks_guard:
             ref = self._locks.get(key)
             if ref is None or ref.loop is not loop:
-                if ref is not None and ref.lock.locked() and not ref.loop.is_closed():
+                if ref is not None and (ref.lock.locked() or getattr(ref.lock, "_waiters", None)):
                     raise RuntimeError("conversation lock is active on another event loop")
                 ref = ConversationLockRef(loop=loop, lock=asyncio.Lock())
                 self._locks[key] = ref
@@ -200,9 +210,7 @@ class AgentStatusManager:
         current_time = time.time() if now is None else now
         with self._locks_guard:
             protected = {
-                key
-                for key, ref in self._locks.items()
-                if ref.lock.locked()
+                key for key, ref in self._locks.items() if ref.lock.locked() or getattr(ref.lock, "_waiters", None)
             }
             stale = self.registry.prune_finalized(
                 now=current_time,
@@ -212,6 +220,11 @@ class AgentStatusManager:
             for key in stale:
                 self._locks.pop(key, None)
             return stale
+
+    def busy(self, key: str) -> bool:
+        with self._locks_guard:
+            ref = self._locks.get(key)
+            return bool(ref and (ref.lock.locked() or getattr(ref.lock, "_waiters", None)))
 
     def has_lock(self, key: str) -> bool:
         """Expose lock-cache membership for lifecycle diagnostics and tests."""

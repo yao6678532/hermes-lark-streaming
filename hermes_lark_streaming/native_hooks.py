@@ -45,6 +45,7 @@ def dispatch(event_kind: str, **payload: Any) -> None:
     for adapter in list(ACTIVE):
         if (
             not key
+            or adapter.stopping
             or (owner is not None and adapter is not owner)
             or (owner is None and adapter.cards._profile_home != home)
         ):
@@ -61,6 +62,8 @@ def dispatch(event_kind: str, **payload: Any) -> None:
         adapter.bridge.enqueue(event_kind, key, owned_payload)
 
         def schedule(target: Any = adapter) -> None:
+            if target.stopping:
+                return
             task = asyncio.create_task(target.bridge.drain())
             target.card_tasks.add(task)
             task.add_done_callback(target.card_tasks.discard)

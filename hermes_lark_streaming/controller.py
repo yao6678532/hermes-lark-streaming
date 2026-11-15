@@ -6,6 +6,7 @@ import asyncio
 import logging
 import threading
 import time
+import weakref
 from collections.abc import Callable, Coroutine, Iterator
 from concurrent.futures import Future as ConcurrentFuture
 from contextlib import contextmanager
@@ -13,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_status import AgentStatusEvent, AgentStatusManager, conversation_key
+from .card_mutations import CardMutations
 from .cardkit.builder import RUN_DETAILS_DIVIDER_ELEMENT_ID, with_agent_status
 from .config import Config, hermes_home
 from .feishu import (
@@ -38,6 +40,7 @@ from .streaming.text import strip_reasoning_tags
 
 _logger = logging.getLogger("hermes_lark_streaming")
 _CARD_CREATION_WAIT_SEC = 10.0
+
 
 def _weekly_quota_window(rate_limit: object) -> dict[str, Any] | None:
     """Select the structured seven-day quota window, independent of names."""
@@ -122,9 +125,7 @@ def _fetch_gpt_quota_footer(model: str) -> dict[str, Any]:
         if not 0 <= used_percent <= 100:
             return {}
         remaining = max(0, min(100, round(100 - used_percent)))
-        metadata: dict[str, Any] = {
-            "remaining": f"<font color='{_quota_color(remaining)}'>{remaining}%</font>"
-        }
+        metadata: dict[str, Any] = {"remaining": f"<font color='{_quota_color(remaining)}'>{remaining}%</font>"}
         if window.get("reset_at") not in (None, ""):
             metadata["reset_at"] = window["reset_at"]
         return metadata
@@ -152,9 +153,7 @@ def _turn_usage_footer_data(usage: dict | None, *, api_calls: object = 0) -> dic
         prompt_tokens = positive_int(usage.get("prompt_tokens"))
         if not prompt_tokens:
             prompt_tokens = uncached_input + cache_read + cache_write
-        output_tokens = positive_int(
-            usage.get("output_tokens") or usage.get("completion_tokens")
-        )
+        output_tokens = positive_int(usage.get("output_tokens") or usage.get("completion_tokens"))
         reasoning_tokens = positive_int(usage.get("reasoning_tokens"))
 
         if prompt_tokens:
@@ -185,6 +184,8 @@ class StreamCardController(StreamingController):
         self._sessions: dict[str, CardSession] = {}
         self._session_keys: dict[str, CardSession] = {}
         self._interrupt_map: dict[str, str] = {}
+        self._card_mutations = CardMutations()
+        self._native_owned: Callable[[CardSession], bool] | None = None
         self._initialized = False
         self._transport_configured = False
         self._init_lock = threading.Lock()
@@ -297,7 +298,8 @@ class StreamCardController(StreamingController):
                 app_id=app_id,
                 app_secret=app_secret,
                 base_url=self._cfg.feishu_base_url,
-            )
+            ),
+            mutations=self._card_mutations,
         )
 
     async def _ensure_init(self) -> None:
@@ -316,7 +318,8 @@ class StreamCardController(StreamingController):
                         app_id=app_id,
                         app_secret=app_secret,
                         base_url=self._cfg.feishu_base_url,
-                    )
+                    ),
+                    mutations=self._card_mutations,
                 )
             self._initialized = True
 
@@ -631,7 +634,8 @@ class StreamCardController(StreamingController):
         future: ConcurrentFuture | None = None
         try:
             future = asyncio.run_coroutine_threadsafe(
-                self._do_clarify_split(session), loop,
+                self._do_clarify_split(session),
+                loop,
             )
             # 预算 = 卡片创建等待 + seal/建卡余量
             future.result(timeout=_CARD_CREATION_WAIT_SEC * 2 + 30)
@@ -904,9 +908,7 @@ class StreamCardController(StreamingController):
         """Return True when card delivery owns the text, including an uncertain timeout."""
         if not self.enabled or not content or not chat_id:
             return False
-        coroutine = self._do_cron_deliver(
-            chat_id, content, task_name=task_name, run_time=run_time
-        )
+        coroutine = self._do_cron_deliver(chat_id, content, task_name=task_name, run_time=run_time)
         try:
             if loop is not None and loop.is_running() and not loop.is_closed():
                 try:
@@ -1129,7 +1131,10 @@ class StreamCardController(StreamingController):
                     )
 
                 try:
-                    await client.send_text_to_chat(chat_id, event.text)
+                    if event.delivery_uuid:
+                        await client.send_text_to_chat(chat_id, event.text, operation_id=event.delivery_uuid)
+                    else:
+                        await client.send_text_to_chat(chat_id, event.text)
                     _logger.info(
                         "[AgentStatus] conversation=%s source=%s delivery_result=fallback_delivered",
                         event.conversation_key,
@@ -1177,6 +1182,25 @@ class StreamCardController(StreamingController):
             sequence=session.sequence,
             agent_status=session.agent_status,
         )
+        if isinstance(self._client, FeishuClient) and session.card_id:
+            state = self._client.mutations.state(session.card_id)
+            generation, card_id = session.card_generation, session.card_id
+            owner = weakref.ref(session)
+            chat_id = session.chat_id
+
+            def valid(live: bool) -> bool:
+                target = owner()
+                if target is None:
+                    return not live
+                return not target.guard.should_skip("card mutation") and (
+                    not live or (target.card_generation == generation and target.card_id == card_id)
+                )
+
+            state.owner = valid
+            state.pin = lambda: (
+                (ref := self._agent_status_manager.registry.get(conversation_key(chat_id))) is not None
+                and ref.card_id == card_id
+            )
         if not accepted:
             _logger.info(
                 "latest card registration rejected as stale: msg=%s chat=%s created_at=%.6f",
@@ -1298,11 +1322,7 @@ class StreamCardController(StreamingController):
         if answer and session.segment_state and reconcile_answer:
             final_answer = strip_reasoning_tags(answer)
             latest_answer = next(
-                (
-                    seg
-                    for seg in reversed(session.active_segments())
-                    if seg.type == SegmentType.ANSWER
-                ),
+                (seg for seg in reversed(session.active_segments()) if seg.type == SegmentType.ANSWER),
                 None,
             )
             if final_answer:
@@ -1326,10 +1346,7 @@ class StreamCardController(StreamingController):
 
         has_visible_answer = bool(
             session.segment_state
-            and any(
-                seg.type == SegmentType.ANSWER and seg.text.strip()
-                for seg in session.segment_state.segments
-            )
+            and any(seg.type == SegmentType.ANSWER and seg.text.strip() for seg in session.segment_state.segments)
         )
         _logger.debug(
             "completion payload msg=%s len=%d has_visible_answer=%s final_started=%s head=%r",
@@ -1421,9 +1438,31 @@ class StreamCardController(StreamingController):
 
     def _prune_stale_sessions(self) -> None:
         now = time.time()
-        stale = [mid for mid, s in self._sessions.items() if mid is not None and now - s.created_at > self._session_ttl]
+        stale = [
+            mid
+            for mid, session in self._sessions.items()
+            if mid is not None
+            and now - session.last_activity_at > self._session_ttl
+            and session.state != SessionState.CLARIFY_PAUSED
+            and not (self._native_owned and self._native_owned(session))
+            and not self._agent_status_manager.busy(conversation_key(session.chat_id))
+        ]
+        seen: set[int] = set()
         for mid in stale:
+            if id(self._sessions.get(mid)) in seen:
+                continue
+            seen.add(id(self._sessions.get(mid)))
             _logger.warning("pruning stale session: msg=%s", mid[:12])
+            session = self._sessions.get(mid)
+            if session is None:
+                continue
+            if session.has_card and not session.state.is_terminal:
+                session.state = SessionState.ABORTED
+                loop = self._get_loop()
+                if loop is not None and not loop.is_closed():
+                    task = loop.create_task(self._do_complete_card(session))
+                    task.add_done_callback(self._on_bg_task_done)
+                    continue
             self._cleanup(mid)
         self._agent_status_manager.prune_stale()
 

@@ -43,6 +43,7 @@ class CardSession:
     """单条消息的卡片会话状态."""
 
     __slots__ = (
+        "__weakref__",
         "_loop",
         "agent_status",
         "agent_status_created",
@@ -63,6 +64,7 @@ class CardSession:
         "guard",
         "image_resolver",
         "interim_preview",
+        "last_activity_at",
         "merged_reasoning",
         "message_id",
         "progress",
@@ -101,6 +103,7 @@ class CardSession:
         self.sequence = 1
         self._loop = loop
         self.created_at = time.time()
+        self.last_activity_at = self.created_at
         self.agent_status: str | None = None
         self.agent_status_created = False
 

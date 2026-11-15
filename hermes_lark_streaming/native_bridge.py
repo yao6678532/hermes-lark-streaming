@@ -10,11 +10,15 @@ import asyncio
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from .card_mutations import CardMutations
 from .controller import StreamCardController
+from .feishu import FeishuClient
 from .native_context import native_home
+from .native_history import DeliveryHistory
 from .streaming.segments import SegmentType
 from .streaming.text import strip_reasoning_tags
 
@@ -44,6 +48,8 @@ class NativeTurn:
     context: dict[str, Any] = field(default_factory=dict)
     snapshots: dict[str, str] = field(default_factory=dict)
     card_message_id: str = ""
+    card_entity_id: str = ""
+    delivery_uncertain: bool = False
     pending_inputs: set[str] = field(default_factory=set)
     iteration: int = 0
     closed_iterations: set[int] = field(default_factory=set)
@@ -61,6 +67,9 @@ class NativeBridge:
     def __init__(self, controller: StreamCardController) -> None:
         self.controller = controller
         self._profile_home = controller._profile_home if hasattr(controller, "_profile_home") else None
+        self.stopping = False
+        self.finished = DeliveryHistory()
+        self.on_completed: Callable[[NativeTurn], None] | None = None
         self.turns: dict[str, NativeTurn] = {}
         self.messages: dict[str, NativeTurn] = {}
         self.lock = asyncio.Lock()
@@ -69,6 +78,8 @@ class NativeBridge:
         self._drain_lock = asyncio.Lock()
 
     def enqueue(self, kind: str, key: str, payload: dict[str, Any]) -> None:
+        if self.stopping:
+            return
         with self._queue_lock:
             self._queue.append((kind, key, payload))
 
@@ -90,17 +101,17 @@ class NativeBridge:
         if existing is not None:
             return existing
         turn = NativeTurn(
-            message_id=message_id, session_key=session_key, chat_id=str(source.chat_id),
+            message_id=message_id,
+            session_key=session_key,
+            chat_id=str(source.chat_id),
             anchor_id=getattr(event, "reply_anchor_override", None) or event.reply_to_message_id or message_id or None,
             owner_ids=frozenset(str(v) for v in (source.user_id, source.user_id_alt) if v),
         )
+        if self.finished.get(message_id) is not None:
+            turn.completed = turn.terminal = True
+            return turn
         self.turns[session_key] = turn
         self.messages[message_id] = turn
-        # Retain completed identities to reject late frames, but bound the index.
-        if len(self.messages) > 2048:
-            for key, old in list(self.messages.items()):
-                if old.completed and self.turns.get(old.session_key) is not old:
-                    del self.messages[key]
         return turn
 
     def route(self, session_key: str, payload: dict[str, Any] | None = None) -> NativeTurn | None:
@@ -127,9 +138,14 @@ class NativeBridge:
     async def ensure_card(self, turn: NativeTurn) -> bool:
         if turn.completed or turn.fallback or not self.controller.enabled:
             return False
+        existing = self.controller._sessions.get(turn.message_id)
+        if existing is not None:
+            existing.last_activity_at = time.time()
         self.controller.on_message_started(
-            message_id=turn.message_id, chat_id=turn.chat_id,
-            anchor_id=turn.anchor_id, session_key=turn.session_key,
+            message_id=turn.message_id,
+            chat_id=turn.chat_id,
+            anchor_id=turn.anchor_id,
+            session_key=turn.session_key,
         )
         session = self.controller._sessions.get(turn.message_id)
         if session is None or not await self.controller._wait_for_card_creation(session):
@@ -139,6 +155,7 @@ class NativeBridge:
             turn.fallback = True
             return False
         turn.card_message_id = str(session.card_msg_id or "")
+        turn.card_entity_id = str(session.card_id or "")
         return bool(turn.card_message_id)
 
     @native_home
@@ -152,7 +169,8 @@ class NativeBridge:
                 iteration = turn.stream_iterations.get(stream_id)
                 if iteration is None:
                     available = [
-                        key for key, expected in turn.expected_answers.items()
+                        key
+                        for key, expected in turn.expected_answers.items()
                         if expected.strip() and key not in turn.stream_iterations.values()
                     ]
                     iteration = min(available, default=turn.iteration)
@@ -161,7 +179,7 @@ class NativeBridge:
                 return True
             previous = turn.snapshots.get(stream_id, "")
             if text.startswith(previous):
-                suffix = text[len(previous):]
+                suffix = text[len(previous) :]
                 if suffix:
                     self.controller.on_answer(message_id=turn.message_id, text=suffix)
             elif text != previous:
@@ -169,9 +187,14 @@ class NativeBridge:
                 # Replace this stream's current answer instead of appending both copies.
                 session = self.controller._sessions[turn.message_id]
                 state = session.segment_state
-                answer = next(
-                    (s for s in reversed(state.segments) if s.type == SegmentType.ANSWER), None,
-                ) if state else None
+                answer = (
+                    next(
+                        (s for s in reversed(state.segments) if s.type == SegmentType.ANSWER),
+                        None,
+                    )
+                    if state
+                    else None
+                )
                 if answer is not None:
                     answer.text = text
                     answer.dirty = True
@@ -190,10 +213,22 @@ class NativeBridge:
             ok = await self.controller.on_session_aborted(session_key=turn.session_key, stop_command=turn.stop_command)
         else:
             ok = await self.controller.on_completed_wait(
-                message_id=turn.message_id, answer=turn.answer, is_error=turn.failed,
-                model=turn.model, duration=time.monotonic() - turn.started_at,
-                tokens={**turn.usage, "api_calls": len(turn.requests)}, context=turn.context,
+                message_id=turn.message_id,
+                answer=turn.answer,
+                is_error=turn.failed,
+                model=turn.model,
+                duration=time.monotonic() - turn.started_at,
+                tokens={**turn.usage, "api_calls": len(turn.requests)},
+                context=turn.context,
             )
+        client = self.controller._client
+        if isinstance(client, FeishuClient) and isinstance(client.mutations, CardMutations):
+            doc = client.mutations.documents.get(turn.card_entity_id)
+            turn.delivery_uncertain = bool(
+                doc and (doc.unconfirmed or doc.write_uncertain or any(m is None for m in doc.messages))
+            )
+        if turn.delivery_uncertain:
+            ok = False
         turn.completed = True
         turn.fallback = not ok
         turn.expected_answers.clear()
@@ -205,6 +240,17 @@ class NativeBridge:
         turn.stream_iterations.clear()
         if turn.interrupted:
             turn.answer = ""
+        turn.requests.clear()
+        turn.context.clear()
+        turn.closed_iterations.clear()
+        turn.pending_inputs.clear()
+        self.controller.consume_text_fallback(turn.message_id)
+        self.finished.add(turn.message_id, turn.chat_id, "inbound")
+        self.messages.pop(turn.message_id, None)
+        if self.turns.get(turn.session_key) is turn:
+            self.turns.pop(turn.session_key, None)
+        if self.on_completed is not None:
+            self.on_completed(turn)
         return bool(ok)
 
     def replace_answer(self, turn: NativeTurn, iteration: int, text: str) -> None:
@@ -261,8 +307,12 @@ class NativeBridge:
             turn.requests.add(request_id)
             usage = payload.get("usage") or {}
             for key in (
-                "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
-                "reasoning_tokens", "total_tokens",
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+                "reasoning_tokens",
+                "total_tokens",
             ):
                 value = usage.get(key)
                 if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
@@ -279,14 +329,18 @@ class NativeBridge:
                         segment.text, segment.dirty = reasoning, True
                     else:
                         self.controller.on_reasoning(
-                            message_id=turn.message_id, text=reasoning, api_mode=turn.api_mode,
+                            message_id=turn.message_id,
+                            text=reasoning,
+                            api_mode=turn.api_mode,
                         )
                         if session.segment_state.segments:
                             turn.reasoning_segments[iteration] = session.segment_state.segments[-1]
                             turn.segment_order[id(session.segment_state.segments[-1])] = (iteration, 0)
                     if self.controller._cfg.reasoning_mode == "merged":
-                        text = reasoning if self.controller._is_activity_reasoning_api_mode(turn.api_mode) else (
-                            "\n\n".join(str(item.text) for item in turn.reasoning_segments.values())
+                        text = (
+                            reasoning
+                            if self.controller._is_activity_reasoning_api_mode(turn.api_mode)
+                            else ("\n\n".join(str(item.text) for item in turn.reasoning_segments.values()))
                         )
                         session.merged_reasoning.replace_activity(text)
                 # Raw model content is an ordering hint, never presentation text.
@@ -316,7 +370,9 @@ class NativeBridge:
             return
         if kind == "reasoning":
             accepted = self.controller.on_reasoning(
-                message_id=turn.message_id, text=str(payload.get("delta") or ""), api_mode=turn.api_mode,
+                message_id=turn.message_id,
+                text=str(payload.get("delta") or ""),
+                api_mode=turn.api_mode,
             )
             session = self.controller._sessions.get(turn.message_id)
             if accepted and session and session.segment_state and session.segment_state.segments:
@@ -330,8 +386,10 @@ class NativeBridge:
                 detail = result if isinstance(result, str) else str(result)
             await asyncio.to_thread(
                 self.controller.on_tool_update,
-                message_id=turn.message_id, tool_name=str(payload.get("tool_name") or ""),
-                status="started" if kind == "tool_start" else "completed", detail=str(detail),
+                message_id=turn.message_id,
+                tool_name=str(payload.get("tool_name") or ""),
+                status="started" if kind == "tool_start" else "completed",
+                detail=str(detail),
             )
             session = self.controller._sessions.get(turn.message_id)
             if session and session.segment_state and session.segment_state.segments:

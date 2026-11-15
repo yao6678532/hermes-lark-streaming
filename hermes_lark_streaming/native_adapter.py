@@ -14,19 +14,22 @@ from gateway.platforms.base import SendResult  # type: ignore[import-not-found]
 from gateway.session_context import get_session_env  # type: ignore[import-not-found]
 from plugins.platforms.feishu import adapter as builtin  # type: ignore[import-not-found]
 
+from .card_mutations import SHUTDOWN_WRITES
 from .cardkit.builder import build_background_card, build_cron_card
 from .cardkit.interaction_builder import build_approval_card
 from .config import Config
 from .controller import get_controller
-from .feishu import FeishuClient, FeishuClientConfig
+from .feishu import DeliveryUncertain, FeishuClient, FeishuClientConfig
 from .interactions.clarify import ClarifyAdapterProxy
 from .native_bridge import NativeBridge, NativeTurn
 from .native_context import native_home
+from .native_history import DeliveryHistory
 from .native_hooks import ACTIVE
 from .native_reviews import NativeReviews
 from .patch import on_feishu_interaction_action, on_feishu_normalize
 
 _logger = logging.getLogger(__name__)
+SHUTDOWN_BUDGET_SEC = 5.0
 _approval_prompt: ContextVar[Any] = ContextVar("hls_approval_prompt", default=None)
 _processing_turn: ContextVar[tuple[Any, NativeTurn] | None] = ContextVar("hls_processing_turn", default=None)
 
@@ -49,11 +52,19 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                 app_id=self._app_id,
                 app_secret=self._app_secret,
                 base_url="https://open.larksuite.com" if self._domain_name == "lark" else "https://open.feishu.cn",
-            )
+            ),
+            mutations=self.cards._card_mutations,
         )
         self.cards._initialized = True
         self.cards._transport_configured = bool(self._app_id and self._app_secret)
+        self.stopping = False
+        self.history = DeliveryHistory()
         self.bridge = NativeBridge(self.cards)
+        self.bridge.finished = self.history
+        self.bridge.on_completed = self._forget_turn
+        self.cards._native_owned = lambda session: (
+            (turn := self.bridge.messages.get(session.message_id)) is not None and not turn.completed
+        )
         self.card_loop: asyncio.AbstractEventLoop | None = None
         self.card_tasks: set[asyncio.Task[Any]] = set()
         self._card_messages: dict[str, NativeTurn] = {}
@@ -62,6 +73,28 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
         self._review_tasks: dict[str, asyncio.Task[Any]] = {}
         self._hermes_lark_interaction_controller = self.cards
         ACTIVE.add(self)
+
+    def _forget_turn(self, turn: NativeTurn) -> None:
+        for ident, owner in list(self._card_messages.items()):
+            if owner is turn:
+                self.history.add(ident, turn.chat_id, "card")
+                self._card_messages.pop(ident, None)
+                self._card_streams.pop(ident, None)
+        self.history.add(turn.card_message_id, turn.chat_id, "card")
+
+    async def _native_send(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> SendResult:
+        if self.stopping:
+            return SendResult(success=False, error="Adapter is shutting down")
+        result = await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        if result.success:
+            self.history.add(result.message_id, chat_id, "native")
+        return result
 
     @native_home
     async def connect(self, *, is_reconnect: bool = False) -> bool:
@@ -127,12 +160,15 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
     async def _complete_turn(self, turn: NativeTurn) -> bool:
         if turn.completed:
             return not turn.fallback or turn.native_fallback_sent
-        if not turn.card_message_id and turn.fallback:
-            turn.completed = True
-            return turn.native_fallback_sent
-        delivered = await self.bridge.complete(turn)
-        if not delivered and turn.answer and not turn.interrupted and not turn.native_fallback_sent:
-            result = await super().send(
+        delivered = await self.bridge.complete(turn) or turn.native_fallback_sent
+        if (
+            not delivered
+            and turn.answer
+            and not turn.interrupted
+            and not turn.native_fallback_sent
+            and not turn.delivery_uncertain
+        ):
+            result = await self._native_send(
                 turn.chat_id,
                 turn.answer,
                 reply_to=turn.anchor_id,
@@ -177,6 +213,8 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
         reply_to: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
+        if self.stopping:
+            return SendResult(success=False, error="Adapter is shutting down")
         md = metadata or {}
         await self.bridge.drain()
         turn = self._turn(chat_id)
@@ -191,9 +229,11 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                     reply_to_message_id=reply_to or md.get("thread_id"),
                 )
                 return SendResult(success=True, message_id=ident)
+            except DeliveryUncertain as error:
+                return SendResult(success=False, error=str(error))
             except Exception:
                 _logger.warning("Cron card failed; using native delivery", exc_info=True)
-                return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+                return await self._native_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         background_template = t("gateway.background.complete_header", preview="{preview}")
         background_prefix, _, background_suffix = background_template.partition("{preview}")
         if self.cards.enabled and background_suffix and content.startswith(background_prefix):
@@ -207,9 +247,11 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                         reply_to_message_id=reply_to or md.get("thread_id"),
                     )
                     return SendResult(success=True, message_id=ident)
+                except DeliveryUncertain as error:
+                    return SendResult(success=False, error=str(error))
                 except Exception:
                     _logger.warning("Background card failed; using native delivery", exc_info=True)
-                    return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+                    return await self._native_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if self.cards.enabled and md.get("_interim_send"):
             from .agent_status import AgentStatusEvent, conversation_key
 
@@ -251,7 +293,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                         max_iterations=_current_max_iterations(),
                     ):
                         return SendResult(success=True)
-                    return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+                    return await self._native_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if turn is not None and turn.completed and (md.get("expect_edits") or md.get("notify")):
             return SendResult(success=True, message_id=turn.card_message_id)
         if self.cards.enabled and turn is not None and not turn.fallback and not turn.completed:
@@ -270,7 +312,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                         source="interim_commentary",
                     ):
                         return SendResult(success=True, message_id=turn.card_message_id)
-                    return await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+                    return await self._native_send(chat_id, content, reply_to=reply_to, metadata=metadata)
             elif md.get("expect_edits") or md.get("notify"):
                 final = bool(md.get("notify")) and not md.get("expect_edits")
                 stream_id = uuid.uuid4().hex
@@ -287,7 +329,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             elif turn.turn_id and any(content.startswith(prefix) for prefix in turn.native_tool_prefixes):
                 # Gateway tool chrome is represented by the official tool hooks.
                 return SendResult(success=True, message_id=None)
-        result = await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        result = await self._native_send(chat_id, content, reply_to=reply_to, metadata=metadata)
         if turn is not None and turn.fallback and md.get("notify"):
             turn.native_fallback_sent = bool(result.success)
         return result
@@ -301,7 +343,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
         # Native status is independent from tool chrome and model commentary.
-        return await super().send(chat_id, content, metadata=metadata)
+        return await self._native_send(chat_id, content, metadata=metadata)
 
     @native_home
     async def edit_message(
@@ -313,9 +355,18 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
         finalize: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> SendResult:
+        if self.stopping:
+            return SendResult(success=False, error="Adapter is shutting down")
         turn = self._card_messages.get(message_id)
         if turn is None:
-            return await super().edit_message(chat_id, message_id, content, finalize=finalize)
+            previous = self.history.get(message_id)
+            if previous is None or previous.chat_id != chat_id:
+                return SendResult(success=False, error="Unknown message ownership")
+            if previous.kind == "card":
+                return SendResult(success=True, message_id=message_id)
+            if previous.kind == "native":
+                return await super().edit_message(chat_id, message_id, content, finalize=finalize)
+            return SendResult(success=False, error="Message is not an owned outbound delivery")
         if turn.completed:
             return SendResult(success=True, message_id=message_id)
         if turn.chat_id != chat_id or turn.fallback:
@@ -379,6 +430,8 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             await super().interrupt_session_activity(session_key, chat_id, metadata)
 
     def schedule_reviews(self, chat_id: str) -> None:
+        if self.stopping:
+            return
         if chat_id in self._review_tasks:
             return
 
@@ -406,6 +459,8 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             _approval_prompt.reset(token)
 
     async def _send_interactive_card(self, chat_id: str, card: dict[str, Any], *args: Any, **kwargs: Any) -> SendResult:
+        if self.stopping:
+            return SendResult(success=False, error="Adapter is shutting down")
         prompt = _approval_prompt.get()
         if prompt is not None and self.cards.approval_card_enabled:
             from .interactions.approval import transform_approval_card
@@ -472,18 +527,62 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
     @native_home
     async def disconnect(self) -> None:
         try:
-            if self.card_tasks:
-                await asyncio.gather(*self.card_tasks, return_exceptions=True)
-            for turn in list(self.bridge.turns.values()):
-                if not turn.completed and turn.card_message_id:
-                    turn.interrupted = True
-                    await self.bridge.complete(turn)
+            await self._shutdown_cards()
         finally:
             ACTIVE.discard(self)
-            from .native_runtime import record_adapter
+            try:
+                from .native_runtime import record_adapter
 
-            record_adapter(self.cards._profile_home, connected=False, adapter=type(self).__name__)
-            await super().disconnect()
+                record_adapter(self.cards._profile_home, connected=False, adapter=type(self).__name__)
+            except Exception:
+                _logger.warning("Could not record adapter shutdown", exc_info=True)
+            finally:
+                await super().disconnect()
+
+    async def _shutdown_cards(self) -> None:
+        self.stopping = self.bridge.stopping = True
+        ACTIVE.discard(self)
+        self.cards._card_mutations.stopping = True
+        self.cards._card_mutations.shutdown_deadline = time.monotonic() + SHUTDOWN_BUDGET_SEC
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + SHUTDOWN_BUDGET_SEC
+        for task in list(self.card_tasks):
+            task.cancel()
+        self.bridge._queue.clear()
+        sessions = {id(s): s for s in self.cards._sessions.values()}
+        for session in sessions.values():
+            session.flush.mark_completed()
+            if session.create_task is not None and not session.create_task.done():
+                session.create_task.cancel()
+            if session.image_resolver:
+                session.image_resolver.cancel_pending()
+
+        async def seal(turn: NativeTurn) -> None:
+            token = SHUTDOWN_WRITES.set(True)
+            try:
+                turn.interrupted = True
+                await self.bridge.complete(turn)
+            except Exception:
+                _logger.warning("Card shutdown seal failed", exc_info=True)
+            finally:
+                SHUTDOWN_WRITES.reset(token)
+
+        tasks = [asyncio.create_task(seal(turn)) for turn in list(self.bridge.turns.values()) if not turn.completed]
+        try:
+            if tasks:
+                _done, pending = await asyncio.wait(tasks, timeout=max(0.0, deadline - loop.time()))
+                for task in pending:
+                    task.cancel()
+                    task.add_done_callback(self.cards._on_bg_task_done)
+                if pending:
+                    _logger.warning("Card shutdown budget exhausted: pending=%d", len(pending))
+        finally:
+            for session in sessions.values():
+                self.cards._cleanup_session(session)
+            self.bridge.turns.clear()
+            self.bridge.messages.clear()
+            self._card_messages.clear()
+            self._card_streams.clear()
 
 
 async def standalone_send(
@@ -522,6 +621,8 @@ async def standalone_send(
                 build_cron_card(content),
                 reply_to_message_id=thread_id,
             )
+        except DeliveryUncertain as error:
+            return {"success": False, "platform": "feishu", "chat_id": chat_id, "error": str(error)}
         except Exception:
             return dict(
                 await builtin._standalone_send(
