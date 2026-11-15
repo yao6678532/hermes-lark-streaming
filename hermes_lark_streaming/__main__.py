@@ -17,11 +17,10 @@ def native_status() -> dict[str, Any]:
     from .native_plugin import NATIVE_HOOKS, legacy_files
 
     try:
-        from gateway.run import GatewayRunner  # type: ignore[import-not-found]
         from hermes_cli import plugins  # type: ignore[import-not-found]
     except ImportError as error:
         return {"compatible": False, "error": str(error)}
-    root = Path(inspect.getfile(GatewayRunner)).resolve().parent.parent
+    root = Path(inspect.getfile(plugins)).resolve().parent.parent
     from .config import hermes_home
     from .native_runtime import running_adapter
 

@@ -20,7 +20,7 @@
   },
   "plugin_source_sha256": {
     "hermes_lark_streaming/__init__.py": "036c814ed2350d9539c918f107ca33023e50a1c539283ef5eb16eff21d7caab8",
-    "hermes_lark_streaming/__main__.py": "690ad68973dde3a2b4b2f6be2a09b6de29bc60034ecb04e816942c8903830af6",
+    "hermes_lark_streaming/__main__.py": "8f6ba462e388915a585cce725d34b39642b20b96da7d0b01d3811955ebd1b772",
     "hermes_lark_streaming/agent_status.py": "105bf4a0e1f8e792ae5189578ceb02d073c7b48e5cf0d0f0ff87b4ef04cb525c",
     "hermes_lark_streaming/cardkit/__init__.py": "e964a364dfa7e45d4baa9bc55e07080a094cfb54c609d31e6a72b81b68ace493",
     "hermes_lark_streaming/cardkit/builder.py": "39d196eab6af073cc33b849fb2dedcb9567ae1d59d40e64a7a801493bdff830e",
@@ -41,7 +41,7 @@
     "hermes_lark_streaming/native_bridge.py": "0ccace41dd7bfcc3b499fc0fb93fe1d9db23c7722bd2c8486fbc114bd321410b",
     "hermes_lark_streaming/native_context.py": "1864e15d016ecc51c9ca358fab9c7dc085f05029ca394bbc518f88f2f1d53214",
     "hermes_lark_streaming/native_hooks.py": "5f95837f6708f13dbed52ba46fa39fe94e0ecc9027bb374163c68b0436079547",
-    "hermes_lark_streaming/native_plugin.py": "d52cb68afe561869998e92fed2b11a8928674454962a355ea6785f1e2fa7c0bc",
+    "hermes_lark_streaming/native_plugin.py": "50935300d005c1cd68ddb2912bd1ebc657fe687e058f439581dd7e3fe053b94f",
     "hermes_lark_streaming/native_reviews.py": "2d2330cfaa68b55f386b0060e4a19e4782603ca7ad636674bad3fe837ded798e",
     "hermes_lark_streaming/native_runtime.py": "7529cce583b81ad938b643ed05db3cfabed7bdb2ae795b9f7a971ad1f1e72ed9",
     "hermes_lark_streaming/patch.py": "847c553878a408099cd4ce77982bd0ec78da2e045c8e115db86b061ebfa722fe",

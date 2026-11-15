@@ -35,12 +35,18 @@ def register(ctx):
 """)
     (home / "config.yaml").write_text(
         "plugins:\n  enabled: [platforms/feishu, hermes-lark-streaming, audit-offline-model]\n"
-        "  load_timeout_seconds: 0\n  hook_callback_timeout: 5\n  stream_reasoning_deltas: true\n"
+        "  hook_callback_timeout: 5\n  stream_reasoning_deltas: true\n"
         "streaming:\n  enabled: true\nfeishu:\n  app_id: offline-app\n  app_secret: offline-secret\n"
         "display:\n  platforms:\n    feishu:\n      show_reasoning: true\n"
     )
     os.environ["FEISHU_APP_ID"] = "offline-app"
     os.environ["FEISHU_APP_SECRET"] = "offline-secret"
+    # Real gateway startup imports its facade before asking for the adapter.
+    # Keep the default deadline workers: registering must not wait on this
+    # caller's gateway.run import lock.
+    from gateway.run import GatewayRunner
+
+    assert callable(GatewayRunner)
     manager = get_plugin_manager()
     manager.discover_and_load()
     loaded = manager._plugins.get("hermes-lark-streaming")
@@ -50,6 +56,7 @@ def register(ctx):
     provider_module = manager._plugins["audit-offline-model"].module
     assert provider_module is not None
     checks = asyncio.run(exercise(entry.adapter_factory, provider_module))
+    checks["gateway_first_import_with_default_threaded_plugin_loader"] = True
     from hermes_cli.config import read_raw_config, save_config
 
     from hermes_lark_streaming.migration import prepare_config

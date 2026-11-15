@@ -28,13 +28,14 @@ def legacy_files(root: Path) -> list[Path]:
 
 
 def check_host() -> None:
-    from gateway.run import GatewayRunner  # type: ignore[import-not-found]
     from hermes_cli import plugins  # type: ignore[import-not-found]
 
     missing = set(NATIVE_HOOKS) - plugins.VALID_HOOKS
     if missing or not hasattr(plugins.PluginContext, "register_platform"):
         raise RuntimeError(f"Hermes native interfaces unavailable: {sorted(missing)}")
-    root = Path(inspect.getfile(GatewayRunner)).resolve().parent.parent
+    # Registration can run on a deadline worker while the main thread imports
+    # gateway.run. Importing it here would wait on the caller's import lock.
+    root = Path(inspect.getfile(plugins)).resolve().parent.parent
     residue = legacy_files(root)
     if residue:
         raise RuntimeError("Legacy injection remains; use the saved old plugin to remove it first: "

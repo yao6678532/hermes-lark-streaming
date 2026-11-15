@@ -12,7 +12,7 @@
 | 验收 | 结果 | 证据 |
 |---|---|---|
 | 新宿主完整回归 | 1542 passed，无跳过，6 条既有警告 | hermes-v0.23.1-runtime-regression.json / .log |
-| 真实原生平台注册与运行链 | 30 项通过 | hermes-v0.23.1-platform-audit.json |
+| 真实原生平台注册与运行链 | 31 项通过 | hermes-v0.23.1-platform-audit.json |
 | 后台复盘原生回执链 | 18 项通过 | hermes-v0.23.1-review-receipts-audit.json |
 | ruff 全仓、mypy | 通过，47 个源文件 | 本地执行记录 |
 | 网络尝试、宿主源码变化 | 0；源码及 tracked diff 未变 | 各审计报告 |
@@ -38,7 +38,7 @@ FeishuAdapter 的适配器，平台仍为 `feishu`。连接、权限、配对、
 - 原有 streaming/display/凭据用法保留；迁移只补必要的原生开关并记录差异，重复执行无变化。
 - verify/status 区分注册 factory 和实际运行 adapter，并检查旧注入残留；禁用恢复内置 adapter。
 
-30 项契约探针涵盖真实 AIAgent 工具循环、GatewayStreamConsumer、真实 pending human-input、
+31 项契约探针涵盖真实 AIAgent 工具循环、GatewayStreamConsumer、真实 pending human-input、
 Clarify 多选、陈旧审批不影响新请求、真实双 profile 同名 ID 隔离、两个真实复盘、真实配置保存、
 在线/离线 Cron 与媒体、失败重试、长文本及原生回退。回归另覆盖强制拆卡后每段内容恰好一次。
 
@@ -59,6 +59,14 @@ Clarify 多选、陈旧审批不影响新请求、真实双 profile 同名 ID �
 真实 fork/工具循环测试中推进 generation 后，默认摘要到达 0 次，成功回执仍为 1。
 集成探针执行两轮真实后台写入，验证合并、双投递失败保留、成功 ACK 与原生回调去重。
 宿主 summarizer/origin 辅助函数为固定提交的只读依赖，未来升级必须再做契约检查。
+
+## 真实启动顺序补充
+
+正式启动前的检查发现，默认 10 秒加载线程下，如果 gateway.run 先触发插件发现，
+插件再导入同一 GatewayRunner 会等待主线程的 import lock。已将宿主路径定位改为
+已加载的 hermes_cli.plugins facade，去掉注册和诊断中的循环导入。新增契约使用
+真实 gateway-first 导入和默认有超时的线程加载，不再以 load_timeout_seconds=0 绕过。
+31 项探针包含这一启动顺序，完整回归在修复后重新运行。
 
 ## 安装与复现
 
