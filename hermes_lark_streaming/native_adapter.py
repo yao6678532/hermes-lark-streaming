@@ -599,10 +599,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             self._card_messages.clear()
             self._card_streams.clear()
             if epoch == self._mutation_registry.epoch:
-                for state in self._mutation_registry.states.values():
-                    state.streaming = False
-                for document in self._mutation_registry.documents.values():
-                    document.closed = True
+                self._mutation_registry.seal_documents()
 
 
 async def standalone_send(

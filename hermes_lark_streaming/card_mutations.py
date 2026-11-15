@@ -48,14 +48,18 @@ class CardMutations:
     def rearm(self) -> int:
         """Admit a new transport without replacing physical-card or waiter locks."""
         if self.stopping:
-            for state in self.states.values():
-                state.streaming = False
-            for document in self.documents.values():
-                document.closed = True
+            self.seal_documents()
             self.epoch += 1
             self.stopping = False
             self.shutdown_deadline = None
         return self.epoch
+
+    def seal_documents(self) -> None:
+        for state in self.states.values():
+            state.streaming = False
+        for document in self.documents.values():
+            document.closed = True
+            document.card.setdefault("config", {})["streaming_mode"] = False
 
     def check_writes(self, *, shutdown: bool = False) -> None:
         scope = MUTATION_SCOPE.get()

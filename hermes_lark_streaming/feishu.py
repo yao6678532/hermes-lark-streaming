@@ -639,10 +639,9 @@ class FeishuClient:
             return
         async with doc.lock:
             doc.closed = True
+            doc.card.setdefault("config", {})["streaming_mode"] = False
             for ident in doc.parts:
                 await self._raw_close(ident, sequence, operation_id=operation_id, shutdown=shutdown)
-            doc.closed = True
-            doc.card.setdefault("config", {})["streaming_mode"] = False
             doc.views.clear()
 
     async def _delete_owned_message(self, message_id: str | None) -> None:

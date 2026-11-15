@@ -542,6 +542,7 @@ async def test_rearmed_transport_fences_old_client_and_old_context_without_repla
     old_epoch = registry.epoch
     registry.stopping = True
     registry.rearm()
+    assert doc.closed and not doc.card["config"]["streaming_mode"]
     fresh = client_for(server)
     fresh._mutations = registry
     with pytest.raises(RuntimeError, match="retired transport"):
