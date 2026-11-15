@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from .card_mutations import CardMutations
+from .card_mutations import MUTATION_SCOPE, CardMutations
 from .controller import StreamCardController
 from .feishu import FeishuClient
 from .native_context import native_home
@@ -66,6 +66,9 @@ class NativeBridge:
 
     def __init__(self, controller: StreamCardController) -> None:
         self.controller = controller
+        registry = getattr(controller, "_card_mutations", None)
+        self._mutation_registry = registry if isinstance(registry, CardMutations) else None
+        self._mutation_epoch = self._mutation_registry.epoch if self._mutation_registry is not None else 0
         self._profile_home = controller._profile_home if hasattr(controller, "_profile_home") else None
         self.stopping = False
         self.finished = DeliveryHistory()
@@ -114,7 +117,18 @@ class NativeBridge:
         self.messages[message_id] = turn
         return turn
 
+    def owns_transport(self) -> bool:
+        registry = self._mutation_registry
+        if registry is None:
+            return True
+        scope = MUTATION_SCOPE.get()
+        return self._mutation_epoch == registry.epoch and (
+            scope is None or scope == (id(registry), registry.epoch)
+        )
+
     def route(self, session_key: str, payload: dict[str, Any] | None = None) -> NativeTurn | None:
+        if not self.owns_transport():
+            return None
         inbound = str((payload or {}).get("_inbound_id") or "")
         turn = self.messages.get(inbound) if inbound else self.turns.get(session_key)
         if turn is None or turn.completed:
@@ -136,7 +150,7 @@ class NativeBridge:
         return turn
 
     async def ensure_card(self, turn: NativeTurn) -> bool:
-        if turn.completed or turn.fallback or not self.controller.enabled:
+        if not self.owns_transport() or turn.completed or turn.fallback or not self.controller.enabled:
             return False
         existing = self.controller._sessions.get(turn.message_id)
         if existing is not None:
@@ -209,7 +223,11 @@ class NativeBridge:
     async def complete(self, turn: NativeTurn) -> bool:
         if turn.completed:
             return not turn.fallback
-        if turn.interrupted:
+        retired = not self.owns_transport()
+        if retired:
+            ok = False
+            turn.answer = ""
+        elif turn.interrupted:
             ok = await self.controller.on_session_aborted(session_key=turn.session_key, stop_command=turn.stop_command)
         else:
             ok = await self.controller.on_completed_wait(
@@ -244,9 +262,11 @@ class NativeBridge:
         turn.context.clear()
         turn.closed_iterations.clear()
         turn.pending_inputs.clear()
-        self.controller.consume_text_fallback(turn.message_id)
+        if not retired:
+            self.controller.consume_text_fallback(turn.message_id)
         self.finished.add(turn.message_id, turn.chat_id, "inbound")
-        self.messages.pop(turn.message_id, None)
+        if self.messages.get(turn.message_id) is turn:
+            self.messages.pop(turn.message_id, None)
         if self.turns.get(turn.session_key) is turn:
             self.turns.pop(turn.session_key, None)
         if self.on_completed is not None:

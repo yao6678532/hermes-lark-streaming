@@ -14,6 +14,7 @@ from typing import Any
 from .card_documents import CardDocument
 
 WRITE_GUARD: ContextVar[Callable[[], None] | None] = ContextVar("hls_write_guard", default=None)
+MUTATION_SCOPE: ContextVar[tuple[int, int] | None] = ContextVar("hls_mutation_scope", default=None)
 SHUTDOWN_WRITES: ContextVar[bool] = ContextVar("hls_shutdown_writes", default=False)
 
 STREAM_RENEW_SEC = 540.0
@@ -40,10 +41,26 @@ class CardMutations:
     def __init__(self) -> None:
         self.states: OrderedDict[str, CardMutationState] = OrderedDict()
         self.stopping = False
+        self.epoch = 0
         self.shutdown_deadline: float | None = None
         self.documents: dict[str, CardDocument] = {}
 
+    def rearm(self) -> int:
+        """Admit a new transport without replacing physical-card or waiter locks."""
+        if self.stopping:
+            for state in self.states.values():
+                state.streaming = False
+            for document in self.documents.values():
+                document.closed = True
+            self.epoch += 1
+            self.stopping = False
+            self.shutdown_deadline = None
+        return self.epoch
+
     def check_writes(self, *, shutdown: bool = False) -> None:
+        scope = MUTATION_SCOPE.get()
+        if scope is not None and scope[0] == id(self) and scope[1] != self.epoch:
+            raise RuntimeError("Card write belongs to a retired transport")
         if self.stopping and (
             not (shutdown or SHUTDOWN_WRITES.get())
             or (self.shutdown_deadline is not None and time.monotonic() >= self.shutdown_deadline)
@@ -94,12 +111,15 @@ class CardMutations:
         closing: bool = False,
         shutdown: bool = False,
     ) -> Any:
+        epoch = self.epoch
         state = self.state(card_id)
         token = operation_id or uuid.uuid4().hex
         async with state.lock:
 
             def validate() -> None:
                 self.check_writes(shutdown=shutdown)
+                if epoch != self.epoch:
+                    raise RuntimeError("Card operation belongs to a retired transport")
                 if not state.available:
                     raise RuntimeError("Card mutation owner is no longer available")
                 if state.owner is not None and not state.owner(stream or (state.streaming and not closing)):
@@ -116,6 +136,7 @@ class CardMutations:
                     guard = WRITE_GUARD.set(validate)
                     try:
                         await reopen(state.sequence, renewal_id)
+                        validate()
                         break
                     except Exception as error:
                         if getattr(error, "code", None) != 300317 or attempt == SEQUENCE_RECOVERIES:
@@ -151,6 +172,7 @@ class CardMutations:
                         reopened = True
                         continue
                     raise
+                validate()
                 state.touched_at = time.monotonic()
                 if closing:
                     state.streaming = False

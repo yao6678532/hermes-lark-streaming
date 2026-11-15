@@ -910,7 +910,7 @@ async def stability_checks(adapter: Any, client: Any) -> dict[str, bool]:
     assert not adapter.bridge.messages and not adapter.bridge.turns and not adapter.cards._sessions
     assert not (await adapter.send("chat", "late")).success
     assert not (await adapter.send_or_update_status("chat", "status-key", "late")).success
-    return {
+    checks = {
         "receipt_confirmation_uuid_survives_delivery_reconstruction_without_schema_change": True,
         "shutdown_keeps_unacknowledged_receipts_in_existing_journal": True,
         "ordinary_slash_command_stays_cardified": True,
@@ -918,4 +918,73 @@ async def stability_checks(adapter: Any, client: Any) -> dict[str, bool]:
         "completed_card_edit_is_idempotent_and_unknown_or_cross_chat_edit_fails_closed": True,
         "shutdown_bounds_hanging_card_cancels_creation_and_disconnects_builtin": True,
         "shutdown_single_card_failure_does_not_block_other_cards": True,
+    }
+    checks.update(await reconnect_checks(adapter))
+    return checks
+
+
+async def reconnect_checks(retired: Any) -> dict[str, bool]:
+    from types import SimpleNamespace
+
+    from gateway.config import PlatformConfig
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    from hermes_lark_streaming.card_mutations import MUTATION_SCOPE
+    from hermes_lark_streaming.feishu import FeishuClient, FeishuClientConfig
+    from hermes_lark_streaming.native_hooks import ACTIVE
+
+    registry = retired.cards._card_mutations
+    old_client = FeishuClient(FeishuClientConfig("offline", "offline"), mutations=registry)
+    lock = registry.state("reconnect-card").lock
+    epoch = registry.epoch
+    latest = dict(retired.cards._agent_status_manager.registry._cards)
+    fresh = type(retired)(PlatformConfig(enabled=True, extra={"app_id": "offline", "app_secret": "offline"}))
+    assert fresh.cards is retired.cards and registry.epoch == epoch + 1 and not registry.stopping
+    assert registry.state("reconnect-card").lock is lock
+    assert fresh.cards._agent_status_manager.registry._cards == latest
+    old_client._client.cardkit.v1.card.asettings = AsyncMock()
+    try:
+        await old_client.cardkit_close_streaming("reconnect-card")
+    except RuntimeError as error:
+        assert "retired transport" in str(error)
+    else:
+        raise AssertionError("Retired client wrote after native adapter recreation")
+    old_client._client.cardkit.v1.card.asettings.assert_not_called()
+    # Retired review continuations cannot use the controller's new client either.
+    assert not await retired.reviews.deliver("shutdown-receipt")
+    with (
+        patch.object(FeishuAdapter, "connect", new=AsyncMock(return_value=True)),
+        patch.object(fresh, "schedule_reviews") as schedule,
+    ):
+        assert await fresh.connect(is_reconnect=True)
+        schedule.assert_any_call("shutdown-receipt")
+    assert fresh in ACTIVE
+    fresh.cards._client._client.cardkit.v1.card.asettings = AsyncMock(
+        return_value=SimpleNamespace(success=lambda: True)
+    )
+    await fresh.cards._client.cardkit_close_streaming("reconnect-card")
+    fresh.cards._client._client.cardkit.v1.card.asettings.assert_awaited_once()
+    with patch.object(FeishuAdapter, "disconnect", new=AsyncMock()):
+        await fresh.disconnect()
+    epoch = registry.epoch
+    token = MUTATION_SCOPE.set((id(registry), epoch))
+    try:
+        with (
+            patch.object(FeishuAdapter, "connect", new=AsyncMock(return_value=True)),
+            patch.object(fresh, "schedule_reviews"),
+        ):
+            assert await fresh.connect(is_reconnect=True)
+        assert registry.epoch == epoch + 1
+        assert MUTATION_SCOPE.get() == (id(registry), epoch), "Reconnect leaked its admission into an old caller"
+    finally:
+        MUTATION_SCOPE.reset(token)
+    assert not fresh.stopping and not fresh.bridge.stopping
+    assert fresh.bridge._mutation_epoch == fresh.reviews._mutation_epoch == registry.epoch
+    assert registry.state("reconnect-card").lock is lock
+    with patch.object(FeishuAdapter, "disconnect", new=AsyncMock()):
+        await fresh.disconnect()
+    return {
+        "native_adapter_recreation_rearms_cached_controller_without_replacing_locks_or_latest_refs": True,
+        "retired_clients_and_review_continuations_cannot_write_after_reconnect": True,
+        "same_adapter_reconnect_recovers_pending_reviews_without_leaking_epoch_context": True,
     }

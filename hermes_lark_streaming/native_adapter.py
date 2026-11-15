@@ -14,7 +14,7 @@ from gateway.platforms.base import SendResult  # type: ignore[import-not-found]
 from gateway.session_context import get_session_env  # type: ignore[import-not-found]
 from plugins.platforms.feishu import adapter as builtin  # type: ignore[import-not-found]
 
-from .card_mutations import SHUTDOWN_WRITES
+from .card_mutations import MUTATION_SCOPE, SHUTDOWN_WRITES
 from .cardkit.builder import build_background_card, build_cron_card
 from .cardkit.interaction_builder import build_approval_card
 from .config import Config
@@ -44,6 +44,8 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
     def __init__(self, config: Any) -> None:
         super().__init__(config)
         self.cards = get_controller()
+        self._mutation_registry = self.cards._card_mutations
+        self._mutation_epoch = self._mutation_registry.rearm()
         self._profile_home = self.cards._profile_home
         # Use the credentials already resolved by the built-in adapter. This also
         # covers platform.extra credentials without changing Config precedence.
@@ -98,11 +100,20 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
 
     @native_home
     async def connect(self, *, is_reconnect: bool = False) -> bool:
+        if self.stopping:
+            self._mutation_epoch = self._mutation_registry.rearm()
+            self.bridge._mutation_epoch = self.reviews._mutation_epoch = self._mutation_epoch
+            self.stopping = self.bridge.stopping = False
+            self._review_tasks.clear()
+            assert self.cards._client is not None
+            self.cards._client = FeishuClient(self.cards._client.config, mutations=self._mutation_registry)
+        MUTATION_SCOPE.set((id(self._mutation_registry), self._mutation_epoch))
         connected = await super().connect(is_reconnect=is_reconnect)
         from .native_runtime import record_adapter
 
         record_adapter(self.cards._profile_home, connected=bool(connected), adapter=type(self).__name__)
         if connected:
+            ACTIVE.add(self)
             self.card_loop = asyncio.get_running_loop()
             self.cards._loop = self.card_loop
             for chat in self.reviews.buffer.pending_chats(self.cards._profile_home):
@@ -443,7 +454,8 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
                     if delivered and not self.reviews.buffer.snapshot(self.cards._profile_home, chat_id).receipts:
                         break
             finally:
-                self._review_tasks.pop(chat_id, None)
+                if self._review_tasks.get(chat_id) is asyncio.current_task():
+                    self._review_tasks.pop(chat_id, None)
 
         task = asyncio.create_task(deliver())
         self._review_tasks[chat_id] = task
@@ -526,6 +538,7 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
 
     @native_home
     async def disconnect(self) -> None:
+        epoch = self._mutation_epoch
         try:
             await self._shutdown_cards()
         finally:
@@ -533,13 +546,15 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             try:
                 from .native_runtime import record_adapter
 
-                record_adapter(self.cards._profile_home, connected=False, adapter=type(self).__name__)
+                if epoch == self._mutation_registry.epoch:
+                    record_adapter(self.cards._profile_home, connected=False, adapter=type(self).__name__)
             except Exception:
                 _logger.warning("Could not record adapter shutdown", exc_info=True)
             finally:
                 await super().disconnect()
 
     async def _shutdown_cards(self) -> None:
+        epoch = self._mutation_registry.epoch
         self.stopping = self.bridge.stopping = True
         ACTIVE.discard(self)
         self.cards._card_mutations.stopping = True
@@ -583,6 +598,11 @@ class FeishuStreamingAdapter(builtin.FeishuAdapter):  # type: ignore[misc]
             self.bridge.messages.clear()
             self._card_messages.clear()
             self._card_streams.clear()
+            if epoch == self._mutation_registry.epoch:
+                for state in self._mutation_registry.states.values():
+                    state.streaming = False
+                for document in self._mutation_registry.documents.values():
+                    document.closed = True
 
 
 async def standalone_send(

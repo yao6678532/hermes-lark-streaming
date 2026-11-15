@@ -30,8 +30,20 @@ def profile_scope(home: Path) -> Iterator[None]:
 def native_home(method: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
     @wraps(method)
     async def owned(*args: P.args, **kwargs: P.kwargs) -> R:
+        from .card_mutations import MUTATION_SCOPE
+
         owner = cast(Any, args[0])
-        with profile_scope(owner._profile_home):
-            return await method(*args, **kwargs)
+        registry = getattr(owner, "_mutation_registry", None)
+        token = None
+        scope = MUTATION_SCOPE.get()
+        if registry is not None:
+            desired = scope if scope is not None and scope[0] == id(registry) else (id(registry), owner._mutation_epoch)
+            token = MUTATION_SCOPE.set(desired)
+        try:
+            with profile_scope(owner._profile_home):
+                return await method(*args, **kwargs)
+        finally:
+            if token is not None:
+                MUTATION_SCOPE.reset(token)
 
     return owned

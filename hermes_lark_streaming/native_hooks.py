@@ -41,6 +41,10 @@ def dispatch(event_kind: str, **payload: Any) -> None:
                 if adapter.cards._profile_home == receipt_home and adapter.card_loop is not None and chat:
                     adapter.card_loop.call_soon_threadsafe(adapter.schedule_reviews, chat)
         return
+    if binding is not None and owner is None:
+        # A retired adapter's foreground thread cannot bind a replacement turn.
+        # Background receipt capture above deliberately remains independent.
+        return
     payload = {**payload, "_inbound_id": get_session_env("HERMES_SESSION_MESSAGE_ID") or ""}
     for adapter in list(ACTIVE):
         if (

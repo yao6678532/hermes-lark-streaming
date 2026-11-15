@@ -128,6 +128,7 @@ class FeishuClient:
     def __init__(self, config: FeishuClientConfig, *, mutations: CardMutations | None = None) -> None:
         self.config = config
         self._mutations = mutations if mutations is not None else CardMutations()
+        self._mutation_epoch = self._mutations.epoch
         domain = config.base_url.strip().rstrip("/").removesuffix(_OPEN_APIS_SUFFIX) or DEFAULT_DOMAIN
         builder = lark.Client.builder().app_id(config.app_id).app_secret(config.app_secret).domain(domain)
         self._client = builder.build()
@@ -152,6 +153,8 @@ class FeishuClient:
         attempts = len(_TRANSIENT_RETRY_DELAYS_SEC) + 1
         last_error: FeishuAPIError | None = None
         for attempt in range(attempts):
+            if self.__dict__.setdefault("_mutation_epoch", self.mutations.epoch) != self.mutations.epoch:
+                raise RuntimeError("Card client belongs to a retired transport")
             if guard := WRITE_GUARD.get():
                 guard()
             else:
@@ -165,6 +168,12 @@ class FeishuClient:
                     raise DeliveryUncertain(f"{operation}: write acknowledgement unavailable") from error
                 await asyncio.sleep(_TRANSIENT_RETRY_DELAYS_SEC[attempt])
                 continue
+            if self._mutation_epoch != self.mutations.epoch:
+                raise RuntimeError("Card client belongs to a retired transport")
+            if guard:
+                guard()
+            else:
+                self.mutations.check_writes()
             try:
                 self._check(resp, operation)
                 return resp

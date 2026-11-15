@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .agent_status import AgentStatusEvent, conversation_key
+from .card_mutations import CardMutations
 from .native_context import native_home
 from .native_history import DeliveryHistory
 from .review_receipts import ReviewReceiptBatch, ReviewReceiptBuffer
@@ -27,6 +28,9 @@ def review_buffer(home: Path) -> ReviewReceiptBuffer:
 class NativeReviews:
     def __init__(self, controller: Any) -> None:
         self.controller = controller
+        registry = getattr(controller, "_card_mutations", None)
+        self._mutation_registry = registry if isinstance(registry, CardMutations) else None
+        self._mutation_epoch = self._mutation_registry.epoch if self._mutation_registry is not None else 0
         self.home = controller._profile_home
         self._profile_home = self.home
         self.buffer = review_buffer(self.home)

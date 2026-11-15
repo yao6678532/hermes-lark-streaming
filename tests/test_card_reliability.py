@@ -527,3 +527,68 @@ def test_startup_contract_detects_removed_required_parameters():
     errors = adapter_contract_errors(Broken)
     assert any("FeishuAdapter.send:" in error for error in errors)
     assert any("on_processing_complete missing" in error for error in errors)
+
+
+@pytest.mark.asyncio
+async def test_rearmed_transport_fences_old_client_and_old_context_without_replacing_locks():
+    from hermes_lark_streaming.card_mutations import MUTATION_SCOPE
+
+    server = Server()
+    old = client_for(server)
+    ident = await old.cardkit_create(card())
+    await old.reply_card_by_id("anchor", ident)
+    registry = old.mutations
+    lock, doc = registry.state(ident).lock, registry.documents[ident]
+    old_epoch = registry.epoch
+    registry.stopping = True
+    registry.rearm()
+    fresh = client_for(server)
+    fresh._mutations = registry
+    with pytest.raises(RuntimeError, match="retired transport"):
+        await old.cardkit_update(ident, card("old", False))
+    token = MUTATION_SCOPE.set((id(registry), old_epoch))
+    try:
+        with pytest.raises(RuntimeError, match="retired transport"):
+            await fresh.cardkit_update(ident, card("old continuation", False))
+    finally:
+        MUTATION_SCOPE.reset(token)
+    await fresh.cardkit_update(ident, card("new transport", False))
+    assert registry.state(ident).lock is lock and registry.documents[ident] is doc
+    assert lookup(server.cards[ident], "answer")["content"] == "new transport"
+
+
+@pytest.mark.asyncio
+async def test_rearm_rejects_result_from_an_operation_that_started_before_disconnect():
+    registry = CardMutations()
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def call(seq, uid):
+        started.set()
+        await release.wait()
+
+    task = asyncio.create_task(registry.run("card", sequence=1, operation_id=None, call=call, reopen=call))
+    await started.wait()
+    lock = registry.state("card").lock
+    registry.stopping = True
+    registry.rearm()
+    release.set()
+    with pytest.raises(RuntimeError, match="retired transport"):
+        await task
+    assert registry.state("card").lock is lock
+
+
+@pytest.mark.asyncio
+async def test_independent_delivery_client_does_not_inherit_another_transports_shutdown():
+    from hermes_lark_streaming.card_mutations import MUTATION_SCOPE
+
+    retired = CardMutations()
+    retired.stopping = True
+    token = MUTATION_SCOPE.set((id(retired), retired.epoch))
+    try:
+        server = Server()
+        independent = client_for(server)
+        ident = await independent.cardkit_create(card("Independent Cron delivery", False))
+        await independent.send_card_id_to_chat("cron-chat", ident)
+        assert len(server.messages) == 1
+    finally:
+        MUTATION_SCOPE.reset(token)
