@@ -63,7 +63,7 @@ jobs:
           for probe in platform tool-receipts regression; do
             "$TEST_PYTHON" scripts/verify_native_compatibility.py --source ../host \
               --expected-revision "$HERMES_REVISION" --probe "$probe" --fixture-source ../host \
-              --report "reports/$probe.json" > "reports/$probe.log" 2>&1 || status=1
+              --report "reports/$probe.json" > "reports/$probe.console.log" 2>&1 || status=1
           done
           exit "$status"
       - name: Publish acceptance evidence

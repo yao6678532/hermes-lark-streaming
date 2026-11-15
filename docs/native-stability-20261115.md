@@ -59,3 +59,5 @@ Machine backup/restore instructions are private because they include credentials
 PM selection and message data. Rollback restores plugin/selection/configuration
 and service state while retaining messages and receipts written after cutover;
 never overwrite a live database with the pre-upgrade snapshot.
+
+Completed execution: [acceptance and rollout record](stability-20261115/EXECUTION.md).
