@@ -230,7 +230,8 @@ async def exercise(factory: Any, provider: Any) -> dict[str, bool]:
         checks.update(await clarify_and_static_checks(adapter, client))
         checks.update(await approval_checks(adapter))
         checks.update(await profile_isolation_checks(adapter, client))
-        checks.update(await review_delivery_checks(adapter, client, provider, agent))
+        checks.update(await review_delivery_checks(adapter, client, provider, agent, key))
+        checks.update(await stability_checks(adapter, client))
         return checks
     finally:
         clear_session_vars(tokens)
@@ -305,6 +306,7 @@ async def boundary_checks(adapter: Any, client: Any) -> dict[str, bool]:
 
     stopped, key, token = await start("stopped")
     await adapter.send(source.chat_id, "Partial stopped answer", metadata={"expect_edits": True})
+    stopped_turn = adapter.bridge.messages[stopped.message_id]
     invoke_hook(
         "agent_loop_stopped",
         session_key=key,
@@ -313,7 +315,6 @@ async def boundary_checks(adapter: Any, client: Any) -> dict[str, bool]:
         invalidation_reason="stop_command",
     )
     await adapter.bridge.drain()
-    stopped_turn = adapter.bridge.messages[stopped.message_id]
     assert stopped_turn.completed and stopped_turn.interrupted and stopped_turn.stop_command
     checks["official_stop_hook_seals_card_and_preserves_continue_hint"] = True
     clear_session_vars(token)
@@ -394,7 +395,7 @@ async def boundary_checks(adapter: Any, client: Any) -> dict[str, bool]:
     return checks
 
 
-async def review_delivery_checks(adapter: Any, client: Any, provider: Any, parent: Any) -> dict[str, bool]:
+async def review_delivery_checks(adapter: Any, client: Any, provider: Any, parent: Any, key: str) -> dict[str, bool]:
     from agent.background_review import _run_review_in_thread, summarize_background_review_actions
     from agent.i18n import t
     from gateway.session_context import set_session_vars
@@ -436,11 +437,10 @@ async def review_delivery_checks(adapter: Any, client: Any, provider: Any, paren
     # real producer dispatch stay active; only the debounce timer is held.
     # Hermes session vars are deliberately not nestable: boundary scenarios
     # cleared them, so bind the real parent chat again before the fork.
-    turn = adapter.bridge.messages["native-inbound"]
     set_session_vars(
         platform="feishu",
         chat_id="native-chat",
-        session_key=turn.session_key,
+        session_key=key,
         session_id="native-conversation",
         message_id="native-inbound",
     )
@@ -706,6 +706,10 @@ async def profile_isolation_checks(primary: Any, primary_client: Any) -> dict[st
 
     home = primary.cards._profile_home / "profiles/native-b"
     home.mkdir(parents=True)
+    (home / "plugins").mkdir()
+    (home / "plugins/hermes-lark-streaming").symlink_to(
+        Path(__file__).resolve().parent.parent, target_is_directory=True
+    )
     config = json.loads(json.dumps(primary.cards._cfg._reload()))
     config["plugins"]["enabled"] = ["platforms/feishu", "hermes-lark-streaming"]
     config["feishu"] = {"app_id": "offline-b", "app_secret": "offline-secret-b"}
@@ -784,4 +788,134 @@ async def profile_isolation_checks(primary: Any, primary_client: Any) -> dict[st
     return {
         "real_registered_adapters_isolate_identical_chat_message_session_and_turn_ids": True,
         "secondary_profile_uses_resolved_own_credentials_and_controller": True,
+    }
+
+
+async def stability_checks(adapter: Any, client: Any) -> dict[str, bool]:
+    """Actual inherited interactive methods, shutdown and ownership after retirement."""
+    import time
+
+    from gateway.config import Platform
+    from gateway.platforms.event import MessageEvent, ProcessingOutcome
+    from gateway.session import SessionSource
+    from plugins.platforms.feishu.adapter import FeishuAdapter
+
+    from hermes_lark_streaming.streaming.session import SessionState
+
+    source = SessionSource(platform=Platform.FEISHU, chat_id="command-chat", user_id="command-owner")
+    event = MessageEvent(text="/status", message_id="command-inbound", source=source)
+    await adapter.on_processing_start(event)
+    result = await adapter.send(source.chat_id, "Ordinary command response", metadata={"notify": True})
+    turn = adapter.bridge.messages[event.message_id]
+    await adapter.on_processing_complete(event, ProcessingOutcome.SUCCESS)
+    assert result.success and turn.completed
+    late = await adapter.edit_message(source.chat_id, result.message_id, "old edit", finalize=True)
+    assert late.success and result.message_id not in adapter._card_messages
+    with patch.object(FeishuAdapter, "edit_message", new=AsyncMock()) as edit:
+        unknown = await adapter.edit_message(source.chat_id, "unknown-old-card", "late")
+        cross = await adapter.edit_message("another-chat", result.message_id, "late")
+        assert not unknown.success and not cross.success and not edit.called
+    adapter._client = object()
+    network = AsyncMock(
+        return_value=type(
+            "Response",
+            (),
+            {"code": 0, "success": lambda _self: True, "data": type("Data", (), {"message_id": "official-card"})()},
+        )()
+    )
+    with patch.object(adapter, "_feishu_send_with_retry", new=network):
+        picker = await adapter.send_choice_picker(
+            source.chat_id, "Choose", [{"label": "Yes", "value": "yes"}], "picker-session", lambda _: None
+        )
+        prompt = await adapter.send_update_prompt(source.chat_id, "Install update?", session_key="update-session")
+    assert picker.success and prompt.success
+    payloads = [json.loads(call.kwargs["payload"]) for call in network.await_args_list]
+    assert "hermes_choice_picker_action" in json.dumps(payloads[0])
+    assert "hermes_update_prompt_action" in json.dumps(payloads[1])
+    assert "hermes_lark_action" not in json.dumps(payloads)
+    assert adapter._choice_picker_state and adapter._update_prompt_state
+
+    # Three independent cards: one hangs, one fails, the other still closes.
+    turns = []
+    ids = []
+    for i in range(3):
+        src = SessionSource(platform=Platform.FEISHU, chat_id=f"shutdown-{i}", user_id="owner")
+        evt = MessageEvent(text="work", message_id=f"shutdown-in-{i}", source=src)
+        key = adapter._event_session_key(evt)
+        turn = adapter.bridge.admit(evt, key)
+        assert await adapter.bridge.ensure_card(turn)
+        session = adapter.cards._sessions[evt.message_id]
+        if i == 1:
+            session.state = SessionState.CLARIFY_PAUSED
+        turns.append(turn)
+        ids.append(session.card_id)
+    attempted = []
+
+    async def close(ident, **_kwargs):
+        attempted.append(ident)
+        if ident == ids[0]:
+            await asyncio.Event().wait()
+        if ident == ids[1]:
+            raise RuntimeError("injected single-card close failure")
+
+    client.cardkit_close_streaming.side_effect = close
+
+    # A fourth task is still creating its placeholder.
+    async def creating(*_a, **_kw):
+        await asyncio.Event().wait()
+
+    client.cardkit_create.side_effect = creating
+    src = SessionSource(platform=Platform.FEISHU, chat_id="creating", user_id="owner")
+    evt = MessageEvent(text="work", message_id="shutdown-creating", source=src)
+    turn = adapter.bridge.admit(evt, adapter._event_session_key(evt))
+    adapter.cards.on_message_started(message_id=turn.message_id, chat_id=turn.chat_id, session_key=turn.session_key)
+    creation = adapter.cards._sessions[turn.message_id].create_task
+    await asyncio.sleep(0)
+    from hermes_lark_streaming.native_reviews import NativeReviews
+    from hermes_lark_streaming.review_receipts import ReviewReceiptBuffer
+
+    assert adapter.reviews.buffer.capture(
+        profile_home=adapter.cards._profile_home,
+        chat_id="shutdown-receipt",
+        session_key="receipt-key",
+        platform="feishu",
+        origin="background_review",
+        payload={
+            "tool_name": "memory",
+            "args": {"action": "add", "target": "memory", "content": "audit"},
+            "result": {"success": True, "message": "Memory updated"},
+            "conversation_id": "receipt-session",
+            "turn_id": "receipt-turn",
+            "tool_call_id": "receipt-tool",
+        },
+    )
+    with patch.object(adapter.cards, "_deliver_agent_status", new=AsyncMock(return_value=False)) as delivery:
+        assert not await adapter.reviews.deliver("shutdown-receipt")
+        assert not await NativeReviews(adapter.cards).deliver("shutdown-receipt")
+        first, second = [call.kwargs["event"] for call in delivery.await_args_list]
+        assert first.delivery_uuid and first.delivery_uuid == second.delivery_uuid
+    before = time.monotonic()
+    with (
+        patch("hermes_lark_streaming.native_adapter.SHUTDOWN_BUDGET_SEC", 0.05),
+        patch("hermes_lark_streaming.native_runtime.record_adapter", side_effect=OSError("injected record failure")),
+        patch.object(FeishuAdapter, "disconnect", new=AsyncMock()) as disconnected,
+    ):
+        await adapter.disconnect()
+        disconnected.assert_awaited_once()
+    assert time.monotonic() - before < 0.5
+    assert set(attempted) >= set(ids) and creation.done()
+    reopened = ReviewReceiptBuffer(adapter.cards._profile_home / "plugin-data/hermes-lark-streaming/reviews.sqlite3")
+    assert len(reopened.snapshot(adapter.cards._profile_home, "shutdown-receipt").receipts) == 1
+    assert adapter.history is adapter.bridge.finished
+    assert not adapter.bridge.messages and not adapter.bridge.turns and not adapter.cards._sessions
+    assert not (await adapter.send("chat", "late")).success
+    assert not (await adapter.send_or_update_status("chat", "status-key", "late")).success
+    return {
+        "receipt_confirmation_uuid_survives_delivery_reconstruction_without_schema_change": True,
+        "shutdown_keeps_unacknowledged_receipts_in_existing_journal": True,
+        "ordinary_slash_command_stays_cardified": True,
+        "official_picker_and_update_prompt_coexist_with_custom_clarify_and_approval": True,
+        "completed_card_edit_is_idempotent_and_unknown_or_cross_chat_edit_fails_closed": True,
+        "shutdown_bounds_hanging_card_cancels_creation_and_disconnects_builtin": True,
+        "shutdown_single_card_failure_does_not_block_other_cards": True,
     }

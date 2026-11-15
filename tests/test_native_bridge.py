@@ -17,7 +17,8 @@ from hermes_lark_streaming.streaming.segments import SegmentType
 
 def event(message="inbound", anchor=None):
     return SimpleNamespace(
-        message_id=message, reply_to_message_id=anchor,
+        message_id=message,
+        reply_to_message_id=anchor,
         source=SimpleNamespace(chat_id="chat", user_id="owner", user_id_alt=None),
     )
 
@@ -25,7 +26,8 @@ def event(message="inbound", anchor=None):
 def bridge_for(tmp_path):
     (tmp_path / "config.yaml").write_text(
         "streaming: {enabled: true}\nfeishu: {app_id: app, app_secret: secret}\n"
-        "display: {platforms: {feishu: {show_reasoning: true}}}\n")
+        "display: {platforms: {feishu: {show_reasoning: true}}}\n"
+    )
     ctrl = StreamCardController(tmp_path)
     ctrl._initialized = True
     ctrl._loop = asyncio.get_running_loop()
@@ -41,9 +43,16 @@ async def test_api_end_is_not_turn_end_and_final_snapshot_replaces_draft(tmp_pat
     turn = bridge.admit(event(), "session")
     await bridge.observe("start", "session", {"turn_id": "run", "api_call_count": 1})
     await bridge.frame(turn, "draft prefix", stream_id="segment-1", finalize=False)
-    await bridge.observe("usage", "session", {
-        "turn_id": "run", "api_call_count": 1, "api_request_id": "api-1", "_answer": "Final corrected answer",
-    })
+    await bridge.observe(
+        "usage",
+        "session",
+        {
+            "turn_id": "run",
+            "api_call_count": 1,
+            "api_request_id": "api-1",
+            "_answer": "Final corrected answer",
+        },
+    )
     await bridge.frame(turn, "Final corrected answer", stream_id="segment-1", finalize=True)
     assert not turn.completed
     session = bridge.controller._sessions[turn.message_id]
@@ -57,15 +66,36 @@ async def test_authoritative_reasoning_repairs_dropped_deltas_and_rejects_late_d
     bridge = bridge_for(tmp_path)
     turn = bridge.admit(event(), "session")
     await bridge.observe("start", "session", {"turn_id": "run", "api_call_count": 1})
-    await bridge.observe("reasoning", "session", {
-        "turn_id": "run", "iteration": 1, "kind": "reasoning", "delta": "broken prefix",
-    })
-    await bridge.observe("usage", "session", {
-        "turn_id": "run", "api_call_count": 1, "api_request_id": "api-1", "_reasoning": "Complete reasoning",
-    })
-    await bridge.observe("reasoning", "session", {
-        "turn_id": "run", "iteration": 1, "kind": "reasoning", "delta": " late duplicate",
-    })
+    await bridge.observe(
+        "reasoning",
+        "session",
+        {
+            "turn_id": "run",
+            "iteration": 1,
+            "kind": "reasoning",
+            "delta": "broken prefix",
+        },
+    )
+    await bridge.observe(
+        "usage",
+        "session",
+        {
+            "turn_id": "run",
+            "api_call_count": 1,
+            "api_request_id": "api-1",
+            "_reasoning": "Complete reasoning",
+        },
+    )
+    await bridge.observe(
+        "reasoning",
+        "session",
+        {
+            "turn_id": "run",
+            "iteration": 1,
+            "kind": "reasoning",
+            "delta": " late duplicate",
+        },
+    )
     session = bridge.controller._sessions[turn.message_id]
     assert [s.text for s in session.active_segments() if s.type == SegmentType.REASONING] == ["Complete reasoning"]
     assert await bridge.complete(turn)
@@ -102,9 +132,15 @@ async def test_raw_provider_answer_is_never_rendered_without_host_transport(tmp_
     bridge = bridge_for(tmp_path)
     turn = bridge.admit(event(), "session")
     await bridge.observe("start", "session", {"api_call_count": 1})
-    await bridge.observe("usage", "session", {
-        "api_call_count": 1, "api_request_id": "api", "_answer": "PRIVATE untransformed model draft",
-    })
+    await bridge.observe(
+        "usage",
+        "session",
+        {
+            "api_call_count": 1,
+            "api_request_id": "api",
+            "_answer": "PRIVATE untransformed model draft",
+        },
+    )
     await bridge.frame(turn, "Host approved final", stream_id="frame", finalize=True)
     assert await bridge.complete(turn)
     card = bridge.controller._client.cardkit_update.await_args.args[1]
@@ -126,10 +162,16 @@ async def test_native_reconciliation_keeps_every_answer_once_across_rollover(tmp
             await bridge.frame(turn, f"Unique answer {iteration}.", stream_id=str(iteration), finalize=False)
             session = bridge.controller._sessions[turn.message_id]
             await bridge.controller._do_flush(session)
-            await bridge.observe("usage", "session", {
-                "api_call_count": iteration, "api_request_id": f"request-{iteration}",
-                "_reasoning": f"Unique reasoning {iteration}.", "_answer": f"Unique answer {iteration}.",
-            })
+            await bridge.observe(
+                "usage",
+                "session",
+                {
+                    "api_call_count": iteration,
+                    "api_request_id": f"request-{iteration}",
+                    "_reasoning": f"Unique reasoning {iteration}.",
+                    "_answer": f"Unique answer {iteration}.",
+                },
+            )
             await bridge.controller._do_flush(session)
         assert await bridge.complete(turn)
     assert client.cardkit_create.await_count > 1, "Test did not exercise real card rollover"
@@ -138,3 +180,46 @@ async def test_native_reconciliation_keeps_every_answer_once_across_rollover(tmp
     for iteration in range(1, 9):
         assert bodies.count(f"Unique answer {iteration}.") == 1, bodies
         assert bodies.count(f"Unique reasoning {iteration}.") == 1, bodies
+
+
+@pytest.mark.asyncio
+async def test_host_owned_silent_tools_and_interactions_survive_gc_then_release_heavy_indexes(tmp_path):
+    bridge = bridge_for(tmp_path)
+    ctrl = bridge.controller
+    ctrl._native_owned = lambda s: s.message_id in bridge.messages
+    turn = bridge.admit(event(), "session")
+    await bridge.frame(turn, "body", stream_id="stream", finalize=False)
+    session = ctrl._sessions[turn.message_id]
+    session.created_at = session.last_activity_at = 0
+    ctrl._prune_stale_sessions()
+    assert ctrl._sessions[turn.message_id] is session
+    for kind in ("clarify", "approval"):
+        await bridge.observe("human_request", "session", {"kind": kind, "request_id": kind})
+        ctrl._prune_stale_sessions()
+        assert ctrl._sessions[turn.message_id] is session
+        await bridge.observe("human_resolved", "session", {"kind": kind, "request_id": kind})
+    await bridge.complete(turn)
+    assert not bridge.messages and not bridge.turns and not ctrl._sessions and not ctrl._session_keys
+    assert not turn.answer_segments and not turn.context and not turn.requests
+    assert bridge.finished.get(turn.message_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_orphan_gc_seals_before_detaching_latest_snapshot(tmp_path):
+    bridge = bridge_for(tmp_path)
+    turn = bridge.admit(event(), "session")
+    await bridge.frame(turn, "orphan body", stream_id="stream", finalize=False)
+    ctrl = bridge.controller
+    session = ctrl._sessions[turn.message_id]
+    session.created_at = session.last_activity_at = 0
+    ctrl._native_owned = lambda _s: False
+    ctrl._prune_stale_sessions()
+    for _ in range(30):
+        await asyncio.sleep(0)
+        if not ctrl._sessions:
+            break
+    assert not ctrl._sessions
+    from hermes_lark_streaming.agent_status import conversation_key
+
+    ref = ctrl._agent_status_manager.registry.get(conversation_key("chat"))
+    assert ref.finalized and "orphan body" in json.dumps(ref.card_snapshot)

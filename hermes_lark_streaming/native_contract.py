@@ -13,7 +13,6 @@ CALLS: dict[str, dict[str, Any]] = {
     "on_processing_start": {"event": None},
     "on_processing_complete": {"event": None, "outcome": None},
     "max_message_length_for_chat": {"chat_id": ""},
-    "send_or_update_status": {"chat_id": "", "status_key": "", "content": "", "metadata": {}},
     "connect": {"is_reconnect": False},
     "disconnect": {},
     "send": {"chat_id": "", "content": "", "reply_to": None, "metadata": {}},

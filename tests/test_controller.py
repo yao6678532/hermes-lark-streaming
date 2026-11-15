@@ -628,11 +628,19 @@ def test_prune_stale_sessions_ignores_none_key_and_prunes_valid_key() -> None:
     ctrl = StreamCardController()
     stale_session = SimpleNamespace(
         created_at=time.time() - ctrl._session_ttl - 1,
+        last_activity_at=time.time() - ctrl._session_ttl - 1,
+        state=SessionState.IDLE,
+        chat_id="chat",
+        has_card=False,
         flush=_DummyFlush(),
         image_resolver=None,
     )
     valid_stale_session = SimpleNamespace(
         created_at=time.time() - ctrl._session_ttl - 1,
+        last_activity_at=time.time() - ctrl._session_ttl - 1,
+        state=SessionState.IDLE,
+        chat_id="chat",
+        has_card=False,
         flush=_DummyFlush(),
         image_resolver=None,
     )
