@@ -1,74 +1,86 @@
-name: Tests
-
+name: Native Hermes tests
 on:
   push:
-    branches: [main, compat/hermes-v0.21.7]
+    branches: [main]
   pull_request:
   workflow_dispatch:
-
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        default: 3b421578588243f920886e6fe79a6faa87ea026e
 permissions:
   contents: read
-
 jobs:
-  test:
+  native:
     runs-on: ubuntu-latest
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: '1'
+      HERMES_REVISION: ${{ inputs.revision || '3b421578588243f920886e6fe79a6faa87ea026e' }}
+    defaults:
+      run:
+        working-directory: plugin
     steps:
       - uses: actions/checkout@v6
-
-      - name: Configure Hermes test home
-        run: echo "HERMES_HOME=$RUNNER_TEMP/hermes-test-sources" >> "$GITHUB_ENV"
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install -e ".[dev]"
-
-      - name: Run ruff
-        run: python -m ruff check .
-
-      - name: Run mypy
-        run: python -m mypy hermes_lark_streaming/
-
-      - name: Fetch pinned Hermes test sources
-        run: |
-          revisions=$(PYTHONPATH=tests python -c 'from hermes_sources import LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION, TRANSITION_REVISION, MODULAR_REVISION; print(LEGACY_REVISION, SPLIT_REVISION, SPLIT_LEDGER_REVISION, TARGET_REVISION, TRANSITION_REVISION, MODULAR_REVISION)')
-          target_revision=$(PYTHONPATH=tests python -c 'from hermes_sources import TARGET_REVISION; print(TARGET_REVISION)')
-          git init "$HERMES_HOME/hermes-agent"
-          git -C "$HERMES_HOME/hermes-agent" fetch --no-tags --depth=1 https://github.com/NousResearch/hermes-agent.git $revisions
-          git -C "$HERMES_HOME/hermes-agent" checkout --detach "$target_revision"
-
-      - name: Run tests
-        run: TZ=UTC PYTHONPATH="$HERMES_HOME/hermes-agent${PYTHONPATH:+:$PYTHONPATH}" python -m pytest tests/ -v
-
-  runtime:
-    name: Hermes ${{ matrix.hermes }} runtime
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - hermes: '0.21.3'
-            revision: '345cd2b057a452236de401d3534b8502a7465e8d'
-            python: '3.11'
-          - hermes: '0.21.7'
-            revision: '71d34bad1045610252eda02ee79549436896e784'
-            python: '3.14'
-    steps:
+          path: plugin
+          persist-credentials: false
       - uses: actions/checkout@v6
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ env.HERMES_REVISION }}
+          path: host
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
-          python-version: ${{ matrix.python }}
-      - name: Fetch pinned complete Hermes tree
-        env:
-          HERMES_REVISION: ${{ matrix.revision }}
+          python-version: '3.14'
+      - name: Prepare historical cleanup fixtures
         run: |
-          git init "$RUNNER_TEMP/hermes-runtime"
-          git -C "$RUNNER_TEMP/hermes-runtime" fetch --depth=1 https://github.com/NousResearch/hermes-agent.git "$HERMES_REVISION"
-          git -C "$RUNNER_TEMP/hermes-runtime" checkout --detach "$HERMES_REVISION"
-      - name: Install declared runtime dependencies
-        run: python -m pip install -e "$RUNNER_TEMP/hermes-runtime[feishu]" -e ".[dev]"
-      - name: Verify source, staging lifecycle, imports and actual callback wiring
-        run: python scripts/verify_hermes_runtime.py --source "$RUNNER_TEMP/hermes-runtime"
+          python - <<'PY'
+          import subprocess
+          # Parse constants without importing pytest or fetching during the offline audit.
+          import ast
+          tree = ast.parse(open('tests/hermes_sources.py').read())
+          revisions = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                       and any(isinstance(t, ast.Name) and t.id.endswith('_REVISION') for t in n.targets)]
+          subprocess.run(['git', '-C', '../host', 'fetch', '--no-tags', '--depth=1', 'origin', *revisions], check=True)
+          PY
+      - name: Prepare isolated environments through official PM
+        id: pm
+        run: python scripts/prepare_native_ci.py --source ../host --expected-revision "$HERMES_REVISION" --out "$RUNNER_TEMP/hls-pm"
+      - name: Lint and types
+        env:
+          LINT_PYTHON: ${{ steps.pm.outputs.lint_python }}
+        run: |
+          "$LINT_PYTHON" -m ruff check .
+          "$LINT_PYTHON" -m mypy hermes_lark_streaming/
+      - name: Full offline native runtime acceptance
+        env:
+          TEST_PYTHON: ${{ steps.pm.outputs.test_python }}
+        run: |
+          mkdir -p reports
+          status=0
+          for probe in platform tool-receipts regression; do
+            "$TEST_PYTHON" scripts/verify_native_compatibility.py --source ../host \
+              --expected-revision "$HERMES_REVISION" --probe "$probe" --fixture-source ../host \
+              --report "reports/$probe.json" > "reports/$probe.log" 2>&1 || status=1
+          done
+          exit "$status"
+      - name: Publish acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ env.HERMES_REVISION }}-${{ github.sha }}
+          path: plugin/reports/
+          if-no-files-found: warn
+      - name: Job summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('Host commit: `' + os.environ['HERMES_REVISION'] + '`\n\n')
+              for path in sorted(Path('reports').glob('*.json')):
+                  r=json.loads(path.read_text());out.write(f"- {path.stem}: **{r.get('status','error')}**\n")
+          PY

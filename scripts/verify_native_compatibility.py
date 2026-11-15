@@ -172,7 +172,7 @@ def stream_observer_probe() -> dict[str, Any]:
     }
 
 
-def worker(source: Path, probe: str = "baseline") -> dict[str, Any]:
+def worker(source: Path, probe: str = "baseline", expected_revision: str = TARGET_REVISION) -> dict[str, Any]:
     import socket
 
     warnings.simplefilter("always", RuntimeWarning)
@@ -227,7 +227,8 @@ def worker(source: Path, probe: str = "baseline") -> dict[str, Any]:
         "Audit must leave all tracked host files unchanged"
     )
     report = {
-        "hermes_release": "v0.23.1", "hermes_revision": TARGET_REVISION,
+        "hermes_release": "v0.23.1" if expected_revision == TARGET_REVISION else "candidate",
+        "hermes_revision": expected_revision,
         "python": sys.version.split()[0],
         "host_sources_unchanged": before == after, "host_source_sha256": after,
         "plugin_source_sha256": plugin_before,
@@ -249,6 +250,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--expected-revision", default=TARGET_REVISION, help="Exact immutable host commit to audit")
     parser.add_argument("--probe", choices=("baseline", "tool-receipts", "platform", "regression"), default="baseline")
     parser.add_argument(
         "--fixture-source", type=Path, help="Local Hermes git repository containing pinned legacy fixtures",
@@ -257,8 +259,10 @@ def main() -> int:
     args = parser.parse_args()
     source = args.source.resolve()
     revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"], text=True).strip()
-    if revision != TARGET_REVISION:
-        parser.error(f"Expected pinned Hermes {TARGET_REVISION}, got {revision}")
+    if len(args.expected_revision) != 40 or any(c not in "0123456789abcdef" for c in args.expected_revision):
+        parser.error("--expected-revision must be a full lowercase commit SHA")
+    if revision != args.expected_revision:
+        parser.error(f"Expected pinned Hermes {args.expected_revision}, got {revision}")
     if subprocess.run(["git", "-C", str(source), "diff", "--quiet", "HEAD"]).returncode:
         parser.error("Target Hermes must have no tracked source changes")
     if args.worker:
@@ -268,7 +272,7 @@ def main() -> int:
             or Path(os.environ.get("HERMES_HOME", "")).resolve() != Path(worker_root).resolve() / ".hermes"
         ):
             parser.error("Internal worker requires the parent's disposable HOME")
-        print(RESULT_PREFIX + json.dumps(worker(source, args.probe), ensure_ascii=False))
+        print(RESULT_PREFIX + json.dumps(worker(source, args.probe, args.expected_revision), ensure_ascii=False))
         return 0
     plugin = Path(__file__).resolve().parent.parent
     with tempfile.TemporaryDirectory(prefix="hls-native-audit-") as directory:
@@ -287,10 +291,18 @@ def main() -> int:
                 parser.error("--probe regression requires --fixture-source")
             env["HLS_AUDIT_FIXTURE_SOURCE"] = str(args.fixture_source.resolve())
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).resolve()), "--source", str(source), "--worker", "--probe", args.probe],
+            [sys.executable, str(Path(__file__).resolve()), "--source", str(source), "--worker", "--probe", args.probe,
+             "--expected-revision", args.expected_revision],
             cwd=source, env=env, capture_output=True, text=True, timeout=600 if args.probe == "regression" else 90,
         )
         if result.returncode:
+            if args.report:
+                args.report.parent.mkdir(parents=True, exist_ok=True)
+                args.report.write_text(json.dumps({
+                    "status": "error", "hermes_revision": revision, "probe": args.probe,
+                    "exit_code": result.returncode, "stderr": result.stderr[-16000:],
+                    "stdout": result.stdout[-8000:],
+                }, indent=2))
             sys.stderr.write(result.stderr)
             sys.stderr.write(result.stdout)
             return 1
@@ -300,6 +312,8 @@ def main() -> int:
         if len(lines) != 1:
             raise RuntimeError("Worker did not return exactly one audit result")
         report = json.loads(lines[0][len(RESULT_PREFIX):])
+        if args.probe == "regression" and report["regression"]["counts"].get("skipped", 0):
+            report["status"] = "blocked"
         lifecycle_warnings = [
             line for line in result.stderr.splitlines()
             if "was never awaited" in line or "Task was destroyed but it is pending" in line

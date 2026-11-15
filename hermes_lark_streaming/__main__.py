@@ -14,7 +14,7 @@ PLUGIN_NAME = "hermes-lark-streaming"
 
 
 def native_status() -> dict[str, Any]:
-    from .native_plugin import NATIVE_HOOKS, legacy_files
+    from .native_plugin import NATIVE_HOOKS, check_host, legacy_files
 
     try:
         from hermes_cli import plugins  # type: ignore[import-not-found]
@@ -27,8 +27,15 @@ def native_status() -> dict[str, Any]:
     residue = legacy_files(root)
     missing = sorted(set(NATIVE_HOOKS) - plugins.VALID_HOOKS)
     compatible = not missing and callable(getattr(plugins.PluginContext, "register_platform", None)) and not residue
+    interface_error = None
+    if compatible:
+        try:
+            check_host()
+        except (ImportError, RuntimeError) as error:
+            compatible, interface_error = False, str(error)
     result: dict[str, Any] = {
         "compatible": compatible,
+        "error": interface_error,
         "host": str(root),
         "legacy_injections": [str(path) for path in residue],
         "missing_hooks": missing,
@@ -50,6 +57,15 @@ def native_status() -> dict[str, Any]:
             and entry.plugin_name == PLUGIN_NAME
             and getattr(entry.adapter_factory, "__name__", "") == "FeishuStreamingAdapter"
         )
+        from hermes_cli.config import read_raw_config  # type: ignore[import-not-found]
+
+        settings = read_raw_config().get("plugins") or {}
+        expected = PLUGIN_NAME in (settings.get("enabled") or []) and PLUGIN_NAME not in (
+            settings.get("disabled") or []
+        )
+        if expected and not result["plugin_enabled"]:
+            result["compatible"] = False
+            result["error"] = "Plugin is enabled in configuration but its native adapter did not load"
     return result
 
 

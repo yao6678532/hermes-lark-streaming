@@ -1,59 +1,73 @@
-name: Hermes Upgrade Compatibility Check
-
+name: New stable Hermes compatibility
 on:
+  schedule:
+    - cron: '17 2 * * *'
   workflow_dispatch:
     inputs:
       target_revision:
-        description: 'Hermes tag or commit SHA to validate'
-        required: true
+        description: Optional Hermes ref; empty checks the latest final release
+        required: false
         type: string
-
 permissions:
   contents: read
-
 jobs:
-  check:
+  resolve:
     runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.resolve.outputs.revision }}
+      needed: ${{ steps.needed.outputs.needed }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Fetch consistent Hermes source tree
-        uses: actions/checkout@v6
         with:
-          repository: NousResearch/hermes-agent
-          ref: ${{ inputs.target_revision }}
-          path: hermes-source
           persist-credentials: false
-          sparse-checkout: |
-            gateway
-            cron
-            plugins/platforms/feishu
-
-      - name: Show checked-out Hermes revision
-        run: |
-          echo "Requested Hermes revision: ${{ inputs.target_revision }}"
-          git -C hermes-source rev-parse HEAD
-
-      - name: Set up Python
-        uses: actions/setup-python@v6
+      - uses: actions/setup-python@v6
         with:
-          python-version: '3.11'
-
-      - name: Install plugin
-        run: pip install -e .
-
-      - name: Run verify
+          python-version: '3.14'
+      - name: Resolve immutable published commit
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_REF: ${{ inputs.target_revision }}
+        run: python scripts/check_native_release.py --ref "$REQUESTED_REF"
+      - uses: actions/cache/restore@v4
+        id: seen
+        with:
+          path: ${{ runner.temp }}/native-compat-result.json
+          key: native-compat-v1-${{ github.sha }}-${{ steps.resolve.outputs.revision }}
+      - id: needed
+        env:
+          HOST_SHA: ${{ steps.resolve.outputs.revision }}
+          SEEN: ${{ steps.seen.outputs.cache-hit }}
+          MANUAL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
-          python -c "
-          import pathlib
-          from hermes_lark_streaming.patcher import Patcher, CronPatcher, FeishuAdapterPatcher
-          p = Patcher(pathlib.Path('hermes-source/gateway/run.py'))
-          p.verify_target()
-          fp = FeishuAdapterPatcher(
-              pathlib.Path('hermes-source/plugins/platforms/feishu/adapter.py')
-          )
-          fp.verify_target()
-          cp = CronPatcher(pathlib.Path('hermes-source/cron/scheduler.py'))
-          cp.verify_target()
-          print('Source/AST contracts passed for Gateway, Feishu adapter, and Cron; runtime imports were not tested.')
-          "
+          python - <<'PY'
+          import os
+          needed=os.environ['SEEN']!='true' and (os.environ['MANUAL']=='true' or os.environ['HOST_SHA']!='3b421578588243f920886e6fe79a6faa87ea026e')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as out:out.write('needed='+str(needed).lower()+'\n')
+          PY
+  candidate:
+    needs: resolve
+    if: needs.resolve.outputs.needed == 'true'
+    uses: ./.github/workflows/test.yml
+    with:
+      revision: ${{ needs.resolve.outputs.revision }}
+  remember:
+    needs: [resolve, candidate]
+    if: always() && needs.resolve.outputs.needed == 'true' && (needs.candidate.result == 'success' || needs.candidate.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Record tested combination
+        env:
+          RESULT: ${{ needs.candidate.result }}
+          HOST_SHA: ${{ needs.resolve.outputs.revision }}
+          PLUGIN_SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path(os.environ['RUNNER_TEMP'],'native-compat-result.json').write_text(json.dumps({k:os.environ[k] for k in ('RESULT','HOST_SHA','PLUGIN_SHA')}))
+          PY
+      - uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/native-compat-result.json
+          key: native-compat-v1-${{ github.sha }}-${{ needs.resolve.outputs.revision }}

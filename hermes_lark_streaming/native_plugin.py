@@ -36,6 +36,13 @@ def check_host() -> None:
     # Registration can run on a deadline worker while the main thread imports
     # gateway.run. Importing it here would wait on the caller's import lock.
     root = Path(inspect.getfile(plugins)).resolve().parent.parent
+    from plugins.platforms.feishu.adapter import FeishuAdapter  # type: ignore[import-not-found]
+
+    from .native_contract import adapter_contract_errors
+
+    errors = adapter_contract_errors(FeishuAdapter)
+    if errors:
+        raise RuntimeError("Hermes adapter interfaces unavailable: " + "; ".join(errors))
     residue = legacy_files(root)
     if residue:
         raise RuntimeError("Legacy injection remains; use the saved old plugin to remove it first: "
