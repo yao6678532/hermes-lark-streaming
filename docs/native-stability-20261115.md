@@ -32,6 +32,9 @@ existing design and callback namespaces. Existing card builders remain unchanged
 - Necessary active writes renew streaming after 540 seconds; timeout recovery
   reopens at most once per operation. Explicitly closed/terminal/unavailable
   cards do not resume. No periodic renewal message is added.
+- Cached controllers use transport admission epochs on reconnection. Old clients, hooks and
+  continuations stay fenced; existing card locks, sequences and latest-footer references
+  remain intact. Reconnection replays pending reviews without reopening sealed streams.
 - Message confirmation retries use the same UUID. Unknown reference delivery
   keeps the known entity and an internal edit handle; final writes retry its
   confirmation. Persistently unknown message/final-write outcomes are reported

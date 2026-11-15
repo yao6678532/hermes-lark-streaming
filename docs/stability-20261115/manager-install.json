@@ -1,11 +1,11 @@
 {
-  "plugin_revision": "dac145851078a0046665a33dd4696b8cc4e9e3fe",
+  "plugin_revision": "f8b37c4d10241eef9fcaba2f360df9c6ae49bb43",
   "profiles": {
     "assistant": {
       "compatible": true,
       "plugin_enabled": true,
       "factory": "hermes_lark_streaming.native_adapter.FeishuStreamingAdapter",
-      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/5f1eac6fd6db42b88caf99acc9e77a41/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
+      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/e599271c630c4aa6bad928187dd10502/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
       "byte_hashes_matched": 53,
       "pm_manifest_normalization_verified": true,
       "dependencies": {
@@ -19,7 +19,7 @@
       "compatible": true,
       "plugin_enabled": true,
       "factory": "hermes_lark_streaming.native_adapter.FeishuStreamingAdapter",
-      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/5f1eac6fd6db42b88caf99acc9e77a41/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
+      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/e599271c630c4aa6bad928187dd10502/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
       "byte_hashes_matched": 53,
       "pm_manifest_normalization_verified": true,
       "dependencies": {
@@ -33,7 +33,7 @@
       "compatible": true,
       "plugin_enabled": true,
       "factory": "hermes_lark_streaming.native_adapter.FeishuStreamingAdapter",
-      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/5f1eac6fd6db42b88caf99acc9e77a41/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
+      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/e599271c630c4aa6bad928187dd10502/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
       "byte_hashes_matched": 53,
       "pm_manifest_normalization_verified": true,
       "dependencies": {
@@ -47,7 +47,7 @@
       "compatible": true,
       "plugin_enabled": true,
       "factory": "hermes_lark_streaming.native_adapter.FeishuStreamingAdapter",
-      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/5f1eac6fd6db42b88caf99acc9e77a41/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
+      "package": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/e599271c630c4aa6bad928187dd10502/workspace/plugin-sources/hermes-lark-streaming-28a3f3cc79ecc9f6",
       "byte_hashes_matched": 53,
       "pm_manifest_normalization_verified": true,
       "dependencies": {
@@ -61,5 +61,5 @@
   "disable_restores_builtin": true,
   "enable_restores_native": true,
   "shared_source": true,
-  "python": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/5f1eac6fd6db42b88caf99acc9e77a41/venv/bin/python"
+  "python": "/private/tmp/hls-stability-install-home/installs/28277bb7a1b64d10/environments/e599271c630c4aa6bad928187dd10502/venv/bin/python"
 }
