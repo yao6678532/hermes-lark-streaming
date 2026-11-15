@@ -1,265 +1,110 @@
-"""CLI 入口: python -m hermes_lark_streaming [install|uninstall|status|verify]。"""
+"""Native plugin management and read-only compatibility diagnostics."""
 
 from __future__ import annotations
 
+import argparse
+import inspect
+import json
+import subprocess
 import sys
-from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any
 
-if TYPE_CHECKING:
-    from .patcher import CronPatcher, FeishuAdapterPatcher, Patcher
+PLUGIN_NAME = "hermes-lark-streaming"
+
+
+def native_status() -> dict[str, Any]:
+    from .native_plugin import NATIVE_HOOKS, legacy_files
+
+    try:
+        from gateway.run import GatewayRunner  # type: ignore[import-not-found]
+        from hermes_cli import plugins  # type: ignore[import-not-found]
+    except ImportError as error:
+        return {"compatible": False, "error": str(error)}
+    root = Path(inspect.getfile(GatewayRunner)).resolve().parent.parent
+    from .config import hermes_home
+    from .native_runtime import running_adapter
+
+    residue = legacy_files(root)
+    missing = sorted(set(NATIVE_HOOKS) - plugins.VALID_HOOKS)
+    compatible = not missing and callable(getattr(plugins.PluginContext, "register_platform", None)) and not residue
+    result: dict[str, Any] = {
+        "compatible": compatible,
+        "host": str(root),
+        "legacy_injections": [str(path) for path in residue],
+        "missing_hooks": missing,
+        "registered_adapter": None,
+        "plugin_enabled": False,
+        "running_adapter": running_adapter(hermes_home()),
+    }
+    if compatible:
+        from gateway.platform_registry import platform_registry  # type: ignore[import-not-found]
+
+        manager = plugins.get_plugin_manager()
+        manager.discover_and_load()
+        entry = platform_registry.get("feishu")
+        if entry is not None:
+            factory = entry.adapter_factory
+            result["registered_adapter"] = f"{factory.__module__}.{factory.__qualname__}"
+        result["plugin_enabled"] = bool(
+            entry is not None
+            and entry.plugin_name == PLUGIN_NAME
+            and getattr(entry.adapter_factory, "__name__", "") == "FeishuStreamingAdapter"
+        )
+    return result
+
+
+def manager_command(*args: str) -> int:
+    return subprocess.call([sys.executable, "-m", "hermes_cli.main", "plugins", *args])
 
 
 def main() -> int:
-    args = sys.argv[1:]
-    if not args:
-        _print_usage()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "command", choices=("verify", "status", "install", "uninstall", "legacy-clean", "migrate-config")
+    )
+    parser.add_argument("--apply", action="store_true", help="Apply the displayed configuration migration")
+    args = parser.parse_args()
+    if args.command == "migrate-config":
+        from hermes_cli.config import read_raw_config, save_config  # type: ignore[import-not-found]
+
+        from .migration import prepare_config
+
+        updated, changes = prepare_config(read_raw_config())
+        print(json.dumps(changes, indent=2, ensure_ascii=False))
+        if args.apply and changes:
+            save_config(updated, strip_defaults=False)
         return 0
+    if args.command == "legacy-clean":
+        from .legacy_cli import _cmd_uninstall
 
-    cmd = args[0]
-    commands = _commands()
-    handler = commands.get(cmd)
-    if handler is not None:
-        return handler()
-
-    print(f"Unknown command: {cmd}")
-    _print_usage()
-    return 1
-
-
-def _commands() -> dict[str, Callable[[], int]]:
-    return {
-        "install": _cmd_install,
-        "uninstall": _cmd_uninstall,
-        "restore": _cmd_restore,
-        "status": _cmd_status,
-        "verify": _cmd_verify,
-    }
-
-
-def _print_usage() -> None:
-    print("Usage: python -m hermes_lark_streaming <command>")
-    print()
-    print("Commands:")
-    print("  install    Apply AST hooks to Hermes gateway, Feishu adapter, and cron modules")
-    print("  uninstall  Remove AST patch")
-    print("  restore    Restore from backup")
-    print("  status     Show current patch status")
-    print("  verify     Verify compatibility without patching")
-
-
-def _get_patcher() -> Patcher | None:
-    from .patcher import Patcher, PatcherError
-
-    try:
-        return Patcher()
-    except PatcherError as e:
-        print(f"Error: {e}")
-        return None
-
-
-def _get_cron_patcher() -> CronPatcher | None:
-    from .patcher import CronPatcher, PatcherError
-
-    try:
-        return CronPatcher()
-    except PatcherError as e:
-        print(f"Error: {e}")
-        return None
-
-
-def _get_feishu_patcher() -> FeishuAdapterPatcher | None:
-    from .patcher import FeishuAdapterPatcher, PatcherError
-
-    try:
-        return FeishuAdapterPatcher()
-    except PatcherError as e:
-        print(f"Error: {e}")
-        return None
-
-
-def _cmd_install() -> int:
-    patcher = _get_patcher()
-    feishu_patcher = _get_feishu_patcher()
-    if patcher is None or feishu_patcher is None:
-        return 1
-
-    from .patcher import install_patchers
-
-    patchers: list[Patcher | CronPatcher | FeishuAdapterPatcher] = [patcher, feishu_patcher]
-    cron_patcher = _get_cron_patcher()
-    if cron_patcher is None:
-        return 1
-    patchers.append(cron_patcher)
-    print("Verifying and preparing all gateway/cron hooks before writing...")
-    try:
-        install_patchers(patchers)
-    except Exception as e:
-        print(f"Patch failed: {e}")
-        return 1
-    print("Hooks installed. Restart Hermes Gateway to load the changes.")
-    return 0
-
-
-def _cmd_uninstall() -> int:
-    patcher = _get_patcher()
-    if patcher is None:
-        return 1
-
-    feishu_patcher = _get_feishu_patcher()
-    if feishu_patcher is None:
-        return 1
-    from .patcher import _write_changes
-
-    print("Removing patch...")
-    try:
-        changes = patcher.prepare_remove()
-        changes.update(feishu_patcher.prepare_remove())
-        cron_patcher = _get_cron_patcher()
-        if cron_patcher is not None:
-            changes.update(cron_patcher.prepare_remove())
-        _write_changes(changes)
-    except Exception as e:
-        print(f"Remove failed: {e}")
-        return 1
-    print("Patch removed.")
-    return 0
-
-
-def _cmd_restore() -> int:
-    patcher = _get_patcher()
-    if patcher is None:
-        return 1
-
-    from .patcher import _BACKUP_SUFFIX, _write_changes
-
-    print("Restoring from backup...")
-    try:
-        changes = patcher.prepare_restore()
-        feishu_patcher = _get_feishu_patcher()
-        if feishu_patcher is not None:
-            adapter_backup = feishu_patcher.adapter_path.with_suffix(
-                feishu_patcher.adapter_path.suffix + _BACKUP_SUFFIX
-            )
-            if adapter_backup.exists() or feishu_patcher.is_patched():
-                changes.update(feishu_patcher.prepare_restore())
-        cron_patcher = _get_cron_patcher()
-        if cron_patcher is not None:
-            backup = cron_patcher.cron_path.with_suffix(cron_patcher.cron_path.suffix + _BACKUP_SUFFIX)
-            if backup.exists() or cron_patcher.is_patched():
-                changes.update(cron_patcher.prepare_restore())
-        _write_changes(changes)
-    except Exception as e:
-        print(f"Restore failed: {e}")
-        return 1
-    print("Restored.")
-    return 0
-
-
-def _cmd_status() -> int:
-    patcher = _get_patcher()
-    if patcher is None:
-        return 1
-
-    patched = patcher.is_patched()
-    print(f"Patched: {'yes' if patched else 'no'}")
-    print(f"Target:  {patcher.run_path}")
-    print(f"Layout:  {'split gateway modules' if patcher.split else 'monolithic gateway'}")
-
-    if patched:
-        print(f"Fully patched: {'yes' if patcher.is_fully_patched() else 'no'}")
-    for path in patcher.target_paths:
-        if not path.exists():
-            print(f"  {path.name}: MISSING FILE")
-            continue
-        content = path.read_text(encoding="utf-8")
-        labels = [
-            begin.replace("# HERMES_LARK_", "").replace("_BEGIN", "").lower()
-            for begin, _end in patcher.MARKERS if begin in content
-        ]
-        print(f"  {path.name}: {', '.join(labels) if labels else 'no hooks'}")
-
-    cron_patcher = _get_cron_patcher()
-    if cron_patcher is not None:
-        print(f"Cron hook: {'installed' if cron_patcher.is_patched() else 'not installed'}")
-        print(f"Cron target: {cron_patcher.cron_path}")
-        if cron_patcher.is_patched():
-            print(f"Cron fully patched: {'yes' if cron_patcher.is_fully_patched() else 'no'}")
-
-    feishu_patcher = _get_feishu_patcher()
-    if feishu_patcher is not None:
-        print(
-            "Feishu approval hooks: "
-            f"{'installed' if feishu_patcher.is_fully_patched() else 'not installed'}"
-        )
-
-    # Check config
-    from .config import Config
-
-    cfg = Config()
-    print(f"Config streaming.enabled: {cfg.enabled}")
-    print(f"Feishu credentials: {'configured' if (cfg.env_app_id or cfg.feishu_app_id) else 'MISSING'}")
-
-    # Python interpreter check
-    from .patcher import hermes_install_dir, hermes_python
-
-    expected_py = hermes_python()
-    if expected_py is not None:
-        print(f"Hermes Python: {expected_py}")
-        current = Path(sys.executable).resolve()
-        if current != expected_py.resolve():
-            print(f"  warning: running under {current}, but Hermes uses {expected_py}")
-            print(f"  rerun commands with: {expected_py} -m hermes_lark_streaming ...")
-
-    install_dir = hermes_install_dir()
-    if install_dir is not None:
-        print(f"Hermes install dir: {install_dir}")
-    return 0
-
-
-def _cmd_verify() -> int:
-    patcher = _get_patcher()
-    if patcher is None:
-        return 1
-
-    print(f"Target: {patcher.run_path}")
-    if patcher.split:
-        print("Layout: split gateway modules")
-        for path in patcher.target_paths[1:]:
+        return _cmd_uninstall()
+    if args.command in {"verify", "status"}:
+        report = native_status()
+        print(f"Native interfaces: {'compatible' if report['compatible'] else 'unavailable'}")
+        if report.get("error"):
+            print(report["error"])
+        print(f"Host: {report.get('host', 'not installed')}")
+        print(f"Legacy injection files: {len(report.get('legacy_injections', []))}")
+        for path in report.get("legacy_injections", []):
             print(f"  {path}")
-    print("Checking compatibility...")
-    try:
-        patcher.verify_target()
-    except Exception as e:
-        print(f"Incompatible: {e}")
-        return 1
-    print("Compatible.")
+        if report.get("missing_hooks"):
+            print("Missing hooks: " + ", ".join(report["missing_hooks"]))
+        print(f"Adapter: {report.get('registered_adapter') or 'not loaded'}")
+        print(f"Plugin enabled: {report.get('plugin_enabled', False)}")
+        print(f"Running adapter: {report.get('running_adapter') or 'not reported by a live gateway'}")
+        return 0 if report["compatible"] else 1
+    if args.command == "uninstall":
+        return manager_command("remove", PLUGIN_NAME)
+    from .native_plugin import check_host
 
-    feishu_patcher = _get_feishu_patcher()
-    if feishu_patcher is None:
+    check_host()
+    source = Path(__file__).resolve().parent.parent
+    dirty = subprocess.check_output(["git", "-C", str(source), "status", "--porcelain"], text=True)
+    if dirty.strip():
+        print("Commit the reviewed local plugin changes before installing, so the manager installs that exact tree.")
         return 1
-    print(f"Feishu target: {feishu_patcher.adapter_path}")
-    try:
-        feishu_patcher.verify_target()
-    except Exception as e:
-        print(f"Feishu incompatible: {e}")
-        return 1
-    print("Feishu approval target compatible.")
-
-    cron_patcher = _get_cron_patcher()
-    if cron_patcher is None:
-        return 1
-    if cron_patcher is not None:
-        print(f"Cron target: {cron_patcher.cron_path}")
-        try:
-            cron_patcher.verify_target()
-        except Exception as e:
-            print(f"Cron incompatible: {e}")
-            return 1
-        print("Cron target compatible.")
-
-    return 0
+    return manager_command("install", source.as_uri(), "--enable", "--yes-deps")
 
 
 if __name__ == "__main__":

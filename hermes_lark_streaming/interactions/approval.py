@@ -115,6 +115,8 @@ def handle_approval_action(
     choice: str,
     open_id: str,
     callback_chat_id: str,
+    operator_authorized: bool = False,
+    request_actor: str | None = None,
 ) -> ApprovalActionResult | None:
     """Resolve one real Feishu action through Hermes' official approval API.
 
@@ -152,7 +154,7 @@ def handle_approval_action(
     # uses after its group-policy check. Keep that check rather than inventing
     # a stricter or weaker owner model in the plugin.
     authorize = getattr(adapter, "_is_interactive_operator_authorized", None)
-    if not callable(authorize) or not authorize(open_id):
+    if not operator_authorized and (not callable(authorize) or not authorize(open_id)):
         _logger.warning("rejecting Feishu approval action from wrong user id=%s", approval_id)
         return ApprovalActionResult()
 
@@ -181,7 +183,15 @@ def handle_approval_action(
         # This is Hermes' canonical FIFO resolver. It sets the original
         # _ApprovalEntry Event; the blocked tool thread then applies session /
         # permanent scope exactly as the backend defines it.
-        count = resolve_gateway_approval(state.session_key, choice)
+        if request_actor is not None:
+            from tools.approval import resolve_gateway_approval_card  # type: ignore[import-not-found]
+
+            count = resolve_gateway_approval_card(
+                state.session_key, choice, native_state.get("request_id"),
+                actor_id=request_actor, extra=adapter.config.extra,
+            )
+        else:
+            count = resolve_gateway_approval(state.session_key, choice)
     except Exception:
         registry.release(adapter_key, approval_id)
         raise

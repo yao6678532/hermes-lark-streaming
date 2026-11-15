@@ -14,7 +14,7 @@ import pytest
 from hermes_sources import MODULAR_REVISION, TARGET_REVISION, TRANSITION_REVISION, source_at
 from test_split_gateway import context, method
 
-from hermes_lark_streaming import __main__ as cli
+from hermes_lark_streaming import legacy_cli as cli
 from hermes_lark_streaming.compatibility import SourceResolver
 from hermes_lark_streaming.patcher import (
     CronPatcher,

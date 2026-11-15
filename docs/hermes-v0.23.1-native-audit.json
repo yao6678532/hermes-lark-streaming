@@ -1,0 +1,38 @@
+{
+  "hermes_release": "v0.23.1",
+  "hermes_revision": "3b421578588243f920886e6fe79a6faa87ea026e",
+  "python": "3.14.9",
+  "host_sources_unchanged": true,
+  "host_source_sha256": {
+    "gateway/run_turn_runner.py": "76a97f48cc5f769c84991644957e0e9d64c4be60dbd0774ec7457e740da253fb",
+    "gateway/run_turn_progress.py": "4d27c4cf2a59e8e7391c7a686763bfdc9dd7b940fde60512ce033de08c6e4302",
+    "gateway/run_agent_cache.py": "dc849e24047f906ae5457ef403cd7ec520f9483b1f6949f21a1ead94ce91193e",
+    "agent/background_review.py": "76a3c5e4a30c5c5e069f57085b20953dff3f2c1ee8b826fe29c4e2dd1e39919b",
+    "agent/plugin_stream_hooks.py": "f952cdc5b70376cfcb3de13b5f1ef508cd9ff29d8525bf1a14e6fa0bff8b3f5c",
+    "agent/inline_tool_executors.py": "b6ffcad0008c9152e2c8af75eaeaf94c94cc6582231832600ab6f92ccdee1c9b",
+    "agent/turn_context.py": "541d76f7f9b9a8b0e75c274f018b5c3a6b9416a15cfc4e63782f66751b8c1f80",
+    "gateway/session_context.py": "e751b0253af258d4667131342737f588d1bf27578c9f3487f2cd3887d6a7e74a",
+    "hermes_cli/plugins.py": "fae87bc56c6ca7470e838577272353d0e4d5a6876f6c7f0bc9bdae3f48af7afe",
+    "hermes_cli/plugins_dispatch.py": "33d01cbb167c1a08fcca9dba0d867f92062bc790b7a0b7957fa9f03dafcd091e",
+    "tools/skill_provenance.py": "5c492a925cdde61c3257eb5db76568822d26be3d9a2c40d364a9997a3a7cb576",
+    "tools/memory_tool.py": "00c86420cb4d824dbfe2806b1f748a1fc182b8c11ea2f902e8b77d3d035624dd",
+    "tools/skill_manager_tool.py": "67df9575e2c22f7ac269e01404a2d6df6a5070d3633288dd00b479405c5bb853"
+  },
+  "network_calls": 0,
+  "status": "blocked",
+  "background_review": {
+    "native_current_generation_deliveries": 1,
+    "native_late_summary_deliveries": 0,
+    "legacy_late_summary_deliveries": 1,
+    "summary_plugin_hooks_fired": [],
+    "preserved": false
+  },
+  "stream_observers": {
+    "emitted_and_direct_callback_received": 1033,
+    "official_observer_received": 1025,
+    "dropped": 8,
+    "queue_capacity": 1024,
+    "assessment": "risk; final reconciliation needs independent authoritative snapshots"
+  },
+  "coroutine_lifecycle_warnings": []
+}

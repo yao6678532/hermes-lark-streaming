@@ -15,7 +15,7 @@ from hermes_sources import (
     source_at,
 )
 
-from hermes_lark_streaming import __main__ as cli
+from hermes_lark_streaming import legacy_cli as cli
 from hermes_lark_streaming import patcher as patcher_module
 from hermes_lark_streaming.patcher import (
     CronPatcher,

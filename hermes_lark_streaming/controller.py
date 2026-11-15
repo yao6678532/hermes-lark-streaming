@@ -186,6 +186,7 @@ class StreamCardController(StreamingController):
         self._session_keys: dict[str, CardSession] = {}
         self._interrupt_map: dict[str, str] = {}
         self._initialized = False
+        self._transport_configured = False
         self._init_lock = threading.Lock()
         self._session_ttl = self._cfg.card_duration_sec
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -202,7 +203,9 @@ class StreamCardController(StreamingController):
         if unscoped and self._unscoped_enabled is not None:
             return self._unscoped_enabled
         with self._credential_scope():
-            enabled = self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+            enabled = self._cfg.enabled and bool(
+                self._transport_configured or self._cfg.feishu_app_id or self._cfg.env_app_id
+            )
         if unscoped and enabled:
             self._unscoped_enabled = True
         return enabled
@@ -268,7 +271,9 @@ class StreamCardController(StreamingController):
     def agent_status_enabled_for(self, profile_home: Path | str | None) -> bool:
         """Check late-status eligibility under its captured credential scope."""
         with self._credential_scope_for(profile_home):
-            return self._cfg.enabled and bool(self._cfg.feishu_app_id or self._cfg.env_app_id)
+            return self._cfg.enabled and bool(
+                self._transport_configured or self._cfg.feishu_app_id or self._cfg.env_app_id
+            )
 
     async def _agent_status_client_for(self, profile_home: Path | str | None) -> FeishuClient:
         """Return transport credentials without changing status-state ownership.
@@ -1020,7 +1025,7 @@ class StreamCardController(StreamingController):
         event: AgentStatusEvent,
         chat_id: str,
         credential_profile_home: Path | str | None = None,
-    ) -> None:
+    ) -> bool:
         """Update the latest card, falling back to a run-independent text send."""
         with self._credential_scope_for(credential_profile_home):
             client = await self._agent_status_client_for(credential_profile_home)
@@ -1113,7 +1118,7 @@ class StreamCardController(StreamingController):
                         event.conversation_key,
                         event.source,
                     )
-                    return
+                    return True
                 except Exception:
                     _logger.warning(
                         "[AgentStatus] conversation=%s source=%s delivery_result=card_update_failed "
@@ -1130,6 +1135,7 @@ class StreamCardController(StreamingController):
                         event.conversation_key,
                         event.source,
                     )
+                    return True
                 except Exception:
                     _logger.warning(
                         "[AgentStatus] conversation=%s source=%s delivery_result=fallback_failed",
@@ -1137,6 +1143,7 @@ class StreamCardController(StreamingController):
                         event.source,
                         exc_info=True,
                     )
+                    return False
 
     def defer_background_review(
         self,

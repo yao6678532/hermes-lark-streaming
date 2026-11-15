@@ -43,7 +43,7 @@
 
 ## 运行要求
 
-- Hermes `>= 0.14.0`（2026.5.16）已安装并配置飞书平台
+- Hermes `>= 0.23.1`，本次固定验收 v0.23.1 / `3b421578`，已配置飞书平台
 - `Python >= 3.11`
 - `lark-oapi >= 1.4.0` — 飞书/Lark 官方 Python SDK
 - `PyYAML >= 6.0` — YAML 解析库
@@ -55,13 +55,16 @@
 
 完整安装步骤见 [INSTALL.md](INSTALL.md)。
 
-### AI Agent 安装
+### 原生插件安装
 
-让 Hermes 对接的 AI agent 读取安装指南后自动执行：
+使用官方插件管理器安装已审阅、已提交的本地项目：
 
+```bash
+hermes plugins install file:///absolute/path/hermes-lark-streaming --enable --yes-deps
 ```
-curl https://raw.githubusercontent.com/Cheerwhy/hermes-lark-streaming/main/INSTALL.md
-```
+
+旧版注入安装先按 [INSTALL.md](INSTALL.md) 清理本插件标记并备份回滚环境。
+此分支仍保留旧清理器和回归样本，运行时通过官方平台注册，不再修改 Hermes 源码。
 
 ---
 
@@ -124,45 +127,28 @@ display:
 
 ## CLI 命令
 
-```bash
-HERMES_PYTHON=~/.hermes/hermes-agent/venv/bin/python3
-$HERMES_PYTHON -m hermes_lark_streaming verify     # 验证兼容性（不修改文件）
-$HERMES_PYTHON -m hermes_lark_streaming install    # 注入 hook
-$HERMES_PYTHON -m hermes_lark_streaming uninstall  # 移除 hook
-$HERMES_PYTHON -m hermes_lark_streaming restore    # 从备份恢复原始文件
-$HERMES_PYTHON -m hermes_lark_streaming status     # 查看状态（含 Hermes Python/安装目录检测）
-```
-
----
-
-## 更新
+`HERMES_PYTHON` 指向实际运行 Hermes 的 PM 环境 Python：
 
 ```bash
-cd hermes-lark-streaming
-git pull
-HERMES_PYTHON=~/.hermes/hermes-agent/venv/bin/python3
-$HERMES_PYTHON -m pip install -e .
-$HERMES_PYTHON -m hermes_lark_streaming uninstall   # 先移除旧注入
 $HERMES_PYTHON -m hermes_lark_streaming verify
-$HERMES_PYTHON -m hermes_lark_streaming install
-hermes gateway restart
+$HERMES_PYTHON -m hermes_lark_streaming status
+$HERMES_PYTHON -m hermes_lark_streaming migrate-config        # 查看配置差异
+$HERMES_PYTHON -m hermes_lark_streaming migrate-config --apply
+hermes plugins disable hermes-lark-streaming
+hermes plugins remove hermes-lark-streaming
 ```
 
----
-
-## 卸载
-
-```bash
-HERMES_PYTHON=~/.hermes/hermes-agent/venv/bin/python3
-$HERMES_PYTHON -m hermes_lark_streaming uninstall
-$HERMES_PYTHON -m pip uninstall hermes-lark-streaming
-```
+安装、更新和卸载由官方插件管理器处理；`legacy-clean` 仅用于删除旧版注入标记。
+完整迁移证据见 [原生兼容性验收](docs/hermes-v0.23.1-native-compatibility.md)。
 
 ---
 
 ## 工作原理
 
-插件通过 AST 注入在 `gateway/run.py` 和 `cron/scheduler.py` 插入 hook 调用，所有业务逻辑在 `hermes_lark_streaming` 包内完成。
+`register(ctx)` 注册继承内置 `FeishuAdapter` 的适配器。官方流式快照与最终结果驱动正文，
+工具、推理、usage、交互及停止事件映射到原有控制器。继续沿用现有卡片构建与状态管理。
+后台复盘以官方工具回执保存实际变更，调用宿主汇总函数，将跨轮结果合并更新到最新卡底。
+投递确认后才清除待处理结果，支持失败重试与重启恢复。
 
 **消息处理流程：**
 
@@ -190,8 +176,8 @@ $HERMES_PYTHON -m pip uninstall hermes-lark-streaming
 
 ## 注意事项
 
-- `install` 会修改 `~/.hermes/hermes-agent/gateway/run.py` 和 `cron/scheduler.py`，自动创建 `.hermes_lark.bak` 备份
-- Hermes 更新后需重新运行 `verify` + `install`
+- 原生运行时不修改 Hermes 源码；旧注入残留会阻止加载
+- Hermes 更新前需通过固定版本的真实宿主契约与全量回归
 - 插件与 Hermes 内置飞书适配器互补工作：插件负责流式卡片，内置适配器负责消息收发
 - 仅对飞书平台生效，其他平台不受影响
 

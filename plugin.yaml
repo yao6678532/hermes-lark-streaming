@@ -1,0 +1,17 @@
+name: hermes-lark-streaming
+label: Feishu streaming cards
+kind: standalone
+version: 0.12.0
+description: Native Feishu adapter with the existing Hermes Lark streaming card design.
+requires_hermes: ">=0.23.1"
+provides_hooks:
+  - on_session_start
+  - pre_api_request
+  - on_stream_delta
+  - pre_tool_call
+  - post_tool_call
+  - post_api_request
+  - on_session_end
+  - on_human_input_request
+  - on_human_input_resolved
+  - agent_loop_stopped

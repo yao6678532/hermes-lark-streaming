@@ -1,3 +1,8 @@
+> This branch uses the native Hermes platform API (tested v0.23.1, `3b421578`).
+> The legacy AST installation instructions below are historical. Follow
+> [INSTALL.md](INSTALL.md) for current plugin-manager installation and migration;
+> do not inject hooks into a new Hermes installation.
+
 # Hermes Lark Streaming
 
 [![PyPI](https://img.shields.io/badge/python-%E2%89%A53.11-blue)](https://www.python.org/)
