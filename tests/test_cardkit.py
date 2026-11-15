@@ -1403,7 +1403,7 @@ class TestBuildFooterElements:
         expected_en: str,
         expected_zh: str,
     ) -> None:
-        local_now = datetime.now().astimezone().replace(second=0, microsecond=0)
+        local_now = datetime.now().astimezone().replace(hour=12, minute=0, second=0, microsecond=0)
         reset_at = local_now + offset
         en, zh = _format_quota_reset_label(reset_at, now=local_now)
         assert (en, zh) == (expected_en, expected_zh)
