@@ -9,6 +9,7 @@ Exit 2 means a preservation gate failed; it is not a successful upgrade check.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import gc
 import hashlib
@@ -172,6 +173,28 @@ def stream_observer_probe() -> dict[str, Any]:
     }
 
 
+def prepare_legacy_fixture(source: Path, destination: Path) -> None:
+    """Copy every pre-fetched historical object, including from a shallow CI checkout."""
+    constants = Path(__file__).resolve().parent.parent / "tests/hermes_sources.py"
+    revisions = [
+        ast.literal_eval(node.value)
+        for node in ast.parse(constants.read_text()).body
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id.endswith("_REVISION") for target in node.targets)
+    ]
+    commands = [
+        ["git", "clone", "--shared", "--no-checkout", str(source), str(destination)],
+        # Git ignores --shared for a shallow source and transfers only advertised
+        # refs. FETCH_HEAD-only fixtures need an explicit *local* object fetch.
+        ["git", "-C", str(destination), "fetch", "--no-tags", "--depth=1", str(source), *revisions],
+        ["git", "-C", str(destination), "checkout", "--detach", "71d34bad1045610252eda02ee79549436896e784"],
+    ]
+    for command in commands:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode:
+            raise RuntimeError(f"Historical fixture preparation failed: {result.stderr[-3000:]}")
+
+
 def worker(source: Path, probe: str = "baseline", expected_revision: str = TARGET_REVISION) -> dict[str, Any]:
     import socket
 
@@ -189,14 +212,7 @@ def worker(source: Path, probe: str = "baseline", expected_revision: str = TARGE
 
             fixture_source = os.environ["HLS_AUDIT_FIXTURE_SOURCE"]
             fixture_root = Path(os.environ["HERMES_HOME"]) / "hermes-agent"
-            subprocess.run(
-                ["git", "clone", "--shared", "--no-checkout", fixture_source, str(fixture_root)],
-                check=True, capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", str(fixture_root), "checkout", "--detach",
-                 "71d34bad1045610252eda02ee79549436896e784"], check=True, capture_output=True,
-            )
+            prepare_legacy_fixture(Path(fixture_source), fixture_root)
             results: dict[str, Any] = {}
 
             class Collect:
